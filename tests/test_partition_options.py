@@ -115,7 +115,7 @@ def test_drive_number_from_path_rejects_non_physical():
 def _write_iso(tmp_path, name="hybrid.iso", *, marker=True, partitions=True,
                sig=True):
     path = tmp_path / name
-    blob = bytearray(2048 * 17)
+    blob = bytearray(2048 * 18)
     if marker:
         blob[32769:32774] = b"CD001"
     if sig:

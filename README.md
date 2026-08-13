@@ -38,6 +38,13 @@ Expert options (partition & boot)
   ISOs (ISO9660 + bootable MBR), which are always written raw so their boot record
   survives. Verification is skipped after file-copy writes because the drive is
   not byte-identical to the image.
+- Hybrid detection is a fast in-process heuristic on the first 36 KiB (no
+  external tools such as `isoinfo`/`7z` required): it checks the ISO9660 marker,
+  the MBR boot signature, a non-empty MBR partition table and/or the syslinux
+  `ISOHYBRID` marker, and corroborates with the El Torito boot record. When a
+  hybrid ISO is loaded, file-copy and partition options are disabled and a
+  "Hybrid ISO detected — raw write recommended" tooltip is shown; when unsure,
+  raw (DD) remains the default.
 - Expert choices persist in `%APPDATA%\Flint\settings.json`.
 
 Expert options (persistence & Windows To Go)

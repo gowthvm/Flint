@@ -103,27 +103,32 @@ class IsoWorker(QThread):
 
 
 class IsoDetectWorker(QThread):
-    detected = pyqtSignal(str, bool, bool)  # path, is_linux, is_windows
+    detected = pyqtSignal(str, bool, bool, bool)  # path, is_linux, is_windows, is_hybrid
 
     def __init__(self, path: str) -> None:
         super().__init__()
         self._path = path
 
     def run(self) -> None:
-        from core.iso import detect_linux_iso, detect_windows_iso
+        from core.iso import (
+            detect_linux_iso,
+            detect_windows_iso,
+            is_hybrid_iso,
+        )
 
         try:
             linux = detect_linux_iso(self._path)
             windows = detect_windows_iso(self._path)
-            self.detected.emit(self._path, linux, windows)
+            hybrid = is_hybrid_iso(self._path)
+            self.detected.emit(self._path, linux, windows, hybrid)
         except Exception:
             logger.exception("IsoDetectWorker.run failed")
-            self.detected.emit(self._path, False, False)
+            self.detected.emit(self._path, False, False, False)
 
 
 class IsoDropZone(QFrame):
     iso_selected = pyqtSignal(str)
-    iso_analysis = pyqtSignal(str, bool, bool)  # path, is_linux, is_windows
+    iso_analysis = pyqtSignal(str, bool, bool, bool)  # path, linux, windows, hybrid
 
     def __init__(self) -> None:
         super().__init__()
@@ -304,7 +309,7 @@ class IsoDropZone(QFrame):
         self._digest = None
         self._hash_finished = False
         self._path = None
-        self.iso_analysis.emit("", False, False)
+        self.iso_analysis.emit("", False, False, False)
         self._drop_error.setVisible(False)
         self._drop_timer.stop()
         self._loaded.setVisible(False)
@@ -349,10 +354,12 @@ class IsoDropZone(QFrame):
         analyzer.detected.connect(self._on_analysis)
         analyzer.start()
 
-    def _on_analysis(self, path: str, is_linux: bool, is_windows: bool) -> None:
+    def _on_analysis(
+        self, path: str, is_linux: bool, is_windows: bool, is_hybrid: bool
+    ) -> None:
         if path != self._path:
             return
-        self.iso_analysis.emit(path, is_linux, is_windows)
+        self.iso_analysis.emit(path, is_linux, is_windows, is_hybrid)
 
     def _on_hash_progress(self, percent: int) -> None:
         if self._path is None or self._hash_finished:
@@ -838,6 +845,7 @@ class MainWindow(QMainWindow):
         self._write_was_filecopy = False
         self._iso_linux = False
         self._iso_windows = False
+        self._iso_hybrid = False
         self._tray: QSystemTrayIcon | None = None
         self._tb = None
         self._tb_tried = False
@@ -2320,12 +2328,17 @@ class MainWindow(QMainWindow):
             self._persistence_toggle.setEnabled(True)
 
     def _on_iso_analysis(
-        self, path: str, is_linux: bool, is_windows: bool
+        self,
+        path: str,
+        is_linux: bool,
+        is_windows: bool,
+        is_hybrid: bool,
     ) -> None:
         if path and path != self._iso_zone.path:
             return
         self._iso_linux = is_linux
         self._iso_windows = is_windows
+        self._iso_hybrid = is_hybrid
         if not is_linux:
             self._persistence_toggle.setChecked(False)
         if not is_windows:
@@ -2335,12 +2348,38 @@ class MainWindow(QMainWindow):
 
     def _update_expert_visibility(self) -> None:
         expert = bool(settings.get("expert_mode"))
+        hybrid = bool(self._iso_hybrid)
         for widget in self._persistence_row_widgets:
             widget.setVisible(expert and self._iso_linux)
         self._persistence_toggle.setEnabled(
-            expert and self._iso_linux and not self._wtg_toggle.isChecked()
+            expert
+            and self._iso_linux
+            and not hybrid
+            and not self._wtg_toggle.isChecked()
         )
         self._wtg_toggle.setVisible(expert and self._iso_windows)
+        self._wtg_toggle.setEnabled(expert and not hybrid)
+        if hybrid:
+            self._persistence_toggle.setChecked(False)
+            self._wtg_toggle.setChecked(False)
+            self._mode_combo.setEnabled(False)
+            self._filesystem_combo.setEnabled(False)
+            self._partition_combo.setEnabled(False)
+            self._target_combo.setEnabled(False)
+            index = self._mode_combo.findData("dd")
+            if index >= 0:
+                self._mode_combo.setCurrentIndex(index)
+            self._mode_combo.setToolTip(
+                "Hybrid ISO detected \u2014 raw write recommended"
+            )
+        else:
+            self._mode_combo.setEnabled(expert)
+            self._filesystem_combo.setEnabled(
+                expert and not self._wtg_toggle.isChecked()
+            )
+            self._partition_combo.setEnabled(expert)
+            self._target_combo.setEnabled(expert)
+            self._mode_combo.setToolTip("")
 
     def _set_expert_mode(self, enabled: bool) -> None:
         settings.set_many(expert_mode=bool(enabled))
@@ -2350,6 +2389,13 @@ class MainWindow(QMainWindow):
         self._update_expert_hint()
 
     def _update_expert_hint(self) -> None:
+        if self._iso_hybrid:
+            self._raw_hint.setText(
+                "Hybrid ISO detected \u2014 the image carries a bootable "
+                "MBR, so it is always written raw (DD) to preserve the boot "
+                "record."
+            )
+            return
         mode = self._mode_combo.currentData()
         if mode == "filecopy" and self._wtg_toggle.isChecked():
             self._raw_hint.setText(
@@ -2480,6 +2526,11 @@ class MainWindow(QMainWindow):
             and self._persistence_toggle.isChecked()
         )
         mode = self._mode_combo.currentData() if expert else "auto"
+        if self._iso_hybrid and mode == "filecopy":
+            self._progress.set_error(
+                "Hybrid ISO detected \u2014 raw write required"
+            )
+            return
         if (persist or wtg) and mode != "filecopy":
             self._progress.set_error(
                 "Persistence / Windows To Go require File copy mode "
@@ -2510,7 +2561,12 @@ class MainWindow(QMainWindow):
             f"Erase {name} ({drive['letter']}:) and write {iso_name}?"
         )
         confirm_text = self._confirm_text(drive, iso)
-        if wtg:
+        if self._iso_hybrid:
+            confirm_text += (
+                "\n\nHybrid ISO: the image is written raw (DD) so its MBR "
+                "boot record is preserved."
+            )
+        elif wtg:
             confirm_text += (
                 "\n\nWindows To Go: the drive becomes a portable Windows "
                 "workspace (NTFS, bootable via dism/bcdboot)."

@@ -5,12 +5,16 @@ from typing import BinaryIO, TypedDict
 
 _SECTOR = 512
 _PVD_SECTOR_OFFSET = 32769  # ISO9660 primary volume descriptor (2048*16 + 1)
+_EL_TORITO_SECTOR_OFFSET = 17 * 2048  # boot record volume descriptor
 _ISO9660_MARKER = b"CD001"
+_EL_TORITO_STRING = b"EL TORITO"
+_ISOHYBRID_STRING = b"ISOHYBRID"
 _MBR_PARTITION_START = 446
 _MBR_PARTITION_END = 510
 _MBR_SIGNATURE_START = 510
 _MBR_SIGNATURE_END = 512
-_HEAD_SIZE = 2048 * 17  # covers the PVD plus the MBR region at offset 0
+# covers the MBR (0..512), the PVD (32769) and the El Torito boot record
+_HEAD_SIZE = 2048 * 18
 
 _LOGICAL_SECTOR = 2048  # ISO9660 logical sector size
 _PVD_ROOT_RECORD_OFFSET = 156
@@ -21,19 +25,47 @@ _SCAN_CHUNK = 4 * 1024 * 1024
 _WINDOWS_SCAN_CAP = 256 * 1024 * 1024  # UDF file identifiers live early
 
 
+def _scan_iso_head(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_HEAD_SIZE)
+    except OSError:
+        return None
+    if len(head) < _HEAD_SIZE:
+        return None
+    return head
+
+
+def has_el_torito(path: str) -> bool:
+    """True when the image carries an El Torito boot record descriptor.
+
+    El Torito alone does not make an image hybrid: plain CD images that boot
+    from optical media carry it too. It corroborates the hybrid heuristic.
+    """
+    head = _scan_iso_head(path)
+    if head is None:
+        return False
+    return _EL_TORITO_STRING in head[_EL_TORITO_SECTOR_OFFSET :]
+
+
 def is_hybrid_iso(path: str) -> bool:
     """True when the image is a hybrid ISO (ISO9660 + bootable MBR).
 
     Hybrid images boot both from CD/DVD (El Torito) and from USB (BIOS reads
     their MBR partition table). They must be written raw (DD): a file-by-file
     copy would lose the boot record.
+
+    Detection is an in-process fast heuristic on the first 36 KiB:
+    - the ISO9660 marker at the primary volume descriptor (32769),
+    - the MBR boot signature (55AA) at offset 510,
+    - a non-empty MBR partition table, and/or the syslinux ``ISOHYBRID``
+      marker written into the MBR boot code.
+    El Torito presence alone is not decisive (plain bootable CD images have
+    it too). When the image is unreadable or too small this returns False and
+    callers default to raw (DD), which is safe either way.
     """
-    try:
-        with open(path, "rb") as f:
-            head = f.read(_HEAD_SIZE)
-    except OSError:
-        return False
-    if len(head) < _HEAD_SIZE:
+    head = _scan_iso_head(path)
+    if head is None:
         return False
     if (
         head[_PVD_SECTOR_OFFSET : _PVD_SECTOR_OFFSET + 5]
@@ -46,10 +78,12 @@ def is_hybrid_iso(path: str) -> bool:
     ):
         return False
     table = head[_MBR_PARTITION_START : _MBR_PARTITION_END]
-    return any(
+    has_partition = any(
         entry != b"\x00" * 16
         for entry in (table[i : i + 16] for i in range(0, 64, 16))
     )
+    has_marker = _ISOHYBRID_STRING in head[:_MBR_PARTITION_START]
+    return has_partition or has_marker
 
 
 # ---------------------------------------------------------------------------

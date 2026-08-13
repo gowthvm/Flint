@@ -12,6 +12,16 @@ from core import iso as iso_mod
 logger = logging.getLogger("flint")
 
 
+def is_iso_hybrid(iso_path: str) -> bool:
+    """True when the image is a hybrid ISO (ISO9660 + bootable MBR).
+
+    Hybrid images must be written raw (DD): a file-by-file copy would lose
+    the boot record. Detection is a fast in-process heuristic, see
+    ``core.iso.is_hybrid_iso``.
+    """
+    return iso_mod.is_hybrid_iso(iso_path)
+
+
 class UsbWriter(QThread):
     progress = pyqtSignal(float)
     speed_mbps = pyqtSignal(float)
