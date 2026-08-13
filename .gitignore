@@ -51,3 +51,6 @@ temp/
 
 # Wheels
 *.whl
+
+# Local CI / artifacts folder (do not commit built EXEs)
+flint-dist/
