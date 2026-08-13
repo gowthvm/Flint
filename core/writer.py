@@ -1,10 +1,12 @@
 import ctypes
+import logging
 import os
 import time
 from collections import deque
 
 from PyQt6.QtCore import QThread, pyqtSignal
-import logging
+
+from core import diskpart
 
 logger = logging.getLogger("flint")
 
@@ -16,6 +18,7 @@ class UsbWriter(QThread):
     total_bytes = pyqtSignal(int)
     eta_seconds = pyqtSignal(int)
     phase = pyqtSignal(str)
+    mode = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
     CHUNK_SIZE = 4 * 1024 * 1024
@@ -40,11 +43,19 @@ class UsbWriter(QThread):
         iso_path: str,
         drive_path: str,
         letters: list[str] | None = None,
+        partition_scheme: str = "auto",
+        target_system: str = "auto",
+        filesystem: str = "fat32",
+        write_mode: str = "auto",
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
         self.drive_path = drive_path
         self.letters = letters or []
+        self.partition_scheme = partition_scheme
+        self.target_system = target_system
+        self.filesystem = filesystem
+        self.write_mode = write_mode
         self._canceled = False
 
     def cancel(self) -> None:
@@ -173,6 +184,13 @@ class UsbWriter(QThread):
             | self._ES_DISPLAY_REQUIRED
         )
         try:
+            mode = diskpart.resolve_write_mode(
+                self.write_mode, self.iso_path
+            )
+            self.mode.emit(mode)
+            if mode == "filecopy":
+                self._run_filecopy()
+                return
             self.phase.emit("Locking drive")
             volumes = self._lock_volumes()
             try:
@@ -185,6 +203,20 @@ class UsbWriter(QThread):
             self.finished.emit(False, str(exc))
         finally:
             kernel32.SetThreadExecutionState(self._ES_CONTINUOUS)
+
+    def _run_filecopy(self) -> None:
+        """Repartition the drive, format it, then copy ISO contents."""
+        self.phase.emit("Preparing partition")
+        letter = diskpart.prepare_partition(
+            diskpart.drive_number_from_path(self.drive_path),
+            self.partition_scheme,
+            self.filesystem,
+        )
+        self.progress.emit(10.0)
+        self.phase.emit("Copying files")
+        diskpart.copy_iso_files(self.iso_path, letter)
+        self.progress.emit(100.0)
+        self.finished.emit(True, "")
 
     def _run_inner(self) -> None:
         try:
@@ -205,7 +237,6 @@ class UsbWriter(QThread):
         except Exception as exc:
             logger.exception("UsbWriter._run_inner: setup failed")
             self.finished.emit(False, str(exc))
-            return
             return
 
         self.total_bytes.emit(total)

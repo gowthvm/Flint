@@ -200,6 +200,50 @@ QPushButton#ghost:hover {
     color: @text;
 }
 
+QComboBox {
+    background: @track;
+    border: 1px solid @border;
+    border-radius: $radius_md;
+    color: @text;
+    font-size: $font_base;
+    padding: 4px 10px;
+    min-height: 22px;
+}
+
+QComboBox:hover {
+    border-color: @faded;
+}
+
+QComboBox:focus {
+    border: 1px solid @muted;
+}
+
+QComboBox:disabled {
+    color: @faded;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QComboBox::down-arrow {
+    image: none;
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-top: 5px solid @muted;
+    margin-right: 6px;
+}
+
+QComboBox QAbstractItemView {
+    background: @card;
+    border: 1px solid @border;
+    color: @text;
+    selection-background-color: @track;
+    selection-color: @text;
+    outline: 0;
+}
+
 QListWidget {
     background: transparent;
     border: none;

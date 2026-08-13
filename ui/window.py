@@ -1,11 +1,10 @@
 import ctypes
-from ctypes import wintypes
 import hashlib
+import logging
 import os
 import shutil
 import sys
 import time
-import logging
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -30,17 +29,18 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -48,11 +48,8 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
-    QCheckBox,
     QWidget,
 )
-
-from ui import style as style
 
 from core import settings
 from core.bootcheck import probe_bootability
@@ -69,6 +66,7 @@ from core.history import (
 from core.verify import VerifyWorker
 from core.wipe import WipeWorker
 from core.writer import UsbWriter
+from ui import style
 
 logger = logging.getLogger("flint")
 
@@ -98,7 +96,7 @@ class IsoWorker(QThread):
                         )
             if not self.isInterruptionRequested():
                 self.hash_done.emit(self._path, True, digest.hexdigest())
-        except Exception as exc:
+        except Exception:
             logger.exception("IsoWorker.run failed")
             if not self.isInterruptionRequested():
                 self.hash_done.emit(self._path, False, "")
@@ -798,6 +796,7 @@ class MainWindow(QMainWindow):
         self._controls: list[QWidget] = []
         self._writing = False
         self._write_started = 0.0
+        self._write_was_filecopy = False
         self._tray: QSystemTrayIcon | None = None
         self._tb = None
         self._tb_tried = False
@@ -824,6 +823,11 @@ class MainWindow(QMainWindow):
             self._cancel_btn,
             self._refresh_btn,
             self._dots_btn,
+            self._expert_toggle,
+            self._partition_combo,
+            self._target_combo,
+            self._filesystem_combo,
+            self._mode_combo,
         ]
 
         # Keep primary action states in sync with selections and busy state
@@ -1119,7 +1123,7 @@ class MainWindow(QMainWindow):
     def _is_elevated() -> bool:
         try:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
-        except Exception as exc:
+        except Exception:
             logger.exception("_is_elevated check failed")
             return False
 
@@ -1159,7 +1163,7 @@ class MainWindow(QMainWindow):
             result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", cmd, args, None, 5
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("ShellExecuteW failed during relaunch")
             result = 0
         if result <= 32:
@@ -1332,6 +1336,11 @@ class MainWindow(QMainWindow):
         dark.setChecked(theme == "dark")
         dark.triggered.connect(lambda: self._set_theme("dark"))
         menu.addSeparator()
+        expert = menu.addAction("Expert mode")
+        expert.setCheckable(True)
+        expert.setChecked(bool(settings.get("expert_mode")))
+        expert.triggered.connect(self._set_expert_mode)
+        menu.addSeparator()
         menu.addAction("Reset window size").triggered.connect(
             lambda: self.resize(900, 580)
         )
@@ -1423,7 +1432,7 @@ class MainWindow(QMainWindow):
             prompt.exec()
             if prompt.clickedButton() is not replace:
                 return
-        ok, count = import_history(source)
+        ok, _count = import_history(source)
         if ok:
             self._reload_history()
             self._show_from_tray()
@@ -1764,7 +1773,7 @@ class MainWindow(QMainWindow):
             )(vtbl[3])
             hrinit(ptr)
             self._tb = (ptr, vtbl)
-        except Exception as exc:
+        except Exception:
             logger.exception("_init_taskbar failed to initialize COM taskbar integration")
             self._tb = None
 
@@ -2032,6 +2041,7 @@ class MainWindow(QMainWindow):
         )
         hint.setObjectName("capLabel")
         hint.setProperty("colorRole", "muted")
+        self._raw_hint = hint
         col.addWidget(hint)
 
         self._target_card = DriveChip()
@@ -2061,6 +2071,8 @@ class MainWindow(QMainWindow):
         self._target_admin_btn.clicked.connect(self._relaunch_elevated)
         self._target_admin_btn.setVisible(False)
         target_row.addWidget(self._target_admin_btn)
+
+        col.addWidget(self._build_expert_options())
 
         self._progress = ProgressArea()
         self._progress.set_ready()
@@ -2111,6 +2123,115 @@ class MainWindow(QMainWindow):
 
         scroll.setWidget(content)
         return scroll
+
+    def _build_expert_options(self) -> QFrame:
+        """Advanced options (partition scheme / target / filesystem / mode).
+
+        Visible only when expert mode is enabled; the toggle and the choices
+        persist in settings.
+        """
+        card = QFrame()
+        card.setObjectName("block")
+        col = QVBoxLayout(card)
+        col.setContentsMargins(14, 12, 14, 12)
+        col.setSpacing(8)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(7)
+        self._expert_toggle = ToggleSwitch(
+            checked=bool(settings.get("expert_mode"))
+        )
+        self._expert_toggle.setToolTip(
+            "Show partition scheme, target system, filesystem and write mode"
+        )
+        expert_label = QLabel("Expert options")
+        expert_label.setObjectName("capLabel")
+        expert_label.setProperty("colorRole", "label")
+        toggle_row.addWidget(self._expert_toggle)
+        toggle_row.addWidget(expert_label)
+        toggle_row.addStretch()
+        col.addLayout(toggle_row)
+
+        self._partition_combo = QComboBox()
+        self._partition_combo.addItem("Auto (GPT for UEFI, MBR for legacy)", "auto")
+        self._partition_combo.addItem("GPT", "gpt")
+        self._partition_combo.addItem("MBR", "mbr")
+        self._target_combo = QComboBox()
+        self._target_combo.addItem("Auto", "auto")
+        self._target_combo.addItem("UEFI", "uefi")
+        self._target_combo.addItem("Legacy", "legacy")
+        self._filesystem_combo = QComboBox()
+        self._filesystem_combo.addItem("FAT32", "fat32")
+        self._filesystem_combo.addItem("NTFS", "ntfs")
+        self._filesystem_combo.addItem("exFAT", "exfat")
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("Auto (raw write)", "auto")
+        self._mode_combo.addItem("Raw (DD)", "dd")
+        self._mode_combo.addItem("File copy", "filecopy")
+
+        for combo, key in (
+            (self._partition_combo, "partition_scheme"),
+            (self._target_combo, "target_system"),
+            (self._filesystem_combo, "filesystem"),
+            (self._mode_combo, "write_mode"),
+        ):
+            value = settings.get(key)
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            combo.currentIndexChanged.connect(self._on_expert_changed)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            label = QLabel(
+                {
+                    "partition_scheme": "Partition scheme",
+                    "target_system": "Target system",
+                    "filesystem": "Filesystem",
+                    "write_mode": "Write mode",
+                }[key]
+            )
+            label.setObjectName("capLabel")
+            label.setProperty("colorRole", "label")
+            row.addWidget(label)
+            row.addWidget(combo, 1)
+            col.addLayout(row)
+
+        self._expert_toggle.toggled.connect(self._set_expert_mode)
+        self._expert_panel = card
+        self._expert_panel.setVisible(bool(settings.get("expert_mode")))
+        self._update_expert_hint()
+        return card
+
+    def _on_expert_changed(self) -> None:
+        settings.set_many(
+            partition_scheme=self._partition_combo.currentData(),
+            target_system=self._target_combo.currentData(),
+            filesystem=self._filesystem_combo.currentData(),
+            write_mode=self._mode_combo.currentData(),
+        )
+        self._update_expert_hint()
+
+    def _set_expert_mode(self, enabled: bool) -> None:
+        settings.set_many(expert_mode=bool(enabled))
+        self._expert_toggle.setChecked(bool(enabled))
+        self._expert_panel.setVisible(bool(enabled))
+        self._update_expert_hint()
+
+    def _update_expert_hint(self) -> None:
+        mode = self._mode_combo.currentData()
+        if mode == "filecopy":
+            fs = (self._filesystem_combo.currentData() or "fat32").upper()
+            scheme = self._partition_combo.currentData()
+            self._raw_hint.setText(
+                f"The drive is repartitioned ({scheme}) and the ISO contents "
+                f"are copied onto a single {fs} partition (file-copy mode). "
+                "Hybrid ISOs are always written raw so their boot record "
+                "survives."
+            )
+        else:
+            self._raw_hint.setText(
+                "The image is written to the drive as-is (raw image mode)."
+            )
 
     def _build_section_label(self, text: str) -> QLabel:
         label = QLabel(text.upper())
@@ -2249,12 +2370,22 @@ class MainWindow(QMainWindow):
         drive_letters = current.get("letters") or (
             [current["letter"]] if current.get("letter") else []
         )
+        writer_kwargs = {}
+        if settings.get("expert_mode"):
+            writer_kwargs = {
+                "partition_scheme": self._partition_combo.currentData(),
+                "target_system": self._target_combo.currentData(),
+                "filesystem": self._filesystem_combo.currentData(),
+                "write_mode": self._mode_combo.currentData(),
+            }
         writer = UsbWriter(
             iso,
             drive_path,
             letters=drive_letters,
+            **writer_kwargs,
         )
         self._writer = writer
+        writer.mode.connect(self._on_write_mode)
         writer.progress.connect(self._on_write_progress)
         writer.speed_mbps.connect(self._progress.set_speed)
         writer.written_bytes.connect(self._progress.set_written)
@@ -2270,6 +2401,9 @@ class MainWindow(QMainWindow):
         if self._tray is not None:
             self._tray.setToolTip(f"Flint \u2014 {percent:.0f}%")
 
+    def _on_write_mode(self, mode: str) -> None:
+        self._write_was_filecopy = mode == "filecopy"
+
     def _on_write_finished(self, ok: bool, message: str) -> None:
         self._write_duration = time.perf_counter() - self._write_started
         worker = self._writer
@@ -2278,6 +2412,19 @@ class MainWindow(QMainWindow):
             self._retire(worker)
         if not ok:
             self._finish_flash(False, message or "Write failed", None)
+            return
+        if self._write_was_filecopy:
+            self._finish_flash(
+                True,
+                "",
+                None,
+                skipped_verify=True,
+                skipped_note=(
+                    "Verification skipped \u2014 file-copy writes create a "
+                    "filesystem layout, so the drive is not byte-identical "
+                    "to the image."
+                ),
+            )
             return
         if self._verify_toggle.isChecked():
             if self._iso_zone.digest:
@@ -2536,6 +2683,7 @@ class MainWindow(QMainWindow):
         error_text: str,
         verified_sha: str | None,
         skipped_verify: bool = False,
+        skipped_note: str | None = None,
     ) -> None:
         self._writing = False
         self._verify_hint.setVisible(False)
@@ -2566,7 +2714,7 @@ class MainWindow(QMainWindow):
                     boot = "MBR (bootable)"
                 else:
                     boot = "no boot signature"
-            except Exception as exc:
+            except Exception:
                 logger.exception("probe_bootability failed")
                 boot = "unknown"
 
@@ -2574,9 +2722,12 @@ class MainWindow(QMainWindow):
             self._progress.set_done()
             if skipped_verify:
                 self._progress.set_warning(
-                    "Verification skipped \u2014 the image digest is "
-                    "unavailable. Re-select the image and flash again to "
-                    "verify."
+                    skipped_note
+                    or (
+                        "Verification skipped \u2014 the image digest is "
+                        "unavailable. Re-select the image and flash again to "
+                        "verify."
+                    )
                 )
                 self._done_label.setText("Flash complete \u2014 not verified")
             else:

@@ -7,7 +7,9 @@ profile = "black"
 
 [tool.ruff]
 line-length = 88
-ignore = ["E203", "W503"]
+
+[tool.ruff.lint]
+ignore = ["E203"]
 
 [tool.mypy]
 python_version = 3.11

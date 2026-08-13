@@ -27,6 +27,19 @@ Key behaviors
 - Optional post-write verification re-reads the drive and compares SHA-256.
 - History of flashes is stored in `%APPDATA%\Flint\history.json`.
 
+Expert options (partition & boot)
+- Enable **Expert mode** from the options menu (⋯) or the checkbox on the Write page.
+- Choose a **partition scheme** (GPT / MBR / Auto — GPT for UEFI targets, MBR for Legacy),
+  **target system** (UEFI / Legacy / Auto) and **filesystem** (FAT32 / NTFS / exFAT).
+- Choose a **write mode**: Raw (DD) or File copy.
+  File-copy mode repartitions the drive (`diskpart`), formats it (`format.com`) and
+  copies the ISO contents onto it (`robocopy`) instead of a raw byte write.
+- File-copy mode is Windows-only, requires elevation, and is skipped for hybrid
+  ISOs (ISO9660 + bootable MBR), which are always written raw so their boot record
+  survives. Verification is skipped after file-copy writes because the drive is
+  not byte-identical to the image.
+- Expert choices persist in `%APPDATA%\Flint\settings.json`.
+
 Safety & limitations
 - Target platform: 64-bit Windows only.
 - Flint writes raw images directly to disks — this will irreversibly erase data.

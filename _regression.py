@@ -58,6 +58,7 @@ check("history v2 + export/import/clear")
 import core.settings as s
 
 s.SETTINGS_PATH = Path(d) / "s.json"
+s.set_many(onboarding_seen=True)
 assert s.get("theme") == "dark" and s.get("verify_after_write") is True
 s.set_many(theme="light", window_geometry="W1000H700")
 assert s.get("theme") == "light" and s.get("window_geometry") == "W1000H700"

@@ -14,6 +14,11 @@ _DEFAULTS: dict = {
     "tray_hint_seen": False,
     "onboarding_seen": False,
     "ask_before_elevation": True,
+    "expert_mode": False,
+    "partition_scheme": "auto",
+    "target_system": "auto",
+    "filesystem": "fat32",
+    "write_mode": "auto",
 }
 
 
