@@ -69,6 +69,18 @@ Expert options (persistence & Windows To Go)
   - Persistence and Windows To Go are mutually exclusive and both require
     File copy mode.
 
+Write performance
+- Raw writes use buffered chunks of 8 MiB by default; the buffer size is
+  configurable in Expert mode (4–64 MiB) and stored in settings.
+- An optional native writer extension (`core/_native_writer.c`) is used when
+  built: it writes through Windows `CreateFile`/`WriteFile` with
+  `FILE_FLAG_NO_BUFFERING` and sector-aligned buffers for the highest raw
+  throughput, and reports progress like the Python path.
+- Build it with `python setup.py build_ext --inplace` (needs a C compiler;
+  the Windows CI workflow does this before packaging). When the extension is
+  not built, writes automatically fall back to pure-Python buffered IO — the
+  native writer is strictly optional.
+
 Safety & limitations
 - Target platform: 64-bit Windows only.
 - Flint writes raw images directly to disks — this will irreversibly erase data.

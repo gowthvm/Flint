@@ -31,6 +31,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Build native writer extension
+        run: |
+          python setup.py build_ext --inplace
+
       - name: Build with PyInstaller
         run: |
           python -m PyInstaller --clean --noconfirm flint.spec

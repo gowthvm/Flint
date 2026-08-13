@@ -1,8 +1,11 @@
 import ctypes
+import importlib
 import logging
 import os
 import time
 from collections import deque
+from collections.abc import Callable
+from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -10,6 +13,65 @@ from core import diskpart, persistence
 from core import iso as iso_mod
 
 logger = logging.getLogger("flint")
+
+DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+
+
+class _NativeCancel(Exception):
+    """Raised from the native progress callback to abort the write."""
+
+
+def _load_native_writer() -> Any:
+    """Return the compiled ``core._native_writer`` module, or ``None``.
+
+    The extension is optional; every caller falls back to the pure-Python
+    write path when it is not importable.
+    """
+    try:
+        return importlib.import_module("core._native_writer")
+    except ImportError:
+        logger.info("native writer not built; using the Python write path")
+        return None
+
+
+def write_stream(
+    src: str,
+    device: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    use_native: bool = False,
+    progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Copy ``src`` onto ``device`` in ``chunk_size``-sized buffered chunks.
+
+    With ``use_native=True`` the optional compiled extension
+    ``core._native_writer`` (CreateFile/WriteFile with FILE_FLAG_NO_BUFFERING
+    and aligned buffers) is used when importable; otherwise the write falls
+    back to plain buffered Python file IO. ``progress``, when given, is
+    called with ``(bytes_done, bytes_total)`` after every chunk. Returns the
+    number of bytes written.
+    """
+    if use_native:
+        native_mod = _load_native_writer()
+        if native_mod is not None:
+            return int(native_mod.native_write(src, device, chunk_size, progress))
+    return _python_write_stream(src, device, chunk_size, progress)
+
+
+def _python_write_stream(
+    src: str,
+    device: str,
+    chunk_size: int,
+    progress: Callable[[int, int], None] | None = None,
+) -> int:
+    total = os.path.getsize(src)
+    done = 0
+    with open(src, "rb") as source, open(device, "wb") as target:
+        while chunk := source.read(chunk_size):
+            target.write(chunk)
+            done += len(chunk)
+            if progress is not None:
+                progress(done, total)
+    return done
 
 
 def is_iso_hybrid(iso_path: str) -> bool:
@@ -33,7 +95,6 @@ class UsbWriter(QThread):
     note = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
 
     _GENERIC_READ = 0x80000000
@@ -62,6 +123,8 @@ class UsbWriter(QThread):
         persistence: bool = False,
         persistence_size_mb: int = 1024,
         windows_to_go: bool = False,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        use_native: bool = False,
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
@@ -74,6 +137,10 @@ class UsbWriter(QThread):
         self.persistence = persistence
         self.persistence_size_mb = persistence_size_mb
         self.windows_to_go = windows_to_go
+        self.chunk_size = (
+            chunk_size if chunk_size >= 4096 else DEFAULT_CHUNK_SIZE
+        )
+        self.use_native = use_native
         self._canceled = False
 
     def cancel(self) -> None:
@@ -274,12 +341,18 @@ class UsbWriter(QThread):
 
         self.total_bytes.emit(total)
 
+        if self.use_native:
+            native_mod = _load_native_writer()
+            if native_mod is not None:
+                self._run_native(native_mod, total)
+                return
+
         written = 0
         durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
         sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
         try:
             with open(self.iso_path, "rb") as source:
-                while chunk := source.read(self.CHUNK_SIZE):
+                while chunk := source.read(self.chunk_size):
                     if self._canceled:
                         break
                     chunk_start = time.perf_counter()
@@ -316,4 +389,60 @@ class UsbWriter(QThread):
         if self._canceled:
             self.finished.emit(False, "cancelled")
             return
+        self.finished.emit(True, "")
+
+    def _run_native(self, native_mod: Any, total: int) -> None:
+        """Raw write through the compiled native extension.
+
+        The extension opens both files itself (CreateFile with
+        FILE_FLAG_NO_BUFFERING); the volume locks taken by ``run()`` still
+        apply. Progress is reported from the per-chunk callback.
+        """
+        written = 0
+        durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
+        sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
+        last_done = 0
+        last_time: float | None = None
+
+        def on_progress(done: int, size: int) -> None:
+            nonlocal written, last_done, last_time
+            if self._canceled:
+                raise _NativeCancel("cancelled")
+            now = time.perf_counter()
+            if last_time is not None:
+                durations.append(now - last_time)
+                sizes.append(done - last_done)
+            last_done = done
+            last_time = now
+            written = done
+            window_bytes = sum(sizes)
+            window_time = sum(durations)
+            if window_time > 0 and window_bytes > 0:
+                bytes_per_sec = window_bytes / window_time
+                speed = bytes_per_sec / 1_000_000
+                remaining = (total - done) / bytes_per_sec
+            else:
+                speed = 0.0
+                remaining = 0.0
+            self.progress.emit(done / total * 100.0)
+            self.speed_mbps.emit(speed)
+            self.written_bytes.emit(done)
+            self.eta_seconds.emit(int(remaining))
+
+        self.phase.emit("Writing (native)")
+        try:
+            written = native_mod.native_write(
+                self.iso_path, self.drive_path, self.chunk_size, on_progress
+            )
+        except _NativeCancel:
+            self.finished.emit(False, "cancelled")
+            return
+        except OSError as exc:
+            logger.exception("UsbWriter._run_native: IO error")
+            self.finished.emit(False, str(exc))
+            return
+        self.written_bytes.emit(written)
+        self.progress.emit(100.0)
+        self.speed_mbps.emit(0.0)
+        self.eta_seconds.emit(0)
         self.finished.emit(True, "")

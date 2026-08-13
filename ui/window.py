@@ -2222,12 +2222,16 @@ class MainWindow(QMainWindow):
         self._mode_combo.addItem("Auto (raw write)", "auto")
         self._mode_combo.addItem("Raw (DD)", "dd")
         self._mode_combo.addItem("File copy", "filecopy")
+        self._buffer_combo = QComboBox()
+        for mb in (4, 8, 16, 32, 64):
+            self._buffer_combo.addItem(f"{mb} MiB", mb)
 
         for combo, key in (
             (self._partition_combo, "partition_scheme"),
             (self._target_combo, "target_system"),
             (self._filesystem_combo, "filesystem"),
             (self._mode_combo, "write_mode"),
+            (self._buffer_combo, "chunk_size_mb"),
         ):
             value = settings.get(key)
             index = combo.findData(value)
@@ -2242,6 +2246,7 @@ class MainWindow(QMainWindow):
                     "target_system": "Target system",
                     "filesystem": "Filesystem",
                     "write_mode": "Write mode",
+                    "chunk_size_mb": "Buffer size",
                 }[key]
             )
             label.setObjectName("capLabel")
@@ -2249,6 +2254,26 @@ class MainWindow(QMainWindow):
             row.addWidget(label)
             row.addWidget(combo, 1)
             col.addLayout(row)
+
+        self._native_toggle = ToggleSwitch(
+            checked=bool(settings.get("native_writer"))
+        )
+        self._native_toggle.setToolTip(
+            "Use the compiled native writer for raw writes "
+            "(CreateFile/WriteFile with FILE_FLAG_NO_BUFFERING and aligned "
+            "buffers); falls back to the Python writer when the extension "
+            "is not built"
+        )
+        native_row = QHBoxLayout()
+        native_row.setSpacing(8)
+        native_label = QLabel("Native writer")
+        native_label.setObjectName("capLabel")
+        native_label.setProperty("colorRole", "label")
+        native_row.addWidget(self._native_toggle)
+        native_row.addWidget(native_label)
+        native_row.addStretch()
+        col.addLayout(native_row)
+        self._native_toggle.toggled.connect(self._on_expert_changed)
 
         self._persistence_toggle = ToggleSwitch(checked=False)
         self._persistence_toggle.setToolTip(
@@ -2309,6 +2334,8 @@ class MainWindow(QMainWindow):
             target_system=self._target_combo.currentData(),
             filesystem=self._filesystem_combo.currentData(),
             write_mode=self._mode_combo.currentData(),
+            chunk_size_mb=self._buffer_combo.currentData(),
+            native_writer=self._native_toggle.isChecked(),
         )
         self._update_expert_visibility()
         self._update_expert_hint()
@@ -2628,6 +2655,10 @@ class MainWindow(QMainWindow):
                 "persistence": persist,
                 "persistence_size_mb": persistence_size_mb,
                 "windows_to_go": wtg,
+                "chunk_size": self._buffer_combo.currentData()
+                * 1024
+                * 1024,
+                "use_native": self._native_toggle.isChecked(),
             }
         writer = UsbWriter(
             iso,

@@ -2,3 +2,7 @@ PyQt6>=6.2,<7
 psutil>=5.8
 pywin32>=305
 wmi>=1.5
+
+# Optional, build only: `pip install wheel setuptools` to compile the native
+# writer extension (core/_native_writer.c, see setup.py). Without it, writes
+# fall back to the pure-Python buffered path automatically.
