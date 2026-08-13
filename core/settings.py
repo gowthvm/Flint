@@ -12,6 +12,7 @@ _DEFAULTS: dict = {
     "crash_report_seen_bytes": 0,
     "last_iso_dir": "",
     "tray_hint_seen": False,
+    "onboarding_seen": False,
     "ask_before_elevation": True,
 }
 

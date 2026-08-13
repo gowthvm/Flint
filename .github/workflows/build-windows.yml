@@ -40,3 +40,26 @@ jobs:
         with:
           name: flint-dist
           path: dist/
+
+      - name: Create GitHub release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: build-${{ github.run_number }}
+          release_name: Flint build ${{ github.run_number }}
+          body: |
+            Automated build from workflow run ${{ github.run_number }}.
+          draft: false
+          prerelease: false
+
+      - name: Upload EXE to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/flint.exe
+          asset_name: flint.exe
+          asset_content_type: application/octet-stream

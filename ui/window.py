@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
+    QCheckBox,
     QWidget,
 )
 
@@ -825,6 +826,13 @@ class MainWindow(QMainWindow):
             self._dots_btn,
         ]
 
+        # Keep primary action states in sync with selections and busy state
+        try:
+            self._iso_zone.iso_selected.connect(self._on_iso_selected)
+        except Exception:
+            pass
+        self._update_controls_state()
+
         geometry = settings.get("window_geometry")
         if geometry:
             self.restoreGeometry(
@@ -852,6 +860,27 @@ class MainWindow(QMainWindow):
             s.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.setWindowIcon(self._make_flint_icon())
         self._setup_tray()
+
+        # One-time onboarding modal to improve discoverability
+        try:
+            if not settings.get("onboarding_seen"):
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Information)
+                box.setWindowTitle("Welcome to Flint")
+                box.setText(
+                    "Welcome — a quick tour:\n\n"
+                    "1) Pick an image\n"
+                    "2) Choose a target drive\n"
+                    "3) Flash and optionally verify\n\n"
+                    "Dangerous actions (wipe/flash) require typed confirmation."
+                )
+                cb = QCheckBox("Don't show this again")
+                box.setCheckBox(cb)
+                box.addButton("Close", QMessageBox.ButtonRole.AcceptRole)
+                box.exec()
+                settings.set_many(onboarding_seen=True)
+        except Exception:
+            pass
 
     def _busy(self) -> bool:
         return bool(
@@ -994,6 +1023,11 @@ class MainWindow(QMainWindow):
             return
         self._current_drive = drive
         self._update_drive_ui()
+        # refresh primary control state when drives change
+        try:
+            self._update_controls_state()
+        except Exception:
+            pass
 
     def _update_drive_ui(self) -> None:
         drive = self._current_drive
@@ -1247,6 +1281,13 @@ class MainWindow(QMainWindow):
 
     def _request_scan(self) -> None:
         self._poller.request_scan()
+
+    def _on_iso_selected(self, path: str) -> None:
+        # Called when an ISO is selected; refresh control states
+        try:
+            self._update_controls_state()
+        except Exception:
+            pass
 
     def _build_main(self) -> QWidget:
         main = QWidget()
@@ -2094,6 +2135,28 @@ class MainWindow(QMainWindow):
         for widget in self._controls:
             widget.setEnabled(enabled)
         self._flash_btn.setEnabled(enabled)
+
+    def _update_controls_state(self) -> None:
+        """Enable/disable primary actions based on selection and state."""
+        busy = self._busy()
+        has_iso = bool(getattr(self._iso_zone, "path", None))
+        has_drive = self._current_drive is not None
+        # Flash enabled when not busy and iso + drive selected
+        try:
+            self._flash_btn.setEnabled((not busy) and has_iso and has_drive)
+        except Exception:
+            pass
+        # Wipe enabled when a drive is selected and not busy
+        try:
+            self._wipe_btn.setEnabled((not busy) and has_drive)
+        except Exception:
+            pass
+        # Verify page start button: disable if no drive or busy
+        try:
+            if hasattr(self, "_verify_start_btn"):
+                self._verify_start_btn.setEnabled((not busy) and has_drive)
+        except Exception:
+            pass
 
     def _on_cancel_clicked(self) -> None:
         if self._writer is not None:
