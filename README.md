@@ -20,6 +20,40 @@ Build (for maintainers)
 2. Build using the included spec: `python -m PyInstaller --clean --noconfirm flint.spec`
 3. The built EXE appears under `dist/`.
 
+Code signing & release checksums
+- Every CI build (`.github/workflows/build-windows.yml`) uploads `flint.exe`
+  and `flint.exe.sha256` (computed with `certutil -hashfile dist\flint.exe SHA256`)
+  both as workflow artifacts and as GitHub release assets.
+- Code signing is **optional**: it runs only when both repository secrets are
+  set (Settings → Secrets and variables → Actions):
+  - `WINDOWS_SIGNING_PFX` — your code-signing certificate as a **base64 string**
+    of the password-protected `.pfx` (private key included)
+  - `WINDOWS_SIGNING_PASSWORD` — the PFX password
+- When the secrets are present, the workflow decodes the PFX on the runner,
+  imports it into a temporary user certificate store, signs the EXE with
+  `signtool sign /fd SHA256 /a /f cert.pfx /p <password>`, then deletes both
+  the PFX file and the imported certificate. When they are missing, the build
+  logs a clear "signing skipped" warning and still publishes the checksum
+  (for the unsigned build).
+- Generate a PFX:
+  1. Self-signed (for testing only — SmartScreen will still warn):
+     ```powershell
+     $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Flint" -CertStoreLocation Cert:\CurrentUser\My
+     $pw = ConvertTo-SecureString -String "change-me" -AsPlainText -Force
+     Export-PfxCertificate -Cert $cert -FilePath flint-signing.pfx -Password $pw
+     ```
+  2. Production: buy an OV/EV code-signing certificate from a trusted CA and
+     export it with its private key as a password-protected PFX.
+- Set the secret from the PFX (base64, no line breaks):
+  ```powershell
+  [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes("flint-signing.pfx"))
+  ```
+- Verify a local build's checksum:
+  ```powershell
+  certutil -hashfile dist\flint.exe SHA256
+  ```
+- Never commit the PFX to the repository — it is consumed from secrets only.
+
 Key behaviors
 - Drag & drop or browse for an image; SHA-256 is calculated to enable verification.
 - Select a target drive from the drive picker (model, size, serial are shown).
