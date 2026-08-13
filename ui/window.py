@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+from pathlib import Path
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -13,12 +14,14 @@ from PyQt6.QtCore import (
     Qt,
     QThread,
     QTimer,
+    QUrl,
     pyqtProperty,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor,
     QCursor,
+    QDesktopServices,
     QFont,
     QGuiApplication,
     QIcon,
@@ -2235,6 +2238,20 @@ class MainWindow(QMainWindow):
         for mb in (4, 8, 16, 32, 64):
             self._buffer_combo.addItem(f"{mb} MiB", mb)
 
+        _help_text = {
+            "partition_scheme": "Partition scheme",
+            "target_system": "Target system",
+            "filesystem": "Filesystem",
+            "write_mode": "Write mode",
+            "chunk_size_mb": "Buffer size",
+        }
+        _help_anchor = {
+            "partition_scheme": "partition-scheme",
+            "target_system": "target-system",
+            "filesystem": "filesystem",
+            "write_mode": "write-mode",
+            "chunk_size_mb": "chunk-size-native-writer",
+        }
         for combo, key in (
             (self._partition_combo, "partition_scheme"),
             (self._target_combo, "target_system"),
@@ -2249,18 +2266,15 @@ class MainWindow(QMainWindow):
             combo.currentIndexChanged.connect(self._on_expert_changed)
             row = QHBoxLayout()
             row.setSpacing(8)
-            label = QLabel(
-                {
-                    "partition_scheme": "Partition scheme",
-                    "target_system": "Target system",
-                    "filesystem": "Filesystem",
-                    "write_mode": "Write mode",
-                    "chunk_size_mb": "Buffer size",
-                }[key]
-            )
+            label = QLabel(_help_text[key])
             label.setObjectName("capLabel")
             label.setProperty("colorRole", "label")
             row.addWidget(label)
+            row.addWidget(
+                self._help_button(
+                    _help_anchor[key], f"Help: {_help_text[key]}"
+                )
+            )
             row.addWidget(combo, 1)
             col.addLayout(row)
 
@@ -2280,6 +2294,11 @@ class MainWindow(QMainWindow):
         native_label.setProperty("colorRole", "label")
         native_row.addWidget(self._native_toggle)
         native_row.addWidget(native_label)
+        native_row.addWidget(
+            self._help_button(
+                "chunk-size-native-writer", "Help: chunk size & native writer"
+            )
+        )
         native_row.addStretch()
         col.addLayout(native_row)
         self._native_toggle.toggled.connect(self._on_expert_changed)
@@ -2302,6 +2321,9 @@ class MainWindow(QMainWindow):
         p_label.setProperty("colorRole", "label")
         persistence_row.addWidget(self._persistence_toggle)
         persistence_row.addWidget(p_label)
+        persistence_row.addWidget(
+            self._help_button("persistence", "Help: persistence")
+        )
         persistence_row.addStretch()
         persistence_row.addWidget(self._persistence_size)
         persistence_row.addWidget(self._persistence_unit)
@@ -2324,6 +2346,9 @@ class MainWindow(QMainWindow):
         wtg_label.setProperty("colorRole", "label")
         wtg_row.addWidget(self._wtg_toggle)
         wtg_row.addWidget(wtg_label)
+        wtg_row.addWidget(
+            self._help_button("windows-to-go", "Help: Windows To Go")
+        )
         wtg_row.addStretch()
         col.addLayout(wtg_row)
         self._wtg_row = wtg_row
@@ -2363,6 +2388,9 @@ class MainWindow(QMainWindow):
         sha_label.setProperty("colorRole", "label")
         sha_row.addWidget(self._verify_sha_toggle)
         sha_row.addWidget(sha_label)
+        sha_row.addWidget(
+            self._help_button("verify-sha256", "Help: verify with SHA256")
+        )
         sha_row.addStretch()
         col.addLayout(sha_row)
 
@@ -2387,6 +2415,9 @@ class MainWindow(QMainWindow):
         bad_retries_label.setProperty("colorRole", "label")
         bad_row.addWidget(self._bad_block_toggle)
         bad_row.addWidget(bad_label)
+        bad_row.addWidget(
+            self._help_button("bad-block-scan", "Help: bad-block scan")
+        )
         bad_row.addStretch()
         bad_row.addWidget(self._bad_retries_input)
         bad_row.addWidget(bad_retries_label)
@@ -2553,6 +2584,24 @@ class MainWindow(QMainWindow):
         label = QLabel(text.upper())
         label.setObjectName("capLabel")
         return label
+
+    def _help_button(self, anchor: str, tooltip: str) -> QPushButton:
+        btn = QPushButton("?")
+        btn.setObjectName("helpBtn")
+        btn.setFixedSize(18, 18)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(tooltip)
+        btn.clicked.connect(
+            lambda _checked=False, a=anchor: self._open_reference(a)
+        )
+        return btn
+
+    def _open_reference(self, anchor: str) -> None:
+        url = QUrl.fromLocalFile(
+            str(Path(__file__).resolve().parent / "reference.html")
+        )
+        url.setFragment(anchor)
+        QDesktopServices.openUrl(url)
 
     def _build_iso_zone(self) -> QFrame:
         return IsoDropZone()

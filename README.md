@@ -20,10 +20,11 @@ Build (for maintainers)
 2. Build using the included spec: `python -m PyInstaller --clean --noconfirm flint.spec`
 3. The built EXE appears under `dist/`.
 
-Code signing & release checksums
-- Every CI build (`.github/workflows/build-windows.yml`) uploads `flint.exe`
-  and `flint.exe.sha256` (computed with `certutil -hashfile dist\flint.exe SHA256`)
-  both as workflow artifacts and as GitHub release assets.
+Releases & Signing
+- The CI workflow (`.github/workflows/build-windows.yml`) builds `flint.exe`,
+  computes its SHA-256 checksum (`certutil -hashfile dist\flint.exe SHA256`)
+  and uploads both as workflow artifacts and as GitHub release assets.
+  Trigger it from the Actions tab (workflow_dispatch) or by pushing to master.
 - Code signing is **optional**: it runs only when both repository secrets are
   set (Settings → Secrets and variables → Actions):
   - `WINDOWS_SIGNING_PFX` — your code-signing certificate as a **base64 string**
@@ -53,6 +54,7 @@ Code signing & release checksums
   certutil -hashfile dist\flint.exe SHA256
   ```
 - Never commit the PFX to the repository — it is consumed from secrets only.
+  Download builds from the releases page: https://github.com/gowthvm/Flint/releases/latest
 
 Key behaviors
 - Drag & drop or browse for an image; SHA-256 is calculated to enable verification.
@@ -61,8 +63,10 @@ Key behaviors
 - Optional post-write verification re-reads the drive and compares SHA-256.
 - History of flashes is stored in `%APPDATA%\Flint\history.json`.
 
-Expert options (partition & boot)
-- Enable **Expert mode** from the options menu (⋯) or the checkbox on the Write page.
+Advanced options (Expert Mode)
+- Enable **Expert mode** from the options menu (⋯) or the toggle on the Write page.
+  The choice persists in `%APPDATA%\Flint\settings.json`. Inline **?** help
+  buttons beside each option open the in-app reference (`ui/reference.html`).
 - Choose a **partition scheme** (GPT / MBR / Auto — GPT for UEFI targets, MBR for Legacy),
   **target system** (UEFI / Legacy / Auto) and **filesystem** (FAT32 / NTFS / exFAT).
 - Choose a **write mode**: Raw (DD) or File copy.
@@ -79,9 +83,12 @@ Expert options (partition & boot)
   hybrid ISO is loaded, file-copy and partition options are disabled and a
   "Hybrid ISO detected — raw write recommended" tooltip is shown; when unsure,
   raw (DD) remains the default.
-- Expert choices persist in `%APPDATA%\Flint\settings.json`.
+- **Security warning:** every option on this panel repartitions or rewrites a
+  physical drive. Wrong combinations can make a drive unbootable or erase it
+  without recovery. Only use these options when you know what your target
+  firmware and bootloader require; back up data first.
 
-Expert options (persistence & Windows To Go)
+Persistence and Windows To Go
 - When a Linux ISO is selected (casper / filesystem.squashfs / live detected in
   its ISO9660 tree), an optional **Persistence** toggle appears in Expert mode.
   Persistence keeps changes between reboots on live Linux sticks.
@@ -89,31 +96,37 @@ Expert options (persistence & Windows To Go)
     boot config (`grub.cfg`, `isolinux.cfg`, `syslinux.cfg`, `extlinux.conf`)
     is patched to pass the `persistent` kernel option.
   - Debian-live images get a `live/persistence.conf` overlay instead.
-  - The ext4 image is formatted with `wsl mke2fs` (falling back to a native
-    `mke2fs`/`makefs` when WSL has no distribution). When no tool is available
-    the image is still created but left unformatted — an explicit warning is
-    shown — so it must be formatted as ext4 manually for persistence to work.
 - When a Windows installation ISO is selected (sources/install.wim, .esd or
   .swm — including UDF-only images found via a raw scan), an optional
   **Windows To Go** toggle appears. It applies the image with
   `dism /Apply-Image /Index:1` and installs boot files with
   `bcdboot ... /f ALL`, so the stick boots as a portable Windows install.
-  - Windows To Go requires NTFS (selected automatically) and elevation; the
-    first edition in the image (index 1) is used by default.
-  - Persistence and Windows To Go are mutually exclusive and both require
-    File copy mode.
+- External tool dependencies: Persistence needs `wsl mke2fs` (falling back to a
+  native `mke2fs`/`makefs` when WSL has no distribution) to format the ext4
+  image; when no tool is available the image is still created but left
+  unformatted — an explicit warning is shown — so it must be formatted as ext4
+  manually for persistence to work. Windows To Go needs `dism` and `bcdboot`
+  (bundled with Windows). `diskpart`, `format.com` and `robocopy` back file-copy
+  mode generally.
+- Limitations: Windows To Go requires NTFS (selected automatically) and
+  elevation; the first edition in the image (index 1) is used by default.
+  Persistence and Windows To Go are mutually exclusive and both require
+  File copy mode. These features are only meaningful for the distros named
+  above; they are hidden for other images.
 
-Write performance
+Performance & Native writer
 - Raw writes use buffered chunks of 8 MiB by default; the buffer size is
   configurable in Expert mode (4–64 MiB) and stored in settings.
-- An optional native writer extension (`core/_native_writer.c`) is used when
-  built: it writes through Windows `CreateFile`/`WriteFile` with
-  `FILE_FLAG_NO_BUFFERING` and sector-aligned buffers for the highest raw
-  throughput, and reports progress like the Python path.
-- Build it with `python setup.py build_ext --inplace` (needs a C compiler;
+- Enable the optional **native writer** in Expert mode to use the compiled
+  extension (`core/_native_writer.c`): it writes through Windows
+  `CreateFile`/`WriteFile` with `FILE_FLAG_NO_BUFFERING` and sector-aligned
+  buffers for the highest raw throughput, and reports progress like the Python
+  path.
+- Compile it with `python setup.py build_ext --inplace` (needs a C compiler;
   the Windows CI workflow does this before packaging). When the extension is
   not built, writes automatically fall back to pure-Python buffered IO — the
-  native writer is strictly optional.
+  native writer is strictly optional and the toggle simply does nothing if the
+  extension is missing.
 
 Verification & bad-block scan
 - After a raw write, "Verify after write" reads the drive back (streaming

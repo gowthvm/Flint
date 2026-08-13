@@ -200,6 +200,21 @@ QPushButton#ghost:hover {
     color: @text;
 }
 
+QPushButton#helpBtn {
+    background: @track;
+    border: 1px solid @border;
+    border-radius: 9px;
+    color: @muted;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0;
+}
+
+QPushButton#helpBtn:hover {
+    color: @text;
+    border-color: @faded;
+}
+
 QComboBox {
     background: @track;
     border: 1px solid @border;
