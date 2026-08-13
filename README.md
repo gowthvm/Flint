@@ -81,6 +81,18 @@ Write performance
   not built, writes automatically fall back to pure-Python buffered IO — the
   native writer is strictly optional.
 
+Verification & bad-block scan
+- After a raw write, "Verify after write" reads the drive back (streaming
+  SHA-256, speed in MB/s is reported while it runs).
+- "Verify using SHA256" compares the read-back digest against the image and
+  reports the offsets of any mismatched regions.
+- "Bad-block scan" retries failed reads up to the configured number of times
+  (1–10, default 3) and reports the 4096-aligned offsets of sectors that
+  never read back.
+- When the check finds mismatches or unreadable sectors, Flint offers to
+  retry the write or abort. Verification is skipped after file-copy writes
+  (the drive is not byte-identical to the image).
+
 Safety & limitations
 - Target platform: 64-bit Windows only.
 - Flint writes raw images directly to disks — this will irreversibly erase data.

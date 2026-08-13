@@ -1,8 +1,267 @@
 import ctypes
 import hashlib
+import os
+import time
 from collections.abc import Callable
+from contextlib import nullcontext
+from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+SECTOR_SIZE = 4096
+MAX_MISMATCHES = 20
+
+
+class _Cancelled(Exception):
+    """Raised internally when the caller's cancel callback fires."""
+
+
+def _open_reader(path: str) -> Any:
+    """Open a file or raw device for reading; return the handle or None."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    handle = kernel32.CreateFileW(
+        path,
+        0x80000000,  # GENERIC_READ
+        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        None,
+        3,  # OPEN_EXISTING
+        0,
+        None,
+    )
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        return None
+    return handle
+
+
+def _device_size(handle: Any) -> int:
+    kernel32 = ctypes.windll.kernel32
+    length = ctypes.c_ulonglong()
+    returned = ctypes.c_ulong()
+    ok = kernel32.DeviceIoControl(
+        handle,
+        0x0007405C,  # IOCTL_DISK_GET_LENGTH_INFO
+        None,
+        0,
+        ctypes.byref(length),
+        ctypes.sizeof(length),
+        ctypes.byref(returned),
+        None,
+    )
+    if not ok or length.value <= 0:
+        return 0
+    return length.value
+
+
+def _read_chunk(
+    handle: Any,
+    buffer: Any,
+    count: int,
+    retries: int,
+    is_cancelled: Callable[[], bool] | None,
+) -> int | None:
+    """Read up to ``count`` bytes, retrying failed reads ``retries`` times.
+
+    Returns the number of bytes read (0 = end of device) or ``None`` when
+    every attempt failed. Raises ``_Cancelled`` when the cancel callback
+    fires between attempts.
+    """
+    kernel32 = ctypes.windll.kernel32
+    read = ctypes.c_ulong()
+    for attempt in range(retries + 1):
+        if is_cancelled is not None and is_cancelled():
+            raise _Cancelled()
+        if kernel32.ReadFile(handle, buffer, count, ctypes.byref(read), None):
+            return read.value
+        if attempt < retries:
+            time.sleep(0.05)
+    return None
+
+
+def compute_sha256(
+    path: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    progress: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> tuple[bool, str]:
+    """Streaming SHA-256 of a file or raw device path.
+
+    Returns ``(True, hexdigest)`` on success or ``(False, message)`` on
+    failure. ``progress`` is called with ``(bytes_done, bytes_total)``.
+    """
+    handle = _open_reader(path)
+    if handle is None:
+        return False, f"could not open {path} for reading"
+    try:
+        if path.startswith("\\\\.\\"):
+            size = _device_size(handle)
+        else:
+            size = os.path.getsize(path)
+        if size <= 0:
+            return False, "nothing to hash"
+        digest = hashlib.sha256()
+        done = 0
+        while done < size:
+            count = min(chunk_size, size - done)
+            buffer = ctypes.create_string_buffer(count)
+            try:
+                nread = _read_chunk(handle, buffer, count, 0, is_cancelled)
+            except _Cancelled:
+                return False, "cancelled"
+            if nread is None or nread == 0:
+                return False, "read failed before the end of the device"
+            digest.update(buffer.raw[:nread])
+            done += nread
+            if progress is not None:
+                progress(done, size)
+        return True, digest.hexdigest()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def verify_device(
+    device_path: str,
+    source_iso: str | None = None,
+    expected_sha256: str | None = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    retries: int = 3,
+    progress: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Read a device back and verify it against a source image.
+
+    Returns a structured result dict:
+
+    - ``ok``          - True when nothing failed (no mismatches, no
+                        unreadable sectors, digest matches when expected)
+    - ``mismatches``  - ``[(offset, length, expected, actual)]`` byte
+                        comparisons that differ (only with ``source_iso``,
+                        capped at ``MAX_MISMATCHES`` entries)
+    - ``bad_sectors`` - 4096-aligned offsets that could not be read after
+                        ``retries`` retries; those chunks are skipped
+    - ``digest``      - SHA-256 of the bytes that were read back
+    - ``speed_mbps``  - average read-back throughput
+    - ``error``       - error/cancel message ("" when everything ran)
+
+    With ``source_iso`` the read-back is byte-compared against the image
+    (mismatch offsets are reported). With only ``expected_sha256`` the
+    digest is compared against it. With neither, the call is a pure
+    bad-block scan.
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "mismatches": [],
+        "bad_sectors": [],
+        "digest": "",
+        "speed_mbps": 0.0,
+        "error": "",
+    }
+    handle = _open_reader(device_path)
+    if handle is None:
+        result["error"] = f"could not open device for read-back: {device_path}"
+        return result
+    iso_file = None
+    try:
+        if device_path.startswith("\\\\.\\"):
+            size = _device_size(handle)
+            if size <= 0:
+                result["error"] = (
+                    "could not determine device size for verification"
+                )
+                return result
+        else:
+            size = os.path.getsize(device_path)
+        iso_size = None
+        if source_iso is not None:
+            iso_size = os.path.getsize(source_iso)
+            if iso_size > size:
+                result["error"] = (
+                    "drive is smaller than the image; verification is "
+                    "not meaningful"
+                )
+                return result
+        verify_size = iso_size if iso_size is not None else size
+        if verify_size <= 0:
+            result["error"] = "nothing to verify"
+            return result
+        with (
+            open(source_iso, "rb")
+            if source_iso is not None
+            else nullcontext()
+        ) as iso_file:
+            digest = hashlib.sha256()
+            done = 0
+            start = time.perf_counter()
+            while done < verify_size:
+                count = min(chunk_size, verify_size - done)
+                buffer = ctypes.create_string_buffer(count)
+                try:
+                    nread = _read_chunk(
+                        handle, buffer, count, retries, is_cancelled
+                    )
+                except _Cancelled:
+                    result["error"] = "cancelled"
+                    return result
+                if nread is None:
+                    result["bad_sectors"].append(done - done % SECTOR_SIZE)
+                    done += count
+                    continue
+                if nread == 0:
+                    result["error"] = "read-back ended before the image"
+                    return result
+                data = buffer.raw[:nread]
+                digest.update(data)
+                if iso_file is not None:
+                    expected = iso_file.read(nread)
+                    if (
+                        expected != data
+                        and len(result["mismatches"]) < MAX_MISMATCHES
+                    ):
+                        result["mismatches"].append(
+                            (done, nread, expected, data)
+                        )
+                done += nread
+                if progress is not None:
+                    progress(done, verify_size)
+            elapsed = time.perf_counter() - start
+            result["speed_mbps"] = (
+                done / elapsed / 1_000_000 if elapsed > 0 else 0.0
+            )
+            result["digest"] = digest.hexdigest()
+            result["ok"] = (
+                not result["bad_sectors"]
+                and not result["mismatches"]
+                and (
+                    expected_sha256 is None
+                    or result["digest"] == expected_sha256
+                )
+            )
+            return result
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def scan_bad_sectors(
+    device_path: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    retries: int = 3,
+    progress: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Read a device looking for unreadable sectors (failed reads retried).
+
+    Returns the same structured result as ``verify_device`` with neither
+    ``source_iso`` nor ``expected_sha256``: ``ok`` / ``bad_sectors`` /
+    ``digest`` / ``speed_mbps`` / ``error``.
+    """
+    return verify_device(
+        device_path,
+        chunk_size=chunk_size,
+        retries=retries,
+        progress=progress,
+        is_cancelled=is_cancelled,
+    )
 
 
 def hash_drive(
@@ -108,14 +367,15 @@ class VerifyWorker(QThread):
         self._cancelled = True
 
     def run(self) -> None:
+        def on_progress(done: int, total: int) -> None:
+            self.progress.emit(done / total * 100.0)
+            self.stats.emit(done, total)
+
         ok, result = hash_drive(
             self._drive_path,
             self._size,
             self._expected_sha256,
-            progress=lambda done, total: (
-                self.progress.emit(done / total * 100.0),
-                self.stats.emit(done, total),
-            ),
+            progress=on_progress,
             is_cancelled=lambda: self._cancelled,
         )
         if not ok:

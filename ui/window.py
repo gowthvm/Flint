@@ -843,6 +843,11 @@ class MainWindow(QMainWindow):
         self._writing = False
         self._write_started = 0.0
         self._write_was_filecopy = False
+        self._verify_handled = False
+        self._verification_in_writer = False
+        self._last_verify_message = ""
+        self._last_verify_digest = ""
+        self._retry_payload: tuple | None = None
         self._iso_linux = False
         self._iso_windows = False
         self._iso_hybrid = False
@@ -905,6 +910,8 @@ class MainWindow(QMainWindow):
         self._verify_toggle.setChecked(
             bool(settings.get("verify_after_write"))
         )
+        self._verify_toggle.toggled.connect(self._update_verify_controls)
+        self._update_verify_controls()
         self._dots_btn.clicked.connect(self._show_dots_menu)
         self._iso_zone._clear_guard = lambda: self._busy()
         self._verify_zone._clear_guard = lambda: self._busy()
@@ -2128,6 +2135,8 @@ class MainWindow(QMainWindow):
 
         col.addWidget(self._build_expert_options())
 
+        col.addWidget(self._build_verify_options())
+
         self._progress = ProgressArea()
         self._progress.set_ready()
         col.addWidget(self._progress)
@@ -2327,6 +2336,94 @@ class MainWindow(QMainWindow):
         self._update_expert_visibility()
         self._update_expert_hint()
         return card
+
+    def _build_verify_options(self) -> QFrame:
+        """Post-write verification options (SHA-256 compare + bad-block scan).
+
+        Enabled whenever "Verify after write" is checked; choices persist in
+        settings.
+        """
+        card = QFrame()
+        card.setObjectName("block")
+        col = QVBoxLayout(card)
+        col.setContentsMargins(14, 12, 14, 12)
+        col.setSpacing(8)
+
+        self._verify_sha_toggle = ToggleSwitch(
+            checked=bool(settings.get("verify_sha256"))
+        )
+        self._verify_sha_toggle.setToolTip(
+            "Read the drive back after writing and compare its SHA-256 "
+            "against the image; mismatched regions are reported with offsets"
+        )
+        sha_row = QHBoxLayout()
+        sha_row.setSpacing(8)
+        sha_label = QLabel("Verify using SHA256")
+        sha_label.setObjectName("capLabel")
+        sha_label.setProperty("colorRole", "label")
+        sha_row.addWidget(self._verify_sha_toggle)
+        sha_row.addWidget(sha_label)
+        sha_row.addStretch()
+        col.addLayout(sha_row)
+
+        self._bad_block_toggle = ToggleSwitch(
+            checked=bool(settings.get("bad_block_scan"))
+        )
+        self._bad_block_toggle.setToolTip(
+            "Scan the drive for unreadable sectors; failed reads are retried "
+            "and the failing offsets are reported"
+        )
+        self._bad_retries_input = QLineEdit()
+        self._bad_retries_input.setObjectName("persistenceSize")
+        self._bad_retries_input.setPlaceholderText("3")
+        self._bad_retries_input.setFixedWidth(40)
+        bad_row = QHBoxLayout()
+        bad_row.setSpacing(8)
+        bad_label = QLabel("Bad-block scan")
+        bad_label.setObjectName("capLabel")
+        bad_label.setProperty("colorRole", "label")
+        bad_retries_label = QLabel("retries")
+        bad_retries_label.setObjectName("capLabel")
+        bad_retries_label.setProperty("colorRole", "label")
+        bad_row.addWidget(self._bad_block_toggle)
+        bad_row.addWidget(bad_label)
+        bad_row.addStretch()
+        bad_row.addWidget(self._bad_retries_input)
+        bad_row.addWidget(bad_retries_label)
+        col.addLayout(bad_row)
+
+        self._verify_sha_toggle.toggled.connect(self._on_verify_options_changed)
+        self._bad_block_toggle.toggled.connect(self._on_verify_options_changed)
+        self._bad_retries_input.editingFinished.connect(
+            self._on_verify_options_changed
+        )
+        self._verify_options_card = card
+        return card
+
+    def _on_verify_options_changed(self) -> None:
+        retries = self._bad_block_retries_value()
+        self._bad_retries_input.setText(str(retries))
+        settings.set_many(
+            verify_sha256=self._verify_sha_toggle.isChecked(),
+            bad_block_scan=self._bad_block_toggle.isChecked(),
+            bad_block_retries=retries,
+        )
+        self._update_verify_controls()
+
+    def _bad_block_retries_value(self) -> int:
+        raw = self._bad_retries_input.text().strip() or "3"
+        try:
+            return max(1, min(10, int(raw)))
+        except ValueError:
+            return 3
+
+    def _update_verify_controls(self) -> None:
+        enabled = self._verify_toggle.isChecked()
+        self._verify_sha_toggle.setEnabled(enabled)
+        self._bad_block_toggle.setEnabled(enabled)
+        self._bad_retries_input.setEnabled(
+            enabled and self._bad_block_toggle.isChecked()
+        )
 
     def _on_expert_changed(self) -> None:
         settings.set_many(
@@ -2632,6 +2729,47 @@ class MainWindow(QMainWindow):
         self._current_drive = current
         self._active_write_drive = current
 
+        drive_letters = current.get("letters") or (
+            [current["letter"]] if current.get("letter") else []
+        )
+        writer_kwargs = {
+            "verify_after_write": self._verify_toggle.isChecked(),
+            "verify_sha256": self._verify_sha_toggle.isChecked(),
+            "bad_block_scan": self._bad_block_toggle.isChecked(),
+            "bad_block_retries": self._bad_block_retries_value(),
+        }
+        if expert:
+            writer_kwargs.update(
+                {
+                    "partition_scheme": self._partition_combo.currentData(),
+                    "target_system": self._target_combo.currentData(),
+                    "filesystem": self._filesystem_combo.currentData(),
+                    "write_mode": mode,
+                    "persistence": persist,
+                    "persistence_size_mb": persistence_size_mb,
+                    "windows_to_go": wtg,
+                    "chunk_size": self._buffer_combo.currentData()
+                    * 1024
+                    * 1024,
+                    "use_native": self._native_toggle.isChecked(),
+                }
+            )
+        self._begin_write(
+            iso, drive_path, drive_letters, writer_kwargs, current
+        )
+
+    def _begin_write(
+        self,
+        iso: str,
+        drive_path: str,
+        drive_letters: list[str],
+        writer_kwargs: dict,
+        drive: dict,
+    ) -> None:
+        """Reset the UI state and start a UsbWriter with the given options.
+
+        Also used to retry a flash after a failed verification.
+        """
         self._progress.reset()
         self._done_bar.setVisible(False)
         self._set_controls_enabled(False)
@@ -2639,27 +2777,22 @@ class MainWindow(QMainWindow):
         self._wipe_btn.setEnabled(False)
         self._writing = True
         self._write_started = time.perf_counter()
+        self._verify_handled = False
+        self._last_verify_message = ""
+        self._last_verify_digest = ""
+        self._verification_in_writer = bool(
+            writer_kwargs.get("verify_after_write", False)
+        )
+        self._retry_payload = (
+            iso,
+            drive_path,
+            drive_letters,
+            writer_kwargs,
+            drive,
+        )
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Writing\u2026")
 
-        drive_letters = current.get("letters") or (
-            [current["letter"]] if current.get("letter") else []
-        )
-        writer_kwargs = {}
-        if expert:
-            writer_kwargs = {
-                "partition_scheme": self._partition_combo.currentData(),
-                "target_system": self._target_combo.currentData(),
-                "filesystem": self._filesystem_combo.currentData(),
-                "write_mode": mode,
-                "persistence": persist,
-                "persistence_size_mb": persistence_size_mb,
-                "windows_to_go": wtg,
-                "chunk_size": self._buffer_combo.currentData()
-                * 1024
-                * 1024,
-                "use_native": self._native_toggle.isChecked(),
-            }
         writer = UsbWriter(
             iso,
             drive_path,
@@ -2676,6 +2809,7 @@ class MainWindow(QMainWindow):
         writer.total_bytes.connect(self._progress.set_total)
         writer.eta_seconds.connect(self._progress.set_eta)
         writer.phase.connect(self._progress.set_phase)
+        writer.verify_result.connect(self._on_verify_result)
         writer.finished.connect(self._on_write_finished)
         writer.start()
 
@@ -2715,6 +2849,16 @@ class MainWindow(QMainWindow):
             if self._write_note:
                 self._progress.set_warning(self._write_note)
             return
+        if self._verification_in_writer:
+            # The writer ran verify_device itself; its outcome arrives via
+            # verify_result (before this signal) and may have already
+            # handled the flow (retry / abort dialog).
+            if self._verify_handled:
+                return
+            if self._last_verify_message:
+                self._progress.set_warning(self._last_verify_message)
+            self._finish_flash(True, "", self._last_verify_digest or None)
+            return
         if self._verify_toggle.isChecked():
             if self._iso_zone.digest:
                 self._start_verify()
@@ -2722,6 +2866,38 @@ class MainWindow(QMainWindow):
             self._finish_flash(True, "", None, skipped_verify=True)
             return
         self._finish_flash(True, "", None)
+
+    def _on_verify_result(self, ok: bool, message: str, result: dict) -> None:
+        if ok:
+            self._last_verify_message = message
+            self._last_verify_digest = result.get("digest", "")
+            return
+        if message == "cancelled":
+            self._last_verify_message = "Verification cancelled"
+            return
+        # Mismatches or unreadable sectors: offer to retry the write.
+        self._verify_handled = True
+        mismatches = len(result.get("mismatches", []))
+        bad = len(result.get("bad_sectors", []))
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Icon.Warning)
+        prompt.setWindowTitle("Flint \u2014 verification failed")
+        prompt.setText("The write-back check found problems with the drive.")
+        prompt.setInformativeText(
+            f"{mismatches} mismatched region(s) and {bad} unreadable "
+            "sector(s). The drive may be damaged or the image was not "
+            "written correctly.\n\nRetry the write, or abort?"
+        )
+        retry = prompt.addButton(
+            "Retry write", QMessageBox.ButtonRole.AcceptRole
+        )
+        prompt.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
+        prompt.setDefaultButton(prompt.buttons()[0])
+        prompt.exec()
+        if prompt.clickedButton() is retry and self._retry_payload is not None:
+            self._begin_write(*self._retry_payload)
+        else:
+            self._finish_flash(False, message or "Verification failed", None)
 
     def _retire(self, worker: QThread) -> None:
         self._retired_workers.append(worker)

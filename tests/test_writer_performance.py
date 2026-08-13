@@ -235,7 +235,7 @@ def test_writer_inner_native_dispatch(tmp_path, monkeypatch):
     results = []
     w.finished.connect(lambda ok, msg: results.append((ok, msg)))
 
-    w._run_inner()
+    w.run()
 
     assert fake.calls == [
         (w.iso_path, w.drive_path, 4096)

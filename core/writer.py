@@ -11,6 +11,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from core import diskpart, persistence
 from core import iso as iso_mod
+from core import verify as verify_mod
 
 logger = logging.getLogger("flint")
 
@@ -93,6 +94,7 @@ class UsbWriter(QThread):
     phase = pyqtSignal(str)
     mode = pyqtSignal(str)
     note = pyqtSignal(str)
+    verify_result = pyqtSignal(bool, str, dict)
     finished = pyqtSignal(bool, str)
 
     SPEED_WINDOW = 5
@@ -125,6 +127,10 @@ class UsbWriter(QThread):
         windows_to_go: bool = False,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         use_native: bool = False,
+        verify_after_write: bool = False,
+        verify_sha256: bool = True,
+        bad_block_scan: bool = False,
+        bad_block_retries: int = 3,
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
@@ -141,7 +147,12 @@ class UsbWriter(QThread):
             chunk_size if chunk_size >= 4096 else DEFAULT_CHUNK_SIZE
         )
         self.use_native = use_native
+        self.verify_after_write = verify_after_write
+        self.verify_sha256 = verify_sha256
+        self.bad_block_scan = bad_block_scan
+        self.bad_block_retries = max(0, int(bad_block_retries))
         self._canceled = False
+        self._finished = False
 
     def cancel(self) -> None:
         self._canceled = True
@@ -283,6 +294,13 @@ class UsbWriter(QThread):
                 self._run_inner()
             finally:
                 self._unlock_volumes(volumes)
+            if self._finished:
+                return
+            if self.verify_after_write and (
+                self.verify_sha256 or self.bad_block_scan
+            ):
+                self._verify_after_write()
+            self.finished.emit(True, "")
         except Exception as exc:
             logger.exception("UsbWriter.run failed")
             self.finished.emit(False, str(exc))
@@ -327,15 +345,18 @@ class UsbWriter(QThread):
             try:
                 drive_size = self._drive_size(handle)
                 if drive_size < total:
+                    self._finished = True
                     self.finished.emit(
                         False, "drive is too small for this image"
                     )
                     return
             except OSError as exc:
+                self._finished = True
                 self.finished.emit(False, str(exc))
                 return
         except Exception as exc:
             logger.exception("UsbWriter._run_inner: setup failed")
+            self._finished = True
             self.finished.emit(False, str(exc))
             return
 
@@ -380,6 +401,7 @@ class UsbWriter(QThread):
                 self._flush(handle)
         except OSError as exc:
             logger.exception("UsbWriter._run_inner: IO error")
+            self._finished = True
             self.finished.emit(False, str(exc))
             return
         finally:
@@ -387,9 +409,9 @@ class UsbWriter(QThread):
                 ctypes.windll.kernel32.CloseHandle(handle)
 
         if self._canceled:
+            self._finished = True
             self.finished.emit(False, "cancelled")
             return
-        self.finished.emit(True, "")
 
     def _run_native(self, native_mod: Any, total: int) -> None:
         """Raw write through the compiled native extension.
@@ -435,14 +457,62 @@ class UsbWriter(QThread):
                 self.iso_path, self.drive_path, self.chunk_size, on_progress
             )
         except _NativeCancel:
+            self._finished = True
             self.finished.emit(False, "cancelled")
             return
         except OSError as exc:
             logger.exception("UsbWriter._run_native: IO error")
+            self._finished = True
             self.finished.emit(False, str(exc))
             return
         self.written_bytes.emit(written)
         self.progress.emit(100.0)
         self.speed_mbps.emit(0.0)
         self.eta_seconds.emit(0)
-        self.finished.emit(True, "")
+
+    def _verify_after_write(self) -> None:
+        """Read the drive back and compare it against the source image.
+
+        Byte-compares when ``verify_sha256`` is set (mismatch offsets are
+        reported); the read-back SHA-256 is always computed and unreadable
+        sectors are reported when ``bad_block_scan`` is set. Progress is
+        reported through the regular progress signals.
+        """
+
+        def on_progress(done: int, total: int) -> None:
+            self.progress.emit(done / total * 100.0)
+            self.written_bytes.emit(done)
+            self.total_bytes.emit(total)
+
+        self.phase.emit("Verifying")
+        result = verify_mod.verify_device(
+            self.drive_path,
+            source_iso=self.iso_path if self.verify_sha256 else None,
+            chunk_size=self.chunk_size,
+            retries=self.bad_block_retries,
+            progress=on_progress,
+            is_cancelled=lambda: self._canceled,
+        )
+        if result["error"] == "cancelled" or self._canceled:
+            self.verify_result.emit(False, "cancelled", result)
+            return
+        self.verify_result.emit(result["ok"], self._verify_message(result), result)
+
+    def _verify_message(self, result: dict[str, Any]) -> str:
+        mismatches = len(result["mismatches"])
+        bad = len(result["bad_sectors"])
+        speed = result["speed_mbps"]
+        if not result["ok"]:
+            detail_parts = []
+            if mismatches:
+                detail_parts.append(f"{mismatches} mismatched region(s)")
+            if bad:
+                detail_parts.append(f"{bad} unreadable sector(s)")
+            if not detail_parts:
+                detail_parts.append(result["error"] or "verification failed")
+            return (
+                "verification failed: "
+                + ", ".join(detail_parts)
+                + f" (read-back at {speed:.1f} MB/s)"
+            )
+        return f"SHA-256 match, read-back at {speed:.1f} MB/s"

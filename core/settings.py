@@ -21,6 +21,9 @@ _DEFAULTS: dict = {
     "write_mode": "auto",
     "chunk_size_mb": 8,
     "native_writer": False,
+    "verify_sha256": True,
+    "bad_block_scan": False,
+    "bad_block_retries": 3,
 }
 
 
