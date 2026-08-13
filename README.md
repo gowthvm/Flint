@@ -1,60 +1,40 @@
-# Flint
+# Flint — Bootable USB Writer (Windows)
 
-A dark, Windows-native tool for writing ISO/DD images to USB drives, built on
-PyQt6 with raw-disk Windows API writes.
+Flint is a lightweight, Windows-native utility for writing ISO/DD images to USB
+drives. It's built with PyQt6 and uses low-level Windows disk APIs for reliable
+raw-image writes and optional read-back verification.
 
-## Features
+Download
+- Latest Windows executable: https://github.com/gowthvm/Flint/releases/latest
 
-- Drag-and-drop ISO selection with SHA-256 hashing
-- Drive picker (model, size, bus, serial) with identity re-check before writing;
-  unformatted drives are listed too
-- Raw image writes in 4 MB chunks with live speed / ETA / cancel; volume is
-  locked + dismounted during writes and `FlushFileBuffers` runs before success
-- Optional post-write verification: read-back SHA-256 comparison of the drive;
-  bootability check (MBR / GPT signatures) and safe eject after finishing
-- Independent **Verify** page: compare a drive against an image or a pasted
-  SHA-256, or hash a whole drive; full-disk wipe mode
-- History (`%APPDATA%\Flint\history.json`) with export / import / clear and
-  copyable flash reports
-- Dark, light and high-contrast themes; resizable, keyboard-friendly window;
-  taskbar progress, keep-awake, system tray toasts with sound
-- Single-instance guard (second launch raises the running window), crash
-  logging to `%LOCALAPPDATA%\Flint\crash.log`
+Quick start
+- Run the downloaded `flint.exe` on a Windows machine (recommended).
+- From source:
+  ```powershell
+  python -m pip install -r requirements.txt
+  pythonw flint.pyw
+  ```
 
-## Build
+Build (for maintainers)
+1. Install dev dependencies: `pip install -r requirements.txt pyinstaller`
+2. Build using the included spec: `python -m PyInstaller --clean --noconfirm flint.spec`
+3. The built EXE appears under `dist/`.
 
-```
-pip install -r requirements.txt
-pyinstaller flint.spec
-```
+Key behaviors
+- Drag & drop or browse for an image; SHA-256 is calculated to enable verification.
+- Select a target drive from the drive picker (model, size, serial are shown).
+- Destructive actions require typed confirmation to reduce accidental data loss.
+- Optional post-write verification re-reads the drive and compares SHA-256.
+- History of flashes is stored in `%APPDATA%\Flint\history.json`.
 
-The onefile build `dist\flint.exe` runs elevated (`uac_admin`).
+Safety & limitations
+- Target platform: 64-bit Windows only.
+- Flint writes raw images directly to disks — this will irreversibly erase data.
+  Always confirm the target and back up important data before use.
+- Use elevated permissions when required; Flint will prompt to elevate.
 
-## Run from source
+Support & contribution
+- Open issues and pull requests on GitHub: https://github.com/gowthvm/Flint
 
-```
-pythonw flint.pyw
-```
-
-Double-clicking `flint.pyw` works too. `pythonw` runs windowless, so no
-console window appears (use `python main.py` only when you want console
-output for diagnostics). Flint restarts itself elevated via UAC when needed,
-still windowless.
-
-## Scope
-
-- Target platform: 64-bit Windows (exe is x64-only).
-- Raw image mode only: one ISO/DD image per drive. Multi-boot images such as
-  Ventoy are **not** supported and not planned.
-- The elevated window may briefly appear and hide behind other windows; this is
-  the standard Windows UAC/Secure Desktop behaviour.
-
-## Warning
-
-Flint is intended for **casual verification only** and is provided without
-warranty. Always back up your data, and verify the result independently with a
-trusted tool and a known-good image. **This software can permanently destroy
-data.** The developer is not liable for data loss, damage, or any other harm
-caused by this software. Identifying the correct target drive is the user's
-responsibility: Flint refuses to continue if a selected drive changes identity
-or disconnect between selection and write.
+License
+- Refer to the repository for license information (if absent, request clarification).
