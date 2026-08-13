@@ -1,0 +1,162 @@
+
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  .app{display:flex;height:580px;background:#0a0a0a;border-radius:12px;overflow:hidden;border:1px solid #1f1f1f;font-family:var(--font-sans);}
+  .sidebar{width:200px;background:#0a0a0a;border-right:1px solid #1f1f1f;display:flex;flex-direction:column;padding:0;}
+  .logo{padding:22px 20px;border-bottom:1px solid #1f1f1f;display:flex;align-items:center;gap:10px;}
+  .logo-mark{width:26px;height:26px;background:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;}
+  .logo-mark svg{width:14px;height:14px;}
+  .logo-name{font-size:14px;font-weight:500;color:#fff;letter-spacing:0.01em;}
+  .nav{flex:1;padding:12px 8px;}
+  .nav-item{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:6px;font-size:13px;color:#555;cursor:pointer;margin-bottom:1px;transition:color 0.1s,background 0.1s;}
+  .nav-item.active{color:#fff;background:#1a1a1a;}
+  .nav-item i{font-size:15px;}
+  .badge{margin-left:auto;font-size:10px;background:#1f1f1f;color:#555;padding:2px 6px;border-radius:10px;}
+  .badge.on{background:#fff;color:#000;}
+  .sidebar-foot{padding:12px 8px;border-top:1px solid #1f1f1f;}
+  .drive-chip{background:#111;border:1px solid #1f1f1f;border-radius:6px;padding:10px 12px;display:flex;align-items:center;gap:8px;}
+  .drive-dot{width:6px;height:6px;border-radius:50%;background:#fff;}
+  .drive-name{font-size:12px;color:#fff;font-weight:500;}
+  .drive-sub{font-size:11px;color:#444;margin-top:1px;}
+  .main{flex:1;display:flex;flex-direction:column;background:#0a0a0a;}
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid #1f1f1f;}
+  .tb-left{display:flex;flex-direction:column;gap:2px;}
+  .tb-title{font-size:14px;font-weight:500;color:#fff;}
+  .tb-sub{font-size:11px;color:#333;}
+  .tb-actions{display:flex;gap:6px;}
+  .ib{width:30px;height:30px;border-radius:6px;background:#111;border:1px solid #1f1f1f;display:flex;align-items:center;justify-content:center;color:#444;cursor:pointer;}
+  .ib i{font-size:15px;}
+  .content{flex:1;padding:20px 24px;display:flex;flex-direction:column;gap:14px;overflow:hidden;}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .section-label{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;}
+  .iso-zone{border:1px solid #1f1f1f;border-radius:8px;padding:20px;display:flex;align-items:center;gap:14px;cursor:pointer;background:#0e0e0e;}
+  .iso-icon{width:38px;height:38px;background:#111;border:1px solid #1f1f1f;border-radius:7px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;flex-shrink:0;}
+  .iso-name{font-size:13px;font-weight:500;color:#fff;}
+  .iso-meta{font-size:11px;color:#333;margin-top:3px;}
+  .iso-check{margin-left:auto;font-size:16px;color:#fff;}
+  .block{background:#0e0e0e;border:1px solid #1f1f1f;border-radius:8px;padding:14px 16px;}
+  .seg{display:flex;gap:4px;}
+  .seg-btn{flex:1;padding:7px 0;font-size:12px;border-radius:5px;border:1px solid #1f1f1f;background:transparent;color:#444;cursor:pointer;text-align:center;}
+  .seg-btn.on{background:#fff;color:#000;border-color:#fff;}
+  .progress-area{background:#0e0e0e;border:1px solid #1f1f1f;border-radius:8px;padding:16px 18px;}
+  .prog-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px;}
+  .prog-title{font-size:13px;font-weight:500;color:#fff;}
+  .prog-pct{font-size:22px;font-weight:500;color:#fff;}
+  .prog-track{height:2px;background:#1a1a1a;border-radius:1px;overflow:hidden;}
+  .prog-fill{height:100%;width:67%;background:#fff;border-radius:1px;}
+  .prog-stats{display:flex;justify-content:space-between;margin-top:10px;}
+  .stat{font-size:11px;color:#333;}
+  .stat span{color:#666;display:block;font-size:10px;margin-bottom:2px;}
+  .bottombar{padding:14px 24px;border-top:1px solid #1f1f1f;display:flex;gap:8px;align-items:center;}
+  .btn-sec{padding:9px 16px;border-radius:7px;border:1px solid #1f1f1f;background:transparent;color:#555;font-size:13px;cursor:pointer;}
+  .btn-pri{flex:1;padding:10px;border-radius:7px;border:none;background:#fff;color:#000;font-size:13px;font-weight:500;cursor:pointer;}
+  .verify{display:flex;align-items:center;gap:7px;font-size:11px;color:#333;}
+  .tog{width:28px;height:16px;background:#fff;border-radius:8px;position:relative;cursor:pointer;}
+  .tog::after{content:'';position:absolute;width:12px;height:12px;border-radius:50%;background:#000;top:2px;right:2px;}
+</style>
+
+<div class="app">
+  <div class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">
+        <svg viewBox="0 0 14 14" fill="none"><path d="M7 1.5L12 4.5V9.5L7 12.5L2 9.5V4.5L7 1.5Z" fill="#0a0a0a" stroke="#0a0a0a" stroke-width="0.5"/><circle cx="7" cy="7" r="2" fill="#0a0a0a"/></svg>
+      </div>
+      <span class="logo-name">Flint</span>
+    </div>
+    <div class="nav">
+      <div class="nav-item active"><i class="ti ti-usb" aria-hidden="true"></i> Write USB <span class="badge on">1</span></div>
+      <div class="nav-item"><i class="ti ti-device-floppy" aria-hidden="true"></i> Disk image</div>
+      <div class="nav-item"><i class="ti ti-shield-check" aria-hidden="true"></i> Verify</div>
+      <div class="nav-item"><i class="ti ti-history" aria-hidden="true"></i> History</div>
+      <div class="nav-item"><i class="ti ti-settings" aria-hidden="true"></i> Settings</div>
+    </div>
+    <div class="sidebar-foot">
+      <div class="drive-chip">
+        <div class="drive-dot"></div>
+        <div>
+          <div class="drive-name">SanDisk Ultra</div>
+          <div class="drive-sub">64 GB · USB 3.0 · F:</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <div class="tb-left">
+        <div class="tb-title">Write bootable USB</div>
+        <div class="tb-sub">SanDisk Ultra · 64 GB selected</div>
+      </div>
+      <div class="tb-actions">
+        <div class="ib"><i class="ti ti-refresh" aria-hidden="true"></i></div>
+        <div class="ib"><i class="ti ti-dots" aria-hidden="true"></i></div>
+      </div>
+    </div>
+
+    <div class="content">
+      <div>
+        <div class="section-label">Image source</div>
+        <div class="iso-zone">
+          <div class="iso-icon"><i class="ti ti-file-zip" aria-hidden="true"></i></div>
+          <div>
+            <div class="iso-name">ubuntu-24.04-desktop-amd64.iso</div>
+            <div class="iso-meta">5.7 GB · SHA256 verified · Ubuntu 24.04 LTS</div>
+          </div>
+          <div class="iso-check"><i class="ti ti-circle-check" aria-hidden="true"></i></div>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="block">
+          <div class="section-label">Partition scheme</div>
+          <div class="seg">
+            <div class="seg-btn on">GPT</div>
+            <div class="seg-btn">MBR</div>
+          </div>
+        </div>
+        <div class="block">
+          <div class="section-label">Target system</div>
+          <div class="seg">
+            <div class="seg-btn on">UEFI</div>
+            <div class="seg-btn">BIOS</div>
+            <div class="seg-btn">Both</div>
+          </div>
+        </div>
+        <div class="block">
+          <div class="section-label">File system</div>
+          <div class="seg">
+            <div class="seg-btn">FAT32</div>
+            <div class="seg-btn on">NTFS</div>
+            <div class="seg-btn">exFAT</div>
+          </div>
+        </div>
+        <div class="block">
+          <div class="section-label">Write mode</div>
+          <div class="seg">
+            <div class="seg-btn on">ISO image</div>
+            <div class="seg-btn">DD image</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="progress-area">
+        <div class="prog-head">
+          <div class="prog-title">Writing…</div>
+          <div class="prog-pct">67%</div>
+        </div>
+        <div class="prog-track"><div class="prog-fill"></div></div>
+        <div class="prog-stats">
+          <div class="stat"><span>Written</span>3.8 GB / 5.7 GB</div>
+          <div class="stat"><span>Speed</span>118 MB/s</div>
+          <div class="stat"><span>Remaining</span>~42 s</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottombar">
+      <button class="btn-sec">Cancel</button>
+      <button class="btn-pri">Flash drive</button>
+      <div class="verify"><div class="tog"></div> Verify after write</div>
+    </div>
+  </div>
+</div>
