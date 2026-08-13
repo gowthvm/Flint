@@ -40,6 +40,28 @@ Expert options (partition & boot)
   not byte-identical to the image.
 - Expert choices persist in `%APPDATA%\Flint\settings.json`.
 
+Expert options (persistence & Windows To Go)
+- When a Linux ISO is selected (casper / filesystem.squashfs / live detected in
+  its ISO9660 tree), an optional **Persistence** toggle appears in Expert mode.
+  Persistence keeps changes between reboots on live Linux sticks.
+  - Ubuntu-style images get a `casper-rw` ext4 image at the drive root and the
+    boot config (`grub.cfg`, `isolinux.cfg`, `syslinux.cfg`, `extlinux.conf`)
+    is patched to pass the `persistent` kernel option.
+  - Debian-live images get a `live/persistence.conf` overlay instead.
+  - The ext4 image is formatted with `wsl mke2fs` (falling back to a native
+    `mke2fs`/`makefs` when WSL has no distribution). When no tool is available
+    the image is still created but left unformatted — an explicit warning is
+    shown — so it must be formatted as ext4 manually for persistence to work.
+- When a Windows installation ISO is selected (sources/install.wim, .esd or
+  .swm — including UDF-only images found via a raw scan), an optional
+  **Windows To Go** toggle appears. It applies the image with
+  `dism /Apply-Image /Index:1` and installs boot files with
+  `bcdboot ... /f ALL`, so the stick boots as a portable Windows install.
+  - Windows To Go requires NTFS (selected automatically) and elevation; the
+    first edition in the image (index 1) is used by default.
+  - Persistence and Windows To Go are mutually exclusive and both require
+    File copy mode.
+
 Safety & limitations
 - Target platform: 64-bit Windows only.
 - Flint writes raw images directly to disks — this will irreversibly erase data.

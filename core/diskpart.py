@@ -28,6 +28,9 @@ _FORMAT = os.path.join(_SYSTEM32, "format.com")
 _POWERSHELL = os.path.join(
     _SYSTEM32, "WindowsPowerShell", "v1.0", "powershell.exe"
 )
+_DISM = os.path.join(_SYSTEM32, "dism.exe")
+_BCD_BOOT = os.path.join(_SYSTEM32, "bcdboot.exe")
+_WINDOWS_IMAGE_NAMES = ("install.wim", "install.esd", "install.swm")
 
 
 def _require_windows() -> None:
@@ -80,8 +83,10 @@ def build_diskpart_script(drive_number: int, partition_scheme: str) -> str:
         "clean",
         f"convert {scheme}",
         "create partition primary",
-        "assign",
     ]
+    if scheme == "mbr":
+        lines.append("active")
+    lines.append("assign")
     return "\n".join(lines) + "\n"
 
 
@@ -209,5 +214,45 @@ def copy_iso_files(iso_path: str, target_letter: str) -> None:
     source_letter = mount_iso(iso_path)
     try:
         copy_tree(source_letter, target_letter)
+    finally:
+        dismount_iso(iso_path)
+
+
+def _find_windows_image(source_letter: str) -> str | None:
+    sources = f"{source_letter}:\\sources"
+    for name in _WINDOWS_IMAGE_NAMES:
+        candidate = os.path.join(sources, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def apply_windows_image(iso_path: str, target_letter: str) -> None:
+    """Apply a Windows installation image onto a drive (Windows To Go).
+
+    Mounts the ISO, applies ``sources/install.wim|esd|swm`` with ``dism`` and
+    installs boot files with ``bcdboot`` (UEFI + legacy). The target
+    partition must be NTFS; requires elevation. The image index defaults to 1
+    (see README for multi-edition images).
+    """
+    _require_windows()
+    source_letter = mount_iso(iso_path)
+    try:
+        image = _find_windows_image(source_letter)
+        if image is None:
+            raise OSError(
+                "no sources/install.wim, install.esd or install.swm found "
+                "on the mounted image"
+            )
+        _run(
+            [
+                _DISM,
+                "/Apply-Image",
+                f"/ImageFile:{image}",
+                "/Index:1",
+                f"/ApplyDir:{target_letter}:\\",
+            ]
+        )
+        _run([_BCD_BOOT, f"{target_letter}:\\Windows", "/f", "ALL"])
     finally:
         dismount_iso(iso_path)

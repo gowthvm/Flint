@@ -102,8 +102,28 @@ class IsoWorker(QThread):
                 self.hash_done.emit(self._path, False, "")
 
 
+class IsoDetectWorker(QThread):
+    detected = pyqtSignal(str, bool, bool)  # path, is_linux, is_windows
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self._path = path
+
+    def run(self) -> None:
+        from core.iso import detect_linux_iso, detect_windows_iso
+
+        try:
+            linux = detect_linux_iso(self._path)
+            windows = detect_windows_iso(self._path)
+            self.detected.emit(self._path, linux, windows)
+        except Exception:
+            logger.exception("IsoDetectWorker.run failed")
+            self.detected.emit(self._path, False, False)
+
+
 class IsoDropZone(QFrame):
     iso_selected = pyqtSignal(str)
+    iso_analysis = pyqtSignal(str, bool, bool)  # path, is_linux, is_windows
 
     def __init__(self) -> None:
         super().__init__()
@@ -113,6 +133,7 @@ class IsoDropZone(QFrame):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._path: str | None = None
         self._worker: IsoWorker | None = None
+        self._analyzer: IsoDetectWorker | None = None
         self._digest: str | None = None
         self._hash_finished = False
         self._retired_workers: list[QThread] = []
@@ -273,9 +294,17 @@ class IsoDropZone(QFrame):
         if old is not None:
             self._retired_workers.append(old)
         self._worker = None
+        analyzer = self._analyzer
+        if analyzer is not None and analyzer.isRunning():
+            analyzer.requestInterruption()
+            analyzer.wait(3000)
+        if analyzer is not None:
+            self._retired_workers.append(analyzer)
+        self._analyzer = None
         self._digest = None
         self._hash_finished = False
         self._path = None
+        self.iso_analysis.emit("", False, False)
         self._drop_error.setVisible(False)
         self._drop_timer.stop()
         self._loaded.setVisible(False)
@@ -314,6 +343,16 @@ class IsoDropZone(QFrame):
         worker.hash_done.connect(self._on_hash_done)
         worker.progress.connect(self._on_hash_progress)
         worker.start()
+
+        analyzer = IsoDetectWorker(path)
+        self._analyzer = analyzer
+        analyzer.detected.connect(self._on_analysis)
+        analyzer.start()
+
+    def _on_analysis(self, path: str, is_linux: bool, is_windows: bool) -> None:
+        if path != self._path:
+            return
+        self.iso_analysis.emit(path, is_linux, is_windows)
 
     def _on_hash_progress(self, percent: int) -> None:
         if self._path is None or self._hash_finished:
@@ -797,6 +836,8 @@ class MainWindow(QMainWindow):
         self._writing = False
         self._write_started = 0.0
         self._write_was_filecopy = False
+        self._iso_linux = False
+        self._iso_windows = False
         self._tray: QSystemTrayIcon | None = None
         self._tb = None
         self._tb_tried = False
@@ -828,6 +869,10 @@ class MainWindow(QMainWindow):
             self._target_combo,
             self._filesystem_combo,
             self._mode_combo,
+            self._persistence_toggle,
+            self._persistence_size,
+            self._persistence_unit,
+            self._wtg_toggle,
         ]
 
         # Keep primary action states in sync with selections and busy state
@@ -835,6 +880,7 @@ class MainWindow(QMainWindow):
             self._iso_zone.iso_selected.connect(self._on_iso_selected)
         except Exception:
             pass
+        self._iso_zone.iso_analysis.connect(self._on_iso_analysis)
         self._update_controls_state()
 
         geometry = settings.get("window_geometry")
@@ -2196,9 +2242,56 @@ class MainWindow(QMainWindow):
             row.addWidget(combo, 1)
             col.addLayout(row)
 
+        self._persistence_toggle = ToggleSwitch(checked=False)
+        self._persistence_toggle.setToolTip(
+            "Keep changes across reboots (Ubuntu casper-rw / Debian live)"
+        )
+        self._persistence_size = QLineEdit()
+        self._persistence_size.setObjectName("persistenceSize")
+        self._persistence_size.setPlaceholderText("1024")
+        self._persistence_size.setFixedWidth(80)
+        self._persistence_unit = QComboBox()
+        self._persistence_unit.addItem("MB", "mb")
+        self._persistence_unit.addItem("GB", "gb")
+        persistence_row = QHBoxLayout()
+        persistence_row.setSpacing(8)
+        p_label = QLabel("Enable persistence")
+        p_label.setObjectName("capLabel")
+        p_label.setProperty("colorRole", "label")
+        persistence_row.addWidget(self._persistence_toggle)
+        persistence_row.addWidget(p_label)
+        persistence_row.addStretch()
+        persistence_row.addWidget(self._persistence_size)
+        persistence_row.addWidget(self._persistence_unit)
+        col.addLayout(persistence_row)
+        self._persistence_row_widgets = [
+            self._persistence_toggle,
+            self._persistence_size,
+            self._persistence_unit,
+        ]
+
+        self._wtg_toggle = ToggleSwitch(checked=False)
+        self._wtg_toggle.setToolTip(
+            "Apply the Windows image with dism and boot it from USB "
+            "(requires NTFS, file-copy mode)"
+        )
+        wtg_row = QHBoxLayout()
+        wtg_row.setSpacing(8)
+        wtg_label = QLabel("Windows To Go")
+        wtg_label.setObjectName("capLabel")
+        wtg_label.setProperty("colorRole", "label")
+        wtg_row.addWidget(self._wtg_toggle)
+        wtg_row.addWidget(wtg_label)
+        wtg_row.addStretch()
+        col.addLayout(wtg_row)
+        self._wtg_row = wtg_row
+
+        self._persistence_toggle.toggled.connect(self._on_expert_changed)
+        self._wtg_toggle.toggled.connect(self._on_wtg_changed)
         self._expert_toggle.toggled.connect(self._set_expert_mode)
         self._expert_panel = card
         self._expert_panel.setVisible(bool(settings.get("expert_mode")))
+        self._update_expert_visibility()
         self._update_expert_hint()
         return card
 
@@ -2209,16 +2302,69 @@ class MainWindow(QMainWindow):
             filesystem=self._filesystem_combo.currentData(),
             write_mode=self._mode_combo.currentData(),
         )
+        self._update_expert_visibility()
         self._update_expert_hint()
+
+    def _on_wtg_changed(self, enabled: bool) -> None:
+        self._on_expert_changed()
+        if enabled:
+            # Windows To Go requires an NTFS target; keep the choice honest.
+            self._filesystem_combo.setCurrentIndex(
+                self._filesystem_combo.findData("ntfs")
+            )
+            self._filesystem_combo.setEnabled(False)
+            self._persistence_toggle.setChecked(False)
+            self._persistence_toggle.setEnabled(False)
+        else:
+            self._filesystem_combo.setEnabled(True)
+            self._persistence_toggle.setEnabled(True)
+
+    def _on_iso_analysis(
+        self, path: str, is_linux: bool, is_windows: bool
+    ) -> None:
+        if path and path != self._iso_zone.path:
+            return
+        self._iso_linux = is_linux
+        self._iso_windows = is_windows
+        if not is_linux:
+            self._persistence_toggle.setChecked(False)
+        if not is_windows:
+            self._wtg_toggle.setChecked(False)
+        self._update_expert_visibility()
+        self._update_expert_hint()
+
+    def _update_expert_visibility(self) -> None:
+        expert = bool(settings.get("expert_mode"))
+        for widget in self._persistence_row_widgets:
+            widget.setVisible(expert and self._iso_linux)
+        self._persistence_toggle.setEnabled(
+            expert and self._iso_linux and not self._wtg_toggle.isChecked()
+        )
+        self._wtg_toggle.setVisible(expert and self._iso_windows)
 
     def _set_expert_mode(self, enabled: bool) -> None:
         settings.set_many(expert_mode=bool(enabled))
         self._expert_toggle.setChecked(bool(enabled))
         self._expert_panel.setVisible(bool(enabled))
+        self._update_expert_visibility()
         self._update_expert_hint()
 
     def _update_expert_hint(self) -> None:
         mode = self._mode_combo.currentData()
+        if mode == "filecopy" and self._wtg_toggle.isChecked():
+            self._raw_hint.setText(
+                "Windows To Go: the Windows image is applied to the drive "
+                "with dism and made bootable (NTFS). The drive is "
+                "reformatted."
+            )
+            return
+        if mode == "filecopy" and self._persistence_toggle.isChecked():
+            self._raw_hint.setText(
+                "Persistence: after copying, a casper-rw persistence image "
+                "(or live overlay) is created and the boot config is "
+                "patched with the persistent kernel option."
+            )
+            return
         if mode == "filecopy":
             fs = (self._filesystem_combo.currentData() or "fat32").upper()
             scheme = self._partition_combo.currentData()
@@ -2322,13 +2468,59 @@ class MainWindow(QMainWindow):
         drive = self._current_drive
         name = drive["model"] or drive["name"]
         iso_name = os.path.basename(iso)
+        expert = bool(settings.get("expert_mode"))
+        wtg = bool(
+            expert
+            and self._iso_windows
+            and self._wtg_toggle.isChecked()
+        )
+        persist = bool(
+            expert
+            and self._iso_linux
+            and self._persistence_toggle.isChecked()
+        )
+        mode = self._mode_combo.currentData() if expert else "auto"
+        if (persist or wtg) and mode != "filecopy":
+            self._progress.set_error(
+                "Persistence / Windows To Go require File copy mode "
+                "\u2014 enable it in Expert options"
+            )
+            return
+        persistence_size_mb = 1024
+        if persist:
+            raw = self._persistence_size.text().strip() or "1024"
+            try:
+                persistence_size_mb = int(raw)
+                if self._persistence_unit.currentData() == "gb":
+                    persistence_size_mb *= 1024
+            except ValueError:
+                self._progress.set_error(
+                    "Persistence size must be a whole number of MB/GB"
+                )
+                return
+            if persistence_size_mb <= 0:
+                self._progress.set_error(
+                    "Persistence size must be greater than zero"
+                )
+                return
         prompt = QMessageBox(self)
         prompt.setIcon(QMessageBox.Icon.Warning)
         prompt.setWindowTitle("Flint \u2014 erase drive and write?")
         prompt.setText(
             f"Erase {name} ({drive['letter']}:) and write {iso_name}?"
         )
-        prompt.setInformativeText(self._confirm_text(drive, iso))
+        confirm_text = self._confirm_text(drive, iso)
+        if wtg:
+            confirm_text += (
+                "\n\nWindows To Go: the drive becomes a portable Windows "
+                "workspace (NTFS, bootable via dism/bcdboot)."
+            )
+        elif persist:
+            confirm_text += (
+                "\n\nPersistence: a casper-rw / live persistence store is "
+                "created on the drive."
+            )
+        prompt.setInformativeText(confirm_text)
         prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         erase = prompt.addButton(
             "Erase & write", QMessageBox.ButtonRole.AcceptRole
@@ -2371,12 +2563,15 @@ class MainWindow(QMainWindow):
             [current["letter"]] if current.get("letter") else []
         )
         writer_kwargs = {}
-        if settings.get("expert_mode"):
+        if expert:
             writer_kwargs = {
                 "partition_scheme": self._partition_combo.currentData(),
                 "target_system": self._target_combo.currentData(),
                 "filesystem": self._filesystem_combo.currentData(),
-                "write_mode": self._mode_combo.currentData(),
+                "write_mode": mode,
+                "persistence": persist,
+                "persistence_size_mb": persistence_size_mb,
+                "windows_to_go": wtg,
             }
         writer = UsbWriter(
             iso,
@@ -2385,7 +2580,9 @@ class MainWindow(QMainWindow):
             **writer_kwargs,
         )
         self._writer = writer
+        self._write_note = None
         writer.mode.connect(self._on_write_mode)
+        writer.note.connect(self._on_write_note)
         writer.progress.connect(self._on_write_progress)
         writer.speed_mbps.connect(self._progress.set_speed)
         writer.written_bytes.connect(self._progress.set_written)
@@ -2403,6 +2600,9 @@ class MainWindow(QMainWindow):
 
     def _on_write_mode(self, mode: str) -> None:
         self._write_was_filecopy = mode == "filecopy"
+
+    def _on_write_note(self, note: str) -> None:
+        self._write_note = note
 
     def _on_write_finished(self, ok: bool, message: str) -> None:
         self._write_duration = time.perf_counter() - self._write_started
@@ -2425,6 +2625,8 @@ class MainWindow(QMainWindow):
                     "to the image."
                 ),
             )
+            if self._write_note:
+                self._progress.set_warning(self._write_note)
             return
         if self._verify_toggle.isChecked():
             if self._iso_zone.digest:

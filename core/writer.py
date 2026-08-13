@@ -6,7 +6,8 @@ from collections import deque
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core import diskpart
+from core import diskpart, persistence
+from core import iso as iso_mod
 
 logger = logging.getLogger("flint")
 
@@ -19,6 +20,7 @@ class UsbWriter(QThread):
     eta_seconds = pyqtSignal(int)
     phase = pyqtSignal(str)
     mode = pyqtSignal(str)
+    note = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
     CHUNK_SIZE = 4 * 1024 * 1024
@@ -47,6 +49,9 @@ class UsbWriter(QThread):
         target_system: str = "auto",
         filesystem: str = "fat32",
         write_mode: str = "auto",
+        persistence: bool = False,
+        persistence_size_mb: int = 1024,
+        windows_to_go: bool = False,
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
@@ -56,6 +61,9 @@ class UsbWriter(QThread):
         self.target_system = target_system
         self.filesystem = filesystem
         self.write_mode = write_mode
+        self.persistence = persistence
+        self.persistence_size_mb = persistence_size_mb
+        self.windows_to_go = windows_to_go
         self._canceled = False
 
     def cancel(self) -> None:
@@ -213,8 +221,23 @@ class UsbWriter(QThread):
             self.filesystem,
         )
         self.progress.emit(10.0)
-        self.phase.emit("Copying files")
-        diskpart.copy_iso_files(self.iso_path, letter)
+        if self.windows_to_go:
+            self.phase.emit("Applying Windows image")
+            diskpart.apply_windows_image(self.iso_path, letter)
+        else:
+            self.phase.emit("Copying files")
+            diskpart.copy_iso_files(self.iso_path, letter)
+        if self.persistence and not self.windows_to_go:
+            self.phase.emit("Creating persistence")
+            paths = iso_mod.list_iso_paths(self.iso_path)
+            ok, message = persistence.create_persistence(
+                f"{letter}:\\", self.persistence_size_mb, paths
+            )
+            if ok:
+                logger.info("persistence: %s", message)
+            else:
+                logger.warning("persistence partial: %s", message)
+            self.note.emit(message)
         self.progress.emit(100.0)
         self.finished.emit(True, "")
 
