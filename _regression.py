@@ -466,7 +466,7 @@ w4._relaunch_elevated()
 w4._detector.last_error = None
 check("admin relaunch affordance")
 
-# first close offers tray keep/quit; remembered afterwards
+# close blocked while busy; hides to tray only when close_to_tray is on
 class _Tray:
     def setToolTip(self, t):
         pass
@@ -475,16 +475,18 @@ class _Tray:
         pass
 
 w4._tray = _Tray()
-s.set_many(tray_hint_seen=False)
-prompts = []
-w4._tray_close_prompt = lambda: prompts.append(1) or "keep"
+s.set_many(close_to_tray=True)
+w4._close_to_tray_toggle.setChecked(True)
+w4.show()
+w4._writing = True
 w4.close()
-assert prompts == [1] and s.get("tray_hint_seen") is True
+assert not w4.isHidden()
+w4._writing = False
+w4.close()
 assert w4.isHidden()
-w4._tray_close_prompt = lambda: prompts.append(2) or "keep"
-w4.close()
-assert prompts == [1]
-check("tray close hint once")
+s.set_many(close_to_tray=False)
+w4._close_to_tray_toggle.setChecked(False)
+check("close blocked while busy; tray close opt-in")
 
 # confirm text includes the data-erasure warning when content is known
 ok_du = uw.shutil.disk_usage

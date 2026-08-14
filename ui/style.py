@@ -620,6 +620,25 @@ QWidget#toggleTrack[on="false"] QLabel#toggleKnob {
     background: @muted;
 }
 
+QRadioButton {
+    color: @text;
+    font-size: $font_base;
+    spacing: 8px;
+}
+
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    border: 1px solid @border;
+    background: @card;
+}
+
+QRadioButton::indicator:checked {
+    background: @primary;
+    border: none;
+}
+
 QScrollArea {
     background: transparent;
     border: none;

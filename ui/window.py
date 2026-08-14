@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -1019,6 +1020,7 @@ class MainWindow(QMainWindow):
             ("\u270e", "Write", True, None),
             ("\u2714", "Verify", False, None),
             ("\u21ba", "History", False, None),
+            ("\u2699", "Settings", False, None),
         ]
 
         nav = QVBoxLayout()
@@ -1405,6 +1407,7 @@ class MainWindow(QMainWindow):
         self._pages.addWidget(self._build_content())
         self._pages.addWidget(self._build_history_page())
         self._pages.addWidget(self._build_verify_page())
+        self._pages.addWidget(self._build_settings_page())
         layout.addWidget(self._pages, 1)
 
         bottom_divider = QFrame()
@@ -1418,35 +1421,112 @@ class MainWindow(QMainWindow):
 
     def _build_dots_menu(self) -> QMenu:
         menu = QMenu(self)
-        theme = settings.get("theme")
-
-        def _tick(current: bool) -> str:
-            return "\u2713  " if current else "    "
-
-        light = menu.addAction(f"{_tick(theme == 'light')}Light theme")
-        light.triggered.connect(lambda: self._set_theme("light"))
-        contrast = menu.addAction(
-            f"{_tick(theme == 'high-contrast')}High contrast"
-        )
-        contrast.triggered.connect(
-            lambda: self._set_theme("high-contrast")
-        )
-        dark = menu.addAction(f"{_tick(theme == 'dark')}Dark theme")
-        dark.triggered.connect(lambda: self._set_theme("dark"))
-        menu.addSeparator()
-        expert_on = bool(settings.get("expert_mode"))
-        expert = menu.addAction(f"{_tick(expert_on)}Expert mode")
-        expert.triggered.connect(
-            lambda: self._set_expert_mode(not expert_on)
-        )
-        menu.addSeparator()
-        menu.addAction("Reset window size").triggered.connect(
-            lambda: self.resize(900, 580)
+        menu.addAction("Settings").triggered.connect(
+            lambda: self._on_nav_clicked(3)
         )
         return menu
 
     def _show_dots_menu(self) -> None:
         self._build_dots_menu().exec(QCursor.pos())
+
+    def _build_settings_page(self) -> QWidget:
+        page = QWidget()
+        col = QVBoxLayout(page)
+        col.setContentsMargins(24, 20, 24, 20)
+        col.setSpacing(14)
+
+        col.addWidget(self._build_section_label("Settings"))
+
+        appearance = QFrame()
+        appearance.setObjectName("block")
+        acol = QVBoxLayout(appearance)
+        acol.setContentsMargins(14, 12, 14, 12)
+        acol.setSpacing(8)
+
+        title = QLabel("APPEARANCE")
+        title.setObjectName("capLabel")
+        title.setProperty("colorRole", "muted")
+        acol.addWidget(title)
+
+        self._theme_radios: dict[str, QRadioButton] = {}
+        theme = settings.get("theme")
+        for label, key in (
+            ("Light theme", "light"),
+            ("High contrast", "high-contrast"),
+            ("Dark theme", "dark"),
+        ):
+            radio = QRadioButton(label)
+            radio.setChecked(theme == key)
+            radio.toggled.connect(
+                lambda checked, t=key: checked and self._set_theme(t)
+            )
+            self._theme_radios[key] = radio
+            acol.addWidget(radio)
+
+        behavior = QFrame()
+        behavior.setObjectName("block")
+        bcol = QVBoxLayout(behavior)
+        bcol.setContentsMargins(14, 12, 14, 12)
+        bcol.setSpacing(8)
+
+        title = QLabel("BEHAVIOR")
+        title.setObjectName("capLabel")
+        title.setProperty("colorRole", "muted")
+        bcol.addWidget(title)
+
+        self._settings_expert_toggle = ToggleSwitch(
+            checked=bool(settings.get("expert_mode"))
+        )
+        self._settings_expert_toggle.toggled.connect(self._set_expert_mode)
+        expert_row = QHBoxLayout()
+        expert_row.setSpacing(8)
+        expert_label = QLabel("Expert mode")
+        expert_label.setObjectName("capLabel")
+        expert_label.setProperty("colorRole", "label")
+        expert_row.addWidget(self._settings_expert_toggle)
+        expert_row.addWidget(expert_label)
+        expert_row.addStretch()
+        bcol.addLayout(expert_row)
+
+        self._close_to_tray_toggle = ToggleSwitch(
+            checked=bool(settings.get("close_to_tray"))
+        )
+        self._close_to_tray_toggle.toggled.connect(
+            lambda on: settings.set_many(close_to_tray=bool(on))
+        )
+        tray_row = QHBoxLayout()
+        tray_row.setSpacing(8)
+        tray_label = QLabel(
+            "Minimize to system tray when the app is closed"
+        )
+        tray_label.setObjectName("capLabel")
+        tray_label.setProperty("colorRole", "label")
+        tray_row.addWidget(self._close_to_tray_toggle)
+        tray_row.addWidget(tray_label)
+        tray_row.addStretch()
+        bcol.addLayout(tray_row)
+
+        actions = QFrame()
+        actions.setObjectName("block")
+        xcol = QVBoxLayout(actions)
+        xcol.setContentsMargins(14, 12, 14, 12)
+        xcol.setSpacing(8)
+
+        title = QLabel("WINDOW")
+        title.setObjectName("capLabel")
+        title.setProperty("colorRole", "muted")
+        xcol.addWidget(title)
+
+        reset_btn = QPushButton("Reset window size")
+        reset_btn.setObjectName("ghost")
+        reset_btn.clicked.connect(lambda: self.resize(900, 580))
+        xcol.addWidget(reset_btn)
+
+        col.addWidget(appearance)
+        col.addWidget(behavior)
+        col.addWidget(actions)
+        col.addStretch()
+        return page
 
     def _set_theme(self, theme: str) -> None:
         from ui.style import build_style
@@ -1704,7 +1784,7 @@ class MainWindow(QMainWindow):
             return
         for i, item in enumerate(self._nav_items):
             item.set_active(i == index)
-        page = {0: 0, 1: 2, 2: 1}[index]
+        page = {0: 0, 1: 2, 2: 1, 3: 3}[index]
         if page == 1:
             self._reload_history()
         self._pages.setCurrentIndex(page)
@@ -1956,12 +2036,6 @@ class MainWindow(QMainWindow):
                 f"changeEvent minimized={self.isMinimized()} "
                 f"visible={self.isVisible()} writing={self._writing}"
             )
-        if (
-            event.type() == QEvent.Type.WindowStateChange
-            and self.isMinimized()
-            and self._writing
-        ):
-            QTimer.singleShot(0, self.hide)
         super().changeEvent(event)
 
     def event(self, e) -> bool:
@@ -2007,29 +2081,6 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
         self._retired_workers.clear()
 
-    def _tray_close_prompt(self) -> str | None:
-        prompt = QMessageBox(self)
-        prompt.setIcon(QMessageBox.Icon.Information)
-        prompt.setWindowTitle("Flint \u2014 keep running?")
-        prompt.setText(
-            "Closing the window keeps Flint running in the tray.\n"
-            "A drive write or verification continues in the background."
-        )
-        hide_btn = prompt.addButton(
-            "Keep running in tray", QMessageBox.ButtonRole.AcceptRole
-        )
-        quit_btn = prompt.addButton(
-            "Quit Flint", QMessageBox.ButtonRole.DestructiveRole
-        )
-        prompt.setDefaultButton(prompt.buttons()[0])
-        prompt.exec()
-        clicked = prompt.clickedButton()
-        if clicked is hide_btn:
-            return "keep"
-        if clicked is quit_btn:
-            return "quit"
-        return None
-
     def closeEvent(self, event) -> None:
         self._lifecycle_log(
             f"closeEvent writing={self._writing} "
@@ -2037,25 +2088,22 @@ class MainWindow(QMainWindow):
         )
         if self._busy():
             event.ignore()
-            self.hide()
+            if self._tray is not None:
+                self._tray.showMessage(
+                    "Flint",
+                    "A write is in progress \u2014 closing is disabled.\n"
+                    "You can minimise the window to the taskbar.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
             return
         self._save_settings()
-        if self._tray is None:
-            self._shutdown()
-            QApplication.instance().quit()
-            event.accept()
+        if self._tray is not None and settings.get("close_to_tray"):
+            event.ignore()
+            self.hide()
             return
-        if not settings.get("tray_hint_seen"):
-            choice = self._tray_close_prompt()
-            if choice is None:
-                event.ignore()
-                return
-            settings.set_many(tray_hint_seen=True)
-            if choice == "quit":
-                self._shutdown()
-                QApplication.instance().quit()
-                event.accept()
-                return
+        self._shutdown()
+        QApplication.instance().quit()
         event.accept()
 
     def _lifecycle_log(self, message: str) -> None:
@@ -2629,6 +2677,8 @@ class MainWindow(QMainWindow):
     def _set_expert_mode(self, enabled: bool) -> None:
         settings.set_many(expert_mode=bool(enabled))
         self._expert_toggle.setChecked(bool(enabled))
+        if hasattr(self, "_settings_expert_toggle"):
+            self._settings_expert_toggle.setChecked(bool(enabled))
         self._expert_options_body.setVisible(bool(enabled))
         self._update_expert_visibility()
         self._update_expert_hint()

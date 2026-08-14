@@ -134,24 +134,14 @@ def test_bottombar_stays_visible_when_nav_blocked_while_busy(qapp, tmp_path):
         w._shutdown()
 
 
-def test_dots_menu_ticks_active_theme_and_expert(qapp, tmp_path):
-    import core.settings as s
-
+def test_dots_menu_opens_settings_page(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
-        menu = w._build_dots_menu()
-        texts = [a.text() for a in menu.actions()]
-        assert "\u2713  Dark theme" in texts
-        assert "    Light theme" in texts
-        assert "    High contrast" in texts
-        assert "\u2713  Expert mode" in texts
-        assert not any(a.isCheckable() for a in menu.actions())
-        s.set_many(theme="light", expert_mode=False)
-        menu2 = w._build_dots_menu()
-        texts2 = [a.text() for a in menu2.actions()]
-        assert "\u2713  Light theme" in texts2
-        assert "    Dark theme" in texts2
-        assert "    Expert mode" in texts2
+        texts = [a.text() for a in w._build_dots_menu().actions()]
+        assert texts == ["Settings"]
+        w._build_dots_menu().actions()[0].trigger()
+        assert w._pages.currentIndex() == 3
+        assert w._bottombar.isHidden()
     finally:
         w._shutdown()
 
