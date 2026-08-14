@@ -189,6 +189,13 @@ def _maybe_show_crash_report(window: MainWindow) -> None:
 def main() -> int:
     _log(f"start: pid={os.getpid()} argv={sys.argv}")
     _install_crash_logging()
+    if "--cli" in sys.argv:
+        # Headless mode: no elevation prompt loop, no single-instance lock,
+        # no window. Exit codes and machine-readable output come from the
+        # cli module.
+        from core import cli
+
+        return cli.main()
     _ensure_admin()
     app = QApplication(sys.argv)
     app.setStyleSheet(build_style(settings.get("theme")))

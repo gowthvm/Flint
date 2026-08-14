@@ -1,5 +1,6 @@
 import ctypes
 import logging
+import os
 import time
 from collections import deque
 from typing import Any
@@ -8,10 +9,27 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 logger = logging.getLogger("flint")
 
+# Wipe methods and their pass patterns (in order):
+#   zero   - single pass of zeros (fast; basic erasure)
+#   random - single pass of random data (NIST SP 800-88 clear equivalent)
+#   nist   - alias for "random"
+#   dod    - DoD 5220.22-M style: zeros, then ones, then random data
+WIPE_METHODS = ("zero", "random", "nist", "dod")
+
+
+def _wipe_patterns(method: str) -> list[str]:
+    if method == "zero":
+        return ["zero"]
+    if method in ("random", "nist"):
+        return ["random"]
+    if method == "dod":
+        return ["zero", "ones", "random"]
+    raise ValueError(f"unknown wipe method: {method!r}")
+
 
 class WipeWorker(QThread):
-    """Zero-fill an entire raw drive, with progress, rolling speed and
-    cancellation support."""
+    """Overwrite an entire raw drive with a configurable pass pattern, with
+    progress, rolling speed and cancellation support."""
 
     progress = pyqtSignal(float)
     speed_mbps = pyqtSignal(float)
@@ -39,11 +57,17 @@ class WipeWorker(QThread):
     _ES_DISPLAY_REQUIRED = 0x00000002
 
     def __init__(
-        self, drive_path: str, letters: list[str] | None = None
+        self,
+        drive_path: str,
+        letters: list[str] | None = None,
+        method: str = "zero",
     ) -> None:
         super().__init__()
         self.drive_path = drive_path
         self.letters = letters or []
+        self.method = method
+        # Validate eagerly so a typo never silently defaults to zero-fill.
+        _wipe_patterns(method)
         self._canceled = False
 
     def cancel(self) -> None:
@@ -192,6 +216,14 @@ class WipeWorker(QThread):
         if written.value != len(data):
             raise OSError("short write on drive")
 
+    @staticmethod
+    def _pass_chunk(pattern: str, size: int) -> bytes:
+        if pattern == "zero":
+            return b"\x00" * size
+        if pattern == "ones":
+            return b"\xff" * size
+        return os.urandom(size)
+
     def run(self) -> None:
         kernel32 = self._kernel32()
         kernel32.SetThreadExecutionState(
@@ -218,42 +250,56 @@ class WipeWorker(QThread):
             total = self._drive_size(handle)
             if total <= 0:
                 raise OSError("unable to determine drive size")
-            zeros = b"\x00" * self.CHUNK_SIZE
+            patterns = _wipe_patterns(self.method)
         except OSError as exc:
             self.finished.emit(False, str(exc))
             ctypes.windll.kernel32.CloseHandle(handle)
             return
 
-        self.total_bytes.emit(total)
+        passes = len(patterns)
+        # Every pass writes the whole drive: report honest totals so the
+        # written/expected ratio and progress stay truthful across passes.
+        self.total_bytes.emit(total * passes)
         written = 0
         durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
         sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
         try:
-            self.phase.emit("Wiping")
-            while written < total:
+            for pass_index, pattern in enumerate(patterns, 1):
                 if self._canceled:
                     break
-                chunk = zeros[: min(self.CHUNK_SIZE, total - written)]
-                chunk_start = time.perf_counter()
-                self._write_chunk(handle, chunk)
-                durations.append(time.perf_counter() - chunk_start)
-                sizes.append(len(chunk))
-                written += len(chunk)
+                self.phase.emit(
+                    f"Wiping pass {pass_index}/{passes}"
+                    if passes > 1
+                    else "Wiping"
+                )
+                done = 0
+                while done < total:
+                    if self._canceled:
+                        break
+                    chunk = self._pass_chunk(
+                        pattern, min(self.CHUNK_SIZE, total - done)
+                    )
+                    chunk_start = time.perf_counter()
+                    self._write_chunk(handle, chunk)
+                    durations.append(time.perf_counter() - chunk_start)
+                    sizes.append(len(chunk))
+                    done += len(chunk)
+                    written += len(chunk)
 
-                window_bytes = sum(sizes)
-                window_time = sum(durations)
-                if window_time > 0 and window_bytes > 0:
-                    bytes_per_sec = window_bytes / window_time
-                    speed = bytes_per_sec / 1_000_000
-                    remaining = (total - written) / bytes_per_sec
-                else:
-                    speed = 0.0
-                    remaining = 0.0
+                    window_bytes = sum(sizes)
+                    window_time = sum(durations)
+                    if window_time > 0 and window_bytes > 0:
+                        bytes_per_sec = window_bytes / window_time
+                        speed = bytes_per_sec / 1_000_000
+                        remaining = (total * passes - written) / bytes_per_sec
+                    else:
+                        speed = 0.0
+                        remaining = 0.0
 
-                self.progress.emit(written / total * 100.0)
-                self.speed_mbps.emit(speed)
-                self.written_bytes.emit(written)
-                self.eta_seconds.emit(int(remaining))
+                    self.progress.emit(written / (total * passes) * 100.0)
+                    self.speed_mbps.emit(speed)
+                    self.written_bytes.emit(written)
+                    self.eta_seconds.emit(int(remaining))
             if not self._canceled:
                 self.phase.emit("Flushing")
                 if not ctypes.windll.kernel32.FlushFileBuffers(handle):

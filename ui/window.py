@@ -52,13 +52,17 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QSystemTrayIcon,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from core import checksum as checksum_mod
 from core import iso as iso_mod
 from core import settings
+from core.backup import BackupWorker
 from core.bootcheck import probe_bootability
+from core.clone import CloneWorker
 from core.drives import DriveDetector, DrivePoller
 from core.eject import eject_drive
 from core.history import (
@@ -862,6 +866,12 @@ class MainWindow(QMainWindow):
         self._verifier: VerifyWorker | None = None
         self._page_verifier: VerifyWorker | None = None
         self._wipe_worker: WipeWorker | None = None
+        self._backup_worker: BackupWorker | None = None
+        self._clone_worker: CloneWorker | None = None
+        self._backup_digest = ""
+        self._backup_out = ""
+        self._sidecar_status = "missing"
+        self._sidecar_detail = ""
         self._retired_workers: list[QThread] = []
         # Threads that refused to stop within the shutdown grace period.
         # Destroying a running QThread aborts the process mid-write, so they
@@ -923,6 +933,10 @@ class MainWindow(QMainWindow):
         # Keep primary action states in sync with selections and busy state
         try:
             self._iso_zone.iso_selected.connect(self._on_iso_selected)
+        except Exception:
+            pass
+        try:
+            self._iso_zone.hash_done.connect(self._on_iso_hash_ready)
         except Exception:
             pass
         self._iso_zone.iso_analysis.connect(self._on_iso_analysis)
@@ -987,6 +1001,8 @@ class MainWindow(QMainWindow):
             or self._verifier is not None
             or self._page_verifier is not None
             or self._wipe_worker is not None
+            or self._backup_worker is not None
+            or self._clone_worker is not None
         )
 
     def _build_sidebar(self) -> QWidget:
@@ -1121,6 +1137,19 @@ class MainWindow(QMainWindow):
                 action.triggered.connect(
                     lambda _, d=drive: self._select_drive(d)
                 )
+        menu.addSeparator()
+        backup_action = menu.addAction("Backup this drive to an image\u2026")
+        backup_action.setEnabled(self._current_drive is not None)
+        backup_action.setToolTip(
+            "Read the selected drive into a disk image file"
+        )
+        backup_action.triggered.connect(self._on_backup_clicked)
+        clone_action = menu.addAction("Clone this drive to another\u2026")
+        clone_action.setEnabled(self._current_drive is not None)
+        clone_action.setToolTip(
+            "Copy the selected drive onto a second drive"
+        )
+        clone_action.triggered.connect(self._on_clone_clicked)
         menu.addSeparator()
         refresh = menu.addAction("\u21bb Refresh")
         refresh.triggered.connect(self._request_scan)
@@ -1415,10 +1444,56 @@ class MainWindow(QMainWindow):
 
     def _on_iso_selected(self, path: str) -> None:
         # Called when an ISO is selected; refresh control states
+        self._sidecar_status, self._sidecar_detail = checksum_mod.check_sidecar(
+            path, self._iso_zone.digest
+        )
+        self._update_sidecar_label()
         try:
             self._update_controls_state()
         except Exception:
             pass
+
+    def _on_iso_hash_ready(self, path: str, ok: bool, digest: str) -> None:
+        # The drop zone finished hashing the image: re-evaluate any sidecar.
+        if path != getattr(self._iso_zone, "path", None):
+            return
+        self._sidecar_status, self._sidecar_detail = checksum_mod.check_sidecar(
+            path, digest if ok else None
+        )
+        self._update_sidecar_label()
+
+    def _update_sidecar_label(self) -> None:
+        status = self._sidecar_status
+        name = self._sidecar_detail or ""
+        if status == "missing":
+            self._sidecar_label.setVisible(False)
+            self._sidecar_label.setText("")
+            return
+        if status == "pending":
+            self._sidecar_label.setProperty("error", False)
+            self._sidecar_label.setText(
+                f"Checksum {name} found \u2014 verifying image\u2026"
+            )
+        elif status == "ok":
+            self._sidecar_label.setProperty("error", False)
+            self._sidecar_label.setText(
+                f"SHA-256 checksum matches {name}"
+            )
+        elif status == "mismatch":
+            self._sidecar_label.setProperty("error", True)
+            self._sidecar_label.setText(
+                f"SHA-256 MISMATCH vs {name} \u2014 the image is corrupt "
+                "or wrong. Flashing is blocked."
+            )
+        else:
+            self._sidecar_label.setProperty("error", True)
+            self._sidecar_label.setText(
+                f"Checksum {name or 'sidecar'} could not be read \u2014 "
+                "flashing is blocked until it is removed or fixed."
+            )
+        self._sidecar_label.setVisible(True)
+        self._sidecar_label.style().unpolish(self._sidecar_label)
+        self._sidecar_label.style().polish(self._sidecar_label)
 
     def _build_main(self) -> QWidget:
         main = QWidget()
@@ -2132,6 +2207,8 @@ class MainWindow(QMainWindow):
             self._verifier,
             self._page_verifier,
             self._wipe_worker,
+            self._backup_worker,
+            self._clone_worker,
         )
         # Cancel and wait for every live worker with the event loop pumping.
         # Never destroy a running QThread (that aborts the process and
@@ -2244,7 +2321,36 @@ class MainWindow(QMainWindow):
 
         self._wipe_btn = QPushButton("Wipe drive")
         self._wipe_btn.setObjectName("ghost")
-        self._wipe_btn.clicked.connect(self._on_wipe_clicked)
+        self._wipe_btn.clicked.connect(lambda: self._on_wipe_clicked("zero"))
+        wipe_menu = QMenu(self)
+        for label, method, tip in (
+            ("Zero fill (fast)", "zero", "Single pass of zeros"),
+            (
+                "Random data (NIST)",
+                "nist",
+                "Single pass of random data",
+            ),
+            (
+                "DoD 5220.22-M (3 passes)",
+                "dod",
+                "Zeros, ones, then random data",
+            ),
+        ):
+            action = wipe_menu.addAction(label)
+            action.setToolTip(tip)
+            action.triggered.connect(
+                lambda _, m=method: self._on_wipe_clicked(m)
+            )
+        self._wipe_menu = wipe_menu
+        self._wipe_menu_btn = QToolButton()
+        self._wipe_menu_btn.setObjectName("iconBtn")
+        self._wipe_menu_btn.setText("\u25be")
+        self._wipe_menu_btn.setToolTip("Wipe method")
+        self._wipe_menu_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self._wipe_menu_btn.setMenu(wipe_menu)
+        self._wipe_menu_btn.setFixedSize(30, 30)
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setObjectName("ghost")
@@ -2264,6 +2370,7 @@ class MainWindow(QMainWindow):
         verify_box.addWidget(verify_label)
 
         row.addWidget(self._wipe_btn)
+        row.addWidget(self._wipe_menu_btn)
         row.addWidget(self._cancel_btn)
         row.addWidget(self._flash_btn, 1)
         row.addStretch()
@@ -2317,6 +2424,11 @@ class MainWindow(QMainWindow):
         col.addWidget(self._build_section_label("Image source"))
         self._iso_zone = IsoDropZone()
         col.addWidget(self._iso_zone)
+        self._sidecar_label = QLabel("")
+        self._sidecar_label.setObjectName("capLabel")
+        self._sidecar_label.setWordWrap(True)
+        self._sidecar_label.setVisible(False)
+        col.addWidget(self._sidecar_label)
 
         hint = QLabel(
             "The image is written to the drive as-is (raw image mode)."
@@ -2900,6 +3012,10 @@ class MainWindow(QMainWindow):
             self._page_verifier.cancel()
         if self._wipe_worker is not None:
             self._wipe_worker.cancel()
+        if self._backup_worker is not None:
+            self._backup_worker.cancel()
+        if self._clone_worker is not None:
+            self._clone_worker.cancel()
 
     def _recheck_drive(self, drive: dict) -> dict | None:
         drives = self._detector.list_removable_drives()
@@ -2927,6 +3043,12 @@ class MainWindow(QMainWindow):
         iso = self._iso_zone.path
         if not iso:
             self._progress.set_error("Select an ISO image first")
+            return
+        if self._sidecar_status in ("mismatch", "error"):
+            self._progress.set_error(
+                "Image checksum does not match its sidecar \u2014 "
+                "flashing blocked"
+            )
             return
         if not self._current_drive:
             if self._drives:
@@ -3350,7 +3472,7 @@ class MainWindow(QMainWindow):
         else:
             self._finish_flash(False, message or "Verification failed", None)
 
-    def _on_wipe_clicked(self) -> None:
+    def _on_wipe_clicked(self, method: str = "zero") -> None:
         if self._busy():
             return
         if not self._current_drive:
@@ -3359,13 +3481,20 @@ class MainWindow(QMainWindow):
         drive = self._current_drive
         name = drive.get("model") or drive.get("name")
         letter = drive.get("letter") or "no drive letter"
+        method_text = {
+            "zero": "replace every byte with zeros",
+            "nist": "replace every byte with random data",
+            "dod": "overwrite every byte three times (zeros, ones, "
+            "random \u2014 DoD 5220.22-M)",
+        }
         if not dialogs.confirm(
             self,
             kind="warning",
             title="Flint \u2014 erase drive?",
             message=(
-                f"Erase {name} ({letter}) \u2014 replace every byte with "
-                f"zeros?\n\n{self._confirm_text(drive)}"
+                f"Erase {name} ({letter}) \u2014 "
+                f"{method_text.get(method, method_text['zero'])}?"
+                f"\n\n{self._confirm_text(drive)}"
             ),
             accept="Erase & wipe",
             accept_style="danger",
@@ -3402,8 +3531,9 @@ class MainWindow(QMainWindow):
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Wiping\u2026")
 
-        worker = WipeWorker(drive_path, letters)
+        worker = WipeWorker(drive_path, letters, method=method)
         self._wipe_worker = worker
+        self._wipe_method = method
         worker.progress.connect(self._on_write_progress)
         worker.speed_mbps.connect(self._progress.set_speed)
         worker.written_bytes.connect(self._progress.set_written)
@@ -3466,16 +3596,23 @@ class MainWindow(QMainWindow):
                 "Flint \u2014 Wipe done" if ok else "Flint"
             )
         if ok:
+            wipe_done = {
+                "zero": "every byte was replaced with zeros.",
+                "nist": "every byte was replaced with random data.",
+                "dod": "every byte was overwritten three times (zeros, "
+                "ones, random).",
+            }
+            method = getattr(self, "_wipe_method", "zero")
             dialogs.completion(
                 self,
                 kind="success",
                 title="Drive wiped",
                 message=(
-                    f"{target.get('model') or 'drive'} was erased: every "
-                    "byte was replaced with zeros."
+                    f"{target.get('model') or 'drive'} was erased: "
+                    f"{wipe_done.get(method, wipe_done['zero'])}"
                     if target is not None
-                    else "The drive was erased: every byte was replaced "
-                    "with zeros."
+                    else f"The drive was erased: "
+                    f"{wipe_done.get(method, wipe_done['zero'])}"
                 ),
                 buttons=[("Close", "primary", "close")],
             )
@@ -3500,6 +3637,230 @@ class MainWindow(QMainWindow):
             )
         self._active_write_drive = None
         self._update_controls_state()
+
+    def _start_drive_operation(self, worker: QThread) -> None:
+        """Common busy-state setup for backup/clone operations."""
+        self._progress.reset()
+        self._done_bar.setVisible(False)
+        self._set_controls_enabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._flash_btn.setEnabled(False)
+        self._wipe_btn.setEnabled(False)
+        self._writing = True
+        self._write_started = time.perf_counter()
+        self._write_duration = 0.0
+        self._poller.suspend()
+        worker.progress.connect(self._on_write_progress)
+        worker.speed_mbps.connect(self._progress.set_speed)
+        worker.written_bytes.connect(self._progress.set_written)
+        worker.total_bytes.connect(self._progress.set_total)
+        worker.eta_seconds.connect(self._progress.set_eta)
+        worker.phase.connect(self._on_drive_phase)
+        worker.finished.connect(self._on_drive_operation_finished)
+        worker.start()
+
+    def _on_drive_phase(self, phase: str) -> None:
+        self._progress.set_phase(phase)
+        self._progress._title.setText(phase)
+
+    def _on_backup_clicked(self) -> None:
+        if self._busy():
+            return
+        drive = self._current_drive
+        if drive is None:
+            self._progress.set_error("Select a USB drive first")
+            return
+        current = self._recheck_drive(drive)
+        if current is None:
+            self._progress.set_error(
+                "Drive changed or disconnected \u2014 refresh and re-pick"
+            )
+            return
+        drive_path = self._drive_path_for(current)
+        if not drive_path:
+            self._progress.set_error("Drive path unavailable")
+            return
+        name = current.get("model") or current.get("name")
+        size = DriveDetector.format_size(
+            current["size_gb"] * 1_000_000_000
+        )
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 back up drive?",
+            message=(
+                f"Read {name} ({size}) into an image file.\n\n"
+                "The drive is locked and unmounted while reading; nothing "
+                "on it is changed."
+            ),
+            accept="Back up",
+            accept_style="primary",
+        ):
+            return
+        default_name = f"flint-backup-{time.strftime('%Y%m%d-%H%M%S')}.img"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save backup image", default_name, "Disk image (*.img)"
+        )
+        if not out_path:
+            return
+        self._backup_digest = ""
+        worker = BackupWorker(
+            drive_path,
+            out_path,
+            letters=current.get("letters")
+            or ([current["letter"]] if current.get("letter") else []),
+        )
+        worker.digest.connect(lambda d: setattr(self, "_backup_digest", d))
+        self._backup_worker = worker
+        self._backup_out = out_path
+        self._backup_drive = current
+        self._start_drive_operation(worker)
+
+    def _on_clone_clicked(self) -> None:
+        if self._busy():
+            return
+        source = self._current_drive
+        if source is None:
+            self._progress.set_error("Select a USB drive first")
+            return
+        current_source = self._recheck_drive(source)
+        if current_source is None:
+            self._progress.set_error(
+                "Drive changed or disconnected \u2014 refresh and re-pick"
+            )
+            return
+        menu = QMenu(self)
+        label = "Clone onto\u2026"
+        action = menu.addAction(label)
+        action.setEnabled(False)
+        menu.addSeparator()
+        for drive in self._drives:
+            if drive.get("physical_path") == current_source.get(
+                "physical_path"
+            ):
+                continue
+            size = DriveDetector.format_size(
+                drive["size_gb"] * 1_000_000_000
+            )
+            serial = self._serial_tail(drive)
+            text = f"{drive['model'] or drive['name']} \u00b7 {size}"
+            if serial:
+                text += f" \u00b7 S/N \u2026{serial}"
+            act = menu.addAction(text)
+            act.setData(drive)
+        target_action = menu.exec(QCursor.pos())
+        if target_action is None:
+            return
+        target = target_action.data()
+        if target is None:
+            self._progress.set_error("No target drive selected")
+            return
+        if (target["size_gb"] * 1_000_000_000) < (
+            current_source["size_gb"] * 1_000_000_000
+        ):
+            self._progress.set_error(
+                "Target drive is smaller than the source \u2014 clone refused"
+            )
+            return
+        src_name = current_source.get("model") or current_source.get("name")
+        dst_name = target.get("model") or target.get("name")
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 clone drive?",
+            message=(
+                f"Copy {src_name} onto {dst_name}.\n\n"
+                f"{dst_name} is erased completely \u2014 every byte is "
+                f"replaced with the source contents.\n\n"
+                f"{self._confirm_text(target)}"
+            ),
+            accept="Erase & clone",
+            accept_style="danger",
+        ):
+            return
+        # The target is re-checked against the live list before anything
+        # destructive happens.
+        fresh_target = self._recheck_drive(target)
+        if fresh_target is None:
+            self._progress.set_error(
+                "Target drive changed or disconnected \u2014 refresh and "
+                "re-pick"
+            )
+            return
+        if not self._require_typed_confirmation(fresh_target, None):
+            self._progress.set_error("Confirmation failed — aborting")
+            return
+        worker = CloneWorker(
+            current_source["physical_path"],
+            fresh_target["physical_path"],
+            source_letters=current_source.get("letters") or [],
+            target_letters=fresh_target.get("letters") or [],
+        )
+        self._clone_worker = worker
+        self._clone_source = current_source
+        self._clone_target = fresh_target
+        self._start_drive_operation(worker)
+
+    def _on_drive_operation_finished(self, ok: bool, message: str) -> None:
+        worker = self._backup_worker or self._clone_worker
+        self._backup_worker = None
+        self._clone_worker = None
+        if worker is not None:
+            self._retire(worker)
+        self._writing = False
+        self._poller.resume()
+        self._set_controls_enabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._set_taskbar_progress(None, error=not ok)
+        is_backup = bool(self._backup_out)
+        if ok:
+            self._progress.set_done()
+            self._progress._title.setText("Backed up" if is_backup else "Cloned")
+            if is_backup:
+                digest = self._backup_digest
+                self._done_label.setText("Backup complete")
+                self._done_summary.setText(
+                    f"{self._backup_out} \u00b7 SHA256 "
+                    f"{(digest[:12] + '\u2026') if digest else 'n/a'}"
+                )
+            else:
+                src = self._clone_source or {}
+                dst = self._clone_target or {}
+                self._done_label.setText("Clone complete")
+                self._done_summary.setText(
+                    f"{src.get('model') or 'source'} \u2192 "
+                    f"{dst.get('model') or 'target'}"
+                )
+            self._done_bar.setVisible(True)
+        else:
+            self._progress.set_error(
+                self._friendly_error(message or "Operation failed")
+            )
+            if self._tray is not None:
+                self._tray.showMessage(
+                    "Flint \u2014 operation finished",
+                    "Backup/clone failed." if not is_backup else "Backup failed.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000,
+                )
+        self._backup_out = ""
+        self._update_controls_state()
+        if not ok:
+            dialogs.completion(
+                self,
+                kind="warning" if message == "cancelled" else "error",
+                title=(
+                    "Backup cancelled"
+                    if message == "cancelled" and is_backup
+                    else "Clone cancelled"
+                    if message == "cancelled"
+                    else "Backup failed"
+                    if is_backup
+                    else "Clone failed"
+                ),
+                message=self._friendly_error(message or "Operation failed"),
+                buttons=[("Close", "primary", "close")],
+            )
 
     def _on_eject_clicked(self) -> None:
         if self._ejecting:

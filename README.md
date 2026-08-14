@@ -18,6 +18,12 @@ explicit typed confirmation before any destructive action.
 - Expert mode: partition scheme, target system, filesystem and write mode
 - Persistence for Linux live images and Windows To Go for Windows images
 - Flash history with export/import and per-flash reports
+- Back up a drive to an image file, or clone a drive onto another drive
+- SHA-256 sidecar files (`image.iso.sha256`) validate the image before flashing
+- Wipe with selectable standards: zero fill, single random pass (NIST), or
+  DoD 5220.22-M (three passes: zeros, ones, random)
+- Headless/scriptable mode via `--cli` (flash, verify, wipe, backup, clone,
+  and multi-image queue) for automation and IT imaging workflows
 
 ## Download
 
@@ -100,6 +106,58 @@ write page. It adds:
 - Before a raw write to a FAT32 target, Flint refuses images containing files
   over 4 GiB (impossible on FAT32) unless you switch to NTFS/exFAT.
 - Flash history is stored locally on your machine.
+
+## Back up, clone and wipe
+
+- **Back up** (drive picker → "Backup this drive to an image…") streams a USB
+  drive into a `.img` file, locking the drive's volumes while reading. The
+  backup's SHA-256 is shown in the completion report.
+- **Clone** (drive picker → "Clone this drive to another…") copies a drive
+  onto a second drive byte-for-byte. The target must be at least as large as
+  the source, must be a different drive, and requires the same typed
+  confirmation as a flash.
+- **Wipe** methods (the ▾ menu next to "Wipe drive"):
+  - **Zero fill (fast)** — single pass of zeros
+  - **Random data (NIST)** — single pass of random data (NIST SP 800-88 clear)
+  - **DoD 5220.22-M (3 passes)** — zeros, then ones, then random data
+
+## Checksum sidecars
+
+If a `*.sha256` file sits next to your image (`ubuntu.iso.sha256` or
+`ubuntu.sha256`), Flint reads it, verifies the image digest against it, and
+shows the result under the image source. A mismatch blocks flashing — a
+corrupt or wrong image can never erase a drive by accident.
+
+## Headless mode
+
+The packaged executable runs scripts without a window:
+
+```text
+flint.exe --cli flash --image image.iso --drive E: --confirm <serial> [--verify]
+flint.exe --cli verify --drive <serial> [--sha256 <hex>]
+flint.exe --cli wipe --drive <serial> --confirm <serial> [--method zero|random|dod]
+flint.exe --cli backup --drive <serial> --out backup.img
+flint.exe --cli clone --from <serial> --to <serial> --confirm <serial of --to>
+flint.exe --cli queue --file list.txt --drive <serial> --confirm <serial>
+```
+
+- `--confirm` must match the target drive's full serial number — the headless
+  equivalent of the GUI's typed confirmation.
+- The queue file holds one image path per line (`#` comments allowed); images
+  are flashed to the same drive in order, stopping on the first failure.
+- Output is line-oriented with a final `RESULT ok|fail|canceled: …` line.
+  Exit codes: `0` ok, `1` failure, `2` cancelled, `3` usage/validation,
+  `4` elevation denied.
+
+## Signing
+
+The release workflow signs `flint.exe` automatically when the
+`WINDOWS_SIGNING_PFX` (base64 PFX) and `WINDOWS_SIGNING_PASSWORD` repository
+secrets are set. To sign locally once you have a certificate:
+
+```powershell
+.\scripts\sign.ps1 -PfxPath .\cert.pfx -PfxPassword 'secret'
+```
 
 ## Support
 

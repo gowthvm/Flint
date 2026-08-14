@@ -36,8 +36,10 @@ class _FakeKernel:
         self.chunks.append(data)
 
 
-def _make_worker(fake: _FakeKernel, cancel_after: int | None = None) -> WipeWorker:
-    worker = WipeWorker(r"\\.\PHYSICALDRIVE9")
+def _make_worker(
+    fake: _FakeKernel, cancel_after: int | None = None, method: str = "zero"
+) -> WipeWorker:
+    worker = WipeWorker(r"\\.\PHYSICALDRIVE9", method=method)
     worker._open_drive = fake._open_drive  # type: ignore[method-assign]
     worker._drive_size = fake._drive_size  # type: ignore[method-assign]
     worker._lock_volumes = fake._lock_volumes  # type: ignore[method-assign]
@@ -164,3 +166,71 @@ def test_wipe_reports_open_failure_without_touching_kernel(monkeypatch):
     worker.run()
 
     assert events == [(False, r"drive not writable: \\.\PHYSICALDRIVE9")]
+
+
+def test_wipe_random_pass_writes_different_random_chunks(monkeypatch):
+    size = 6 * 1024 * 1024
+    fake = _FakeKernel(size)
+    worker = _make_worker(fake, method="random")
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    assert sum(len(c) for c in fake.chunks) == size
+    assert any(chunk != b"\x00" * len(chunk) for chunk in fake.chunks)
+    assert any(chunk != b"\xff" * len(chunk) for chunk in fake.chunks)
+    assert events["total_bytes"][-1] == (size,)
+
+
+def test_wipe_nist_is_a_single_random_pass(monkeypatch):
+    fake = _FakeKernel(3 * 1024 * 1024)
+    worker = _make_worker(fake, method="nist")
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    assert events["total_bytes"][-1] == (fake.size,)
+
+
+def test_wipe_dod_three_passes_zero_ones_random(monkeypatch):
+    size = 5 * 1024 * 1024
+    fake = _FakeKernel(size)
+    worker = _make_worker(fake, method="dod")
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    zero_chunks = [c for c in fake.chunks if c == b"\x00" * len(c)]
+    one_chunks = [c for c in fake.chunks if c == b"\xff" * len(c)]
+    random_chunks = [c for c in fake.chunks if c != b"\x00" * len(c) and c != b"\xff" * len(c)]
+    assert sum(len(c) for c in zero_chunks) == size
+    assert sum(len(c) for c in one_chunks) == size
+    assert sum(len(c) for c in random_chunks) == size
+    # Three full passes are reported to the UI
+    assert events["total_bytes"][-1] == (size * 3,)
+    assert events["progress"][-1][0] == 100.0
+    assert any("pass 1/3" in p[0] for p in events["phase"])
+    assert any("pass 3/3" in p[0] for p in events["phase"])
+
+
+def test_wipe_cancel_inside_second_dod_pass(monkeypatch):
+    fake = _FakeKernel(20 * 1024 * 1024)
+    worker = _make_worker(fake, cancel_after=2, method="dod")
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(False, "cancelled")]
+    assert sum(len(c) for c in fake.chunks) < 2 * fake.size
+
+
+def test_wipe_unknown_method_rejected_eagerly():
+    try:
+        WipeWorker(r"\\.\PHYSICALDRIVE9", method="nuclear")
+    except ValueError as exc:
+        assert "unknown wipe method" in str(exc)
+    else:
+        raise AssertionError("unknown method must raise at construction")

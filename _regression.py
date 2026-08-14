@@ -398,6 +398,43 @@ w5._shutdown()
 w5._shutdown()
 check("shutdown idempotent")
 
+# ---------- batch 4: tools & sidecar ----------
+w6 = MainWindow()
+_hush_poller(w6)
+w6._detector.list_removable_drives = lambda: [FAKE]
+w6._select_drive(FAKE)
+
+methods = [a.text() for a in w6._wipe_menu.actions()]
+assert methods == [
+    "Zero fill (fast)",
+    "Random data (NIST)",
+    "DoD 5220.22-M (3 passes)",
+], methods
+assert w6._wipe_menu_btn.menu() is w6._wipe_menu
+check("wipe method menu")
+
+image3 = os.path.join(d, "sidecar.iso")
+open(image3, "wb").write(b"payload")
+side = image3 + ".sha256"
+open(side, "w").write("b" * 64 + "  sidecar.iso\n")
+w6._iso_zone._path = image3
+w6._iso_zone._digest = "a" * 64
+w6._on_iso_hash_ready(image3, True, "a" * 64)
+assert w6._sidecar_status == "mismatch"
+assert not w6._sidecar_label.isHidden()
+assert "MISMATCH" in w6._sidecar_label.text()
+w6._on_flash_clicked()
+assert w6._writer is None
+check("sidecar mismatch blocks flash")
+
+open(side, "w").write("a" * 64 + "  sidecar.iso\n")
+w6._on_iso_hash_ready(image3, True, "a" * 64)
+assert w6._sidecar_status == "ok"
+assert not w6._sidecar_label.isHidden()
+check("sidecar match unblocks")
+
+w6._shutdown()
+
 # ---------- batch 2: flows ----------
 w3 = MainWindow()
 _hush_poller(w3)
