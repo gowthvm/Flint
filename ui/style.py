@@ -13,6 +13,8 @@ _PALETTES = {
         "primary": "#ffffff",
         "onPrimary": "#000000",
         "error": "#ff4444",
+        "success": "#2ecc71",
+        "warning": "#ffb300",
         "menuHover": "#262626",
     },
     "light": {
@@ -26,6 +28,8 @@ _PALETTES = {
         "primary": "#111111",
         "onPrimary": "#ffffff",
         "error": "#c62828",
+        "success": "#1e8e3e",
+        "warning": "#b26a00",
         "menuHover": "#eaeaea",
     },
     "high-contrast": {
@@ -39,6 +43,8 @@ _PALETTES = {
         "primary": "#ffffff",
         "onPrimary": "#000000",
         "error": "#ff5555",
+        "success": "#4cd964",
+        "warning": "#ffd54f",
         "menuHover": "#1c1c1c",
     },
 }
@@ -186,6 +192,23 @@ QPushButton:focus {
 }
 
 QPushButton#primary:focus {
+    border: 1px solid @text;
+}
+
+QPushButton#danger {
+    background: @error;
+    border: none;
+    color: @onPrimary;
+    font-weight: 500;
+    padding: $btn_primary_pad;
+}
+
+QPushButton#danger:hover, QPushButton#danger:pressed {
+    background: @error;
+    color: @onPrimary;
+}
+
+QPushButton#danger:focus {
     border: 1px solid @text;
 }
 
@@ -710,6 +733,54 @@ QLineEdit#shaInput {
 
 QLineEdit:focus {
     border: 1px solid @primary;
+}
+
+QDialog#flintDialog {
+    background: @card;
+    border: 1px solid @border;
+    border-radius: 12px;
+}
+
+QDialog#flintDialog QLabel#flintDialogIcon {
+    background: transparent;
+    border: none;
+    font-size: 24px;
+    font-weight: 600;
+}
+
+QDialog#flintDialog QLabel#flintDialogIcon[dialogRole="success"] {
+    color: @success;
+}
+
+QDialog#flintDialog QLabel#flintDialogIcon[dialogRole="warning"] {
+    color: @warning;
+}
+
+QDialog#flintDialog QLabel#flintDialogIcon[dialogRole="error"] {
+    color: @error;
+}
+
+QDialog#flintDialog QLabel#flintDialogIcon[dialogRole="info"] {
+    color: @muted;
+}
+
+QDialog#flintDialog QLabel#flintDialogTitle {
+    background: transparent;
+    color: @text;
+    font-size: $font_md;
+    font-weight: 600;
+}
+
+QDialog#flintDialog QLabel#flintDialogMessage {
+    background: transparent;
+    color: @muted;
+    font-size: $font_sm;
+}
+
+QDialog#flintDialog QCheckBox {
+    color: @muted;
+    font-size: $font_sm;
+    spacing: 6px;
 }
 """
 

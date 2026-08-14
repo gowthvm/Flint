@@ -26,7 +26,6 @@ from PyQt6.QtGui import (
     QColor,
     QCursor,
     QDesktopServices,
-    QFont,
     QGuiApplication,
     QIcon,
     QKeySequence,
@@ -36,7 +35,6 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -47,7 +45,6 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -75,7 +72,7 @@ from core.history import (
 from core.verify import VerifyWorker
 from core.wipe import WipeWorker
 from core.writer import UsbWriter
-from ui import style
+from ui import dialogs, style
 
 logger = logging.getLogger("flint")
 
@@ -961,20 +958,20 @@ class MainWindow(QMainWindow):
         # One-time onboarding modal to improve discoverability
         try:
             if not settings.get("onboarding_seen"):
-                box = QMessageBox(self)
-                box.setIcon(QMessageBox.Icon.Information)
-                box.setWindowTitle("Welcome to Flint")
-                box.setText(
-                    "Welcome — a quick tour:\n\n"
-                    "1) Pick an image\n"
-                    "2) Choose a target drive\n"
-                    "3) Flash and optionally verify\n\n"
-                    "Dangerous actions (wipe/flash) require typed confirmation."
+                dialogs.inform(
+                    self,
+                    kind="info",
+                    title="Welcome to Flint",
+                    message=(
+                        "Welcome — a quick tour:\n\n"
+                        "1) Pick an image\n"
+                        "2) Choose a target drive\n"
+                        "3) Flash and optionally verify\n\n"
+                        "Dangerous actions (wipe/flash) require typed "
+                        "confirmation."
+                    ),
+                    check="Don't show this again",
                 )
-                cb = QCheckBox("Don't show this again")
-                box.setCheckBox(cb)
-                box.addButton("Close", QMessageBox.ButtonRole.AcceptRole)
-                box.exec()
                 settings.set_many(onboarding_seen=True)
         except Exception:
             pass
@@ -1243,17 +1240,17 @@ class MainWindow(QMainWindow):
         if not cmd:
             return
         # Show an explicit pre-elevation dialog so the user isn't surprised.
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle("Flint — elevation required")
-        box.setText(
-            "Flint needs administrator privileges to access raw disks.\n\n"
-            "Elevating will restart the application with elevated rights."
-        )
-        elevate_btn = box.addButton("Elevate", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Continue without elevation", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is not elevate_btn:
+        if not dialogs.confirm(
+            self,
+            kind="info",
+            title="Flint \u2014 elevation required",
+            message=(
+                "Flint needs administrator privileges to access raw disks.\n\n"
+                "Elevating will restart the application with elevated rights."
+            ),
+            accept="Elevate",
+            reject="Continue without elevation",
+        ):
             logger.info("user chose to continue without elevation from UI")
             return
         try:
@@ -1351,12 +1348,14 @@ class MainWindow(QMainWindow):
                 return False
             prompt = f"Type the drive model/name to confirm: {want}"
 
-        from PyQt6.QtWidgets import QInputDialog
-
-        text, ok = QInputDialog.getText(self, "Confirm destructive action", prompt)
+        text, ok = dialogs.input_text(
+            self,
+            title="Confirm destructive action",
+            message=prompt,
+        )
         if not ok:
             return False
-        entered = str(text).strip()
+        entered = text.strip()
         # match case-insensitively for names; exact match for serial tail
         if serial and len(serial) >= 4:
             return entered == want
@@ -1585,7 +1584,12 @@ class MainWindow(QMainWindow):
             settings.set_many(last_iso_dir=os.path.dirname(target))
             self._show_tray_notify("History", "Exported.")
         elif target:
-            QMessageBox.warning(self, "Export", "Could not write the file.")
+            dialogs.inform(
+                self,
+                kind="error",
+                title="Export",
+                message="Could not write the file.",
+            )
 
     def _on_history_import(self) -> None:
         source, _ = QFileDialog.getOpenFileName(
@@ -1598,42 +1602,42 @@ class MainWindow(QMainWindow):
             return
         settings.set_many(last_iso_dir=os.path.dirname(source))
         existing = len(load_history())
-        if existing > 0:
-            prompt = QMessageBox(self)
-            prompt.setIcon(QMessageBox.Icon.Warning)
-            prompt.setWindowTitle("Flint \u2014 import history?")
-            prompt.setText(
+        if existing > 0 and not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 import history?",
+            message=(
                 f"Importing will replace your {existing} existing "
                 f"entr{'y' if existing == 1 else 'ies'}."
-            )
-            prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-            replace = prompt.addButton(
-                "Replace history", QMessageBox.ButtonRole.AcceptRole
-            )
-            prompt.setDefaultButton(prompt.buttons()[0])
-            prompt.exec()
-            if prompt.clickedButton() is not replace:
-                return
+            ),
+            accept="Replace history",
+            accept_style="danger",
+        ):
+            return
         ok, _count = import_history(source)
         if ok:
             self._reload_history()
             self._show_from_tray()
         else:
-            QMessageBox.warning(
-                self, "Import", "That file is not a valid Flint history."
+            dialogs.inform(
+                self,
+                kind="error",
+                title="Import",
+                message="That file is not a valid Flint history.",
             )
 
     def _on_history_clear(self) -> None:
-        prompt = QMessageBox(self)
-        prompt.setIcon(QMessageBox.Icon.Warning)
-        prompt.setWindowTitle("Flint \u2014 clear history?")
-        prompt.setText("Remove all flash history entries?")
-        yes = prompt.addButton("Clear", QMessageBox.ButtonRole.AcceptRole)
-        prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        prompt.exec()
-        if prompt.clickedButton() is yes:
-            clear_history()
-            self._reload_history()
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 clear history?",
+            message="Remove all flash history entries?",
+            accept="Clear",
+            accept_style="danger",
+        ):
+            return
+        clear_history()
+        self._reload_history()
 
     def _build_verify_page(self) -> QWidget:
         scroll = QScrollArea()
@@ -1770,9 +1774,23 @@ class MainWindow(QMainWindow):
         if ok:
             self._verify_progress.set_done()
             self._verify_progress._title.setText("Verified")
+            dialogs.completion(
+                self,
+                kind="success",
+                title="Verification passed",
+                message=message or "The drive matches the selected image.",
+                buttons=[("Close", "primary", "close")],
+            )
         else:
             self._verify_progress.set_error(
                 self._friendly_error(message or "Verification failed")
+            )
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Verification failed",
+                message=self._friendly_error(message or "Verification failed"),
+                buttons=[("Close", "primary", "close")],
             )
 
     def _on_page_verify_cancel(self) -> None:
@@ -1821,20 +1839,20 @@ class MainWindow(QMainWindow):
         entry = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(entry, dict):
             return
-        box = QMessageBox(self)
-        box.setWindowTitle("Flash report")
-        box.setFont(QFont("Cascadia Mono", 9))
-        box.setText(self._build_report_text(entry))
-        box.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+        report_text = self._build_report_text(entry)
+        dlg = dialogs.FlintDialog(
+            self,
+            kind="info",
+            title="Flash report",
+            message=report_text,
+            buttons=[
+                ("Copy", "ghost", "copy"),
+                ("Close", "primary", "close"),
+            ],
+            mono=True,
         )
-        copy_btn = box.addButton("Copy", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is copy_btn:
-            QApplication.clipboard().setText(
-                self._build_report_text(entry)
-            )
+        if dlg.run() == "copy":
+            QApplication.clipboard().setText(report_text)
             if self._tray is not None:
                 self._tray.showMessage(
                     "Flint",
@@ -1910,21 +1928,18 @@ class MainWindow(QMainWindow):
         self._tray.show()
 
     def _on_tray_quit(self) -> None:
-        if self._busy():
-            prompt = QMessageBox(self)
-            prompt.setIcon(QMessageBox.Icon.Warning)
-            prompt.setWindowTitle("Flint \u2014 still writing")
-            prompt.setText(
+        if self._busy() and not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 still writing",
+            message=(
                 "A write or verification is still in progress.\n"
                 "Quitting now may leave the drive unusable."
-            )
-            prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-            quit_anyway = prompt.addButton(
-                "Quit anyway", QMessageBox.ButtonRole.AcceptRole
-            )
-            prompt.exec()
-            if prompt.clickedButton() is not quit_anyway:
-                return
+            ),
+            accept="Quit anyway",
+            accept_style="danger",
+        ):
+            return
         self._save_settings()
         self._shutdown()
         QApplication.instance().quit()
@@ -2904,12 +2919,6 @@ class MainWindow(QMainWindow):
                     "or write raw (DD)."
                 )
                 return
-        prompt = QMessageBox(self)
-        prompt.setIcon(QMessageBox.Icon.Warning)
-        prompt.setWindowTitle("Flint \u2014 erase drive and write?")
-        prompt.setText(
-            f"Erase {name} ({drive['letter']}:) and write {iso_name}?"
-        )
         confirm_text = self._confirm_text(drive, iso)
         if self._iso_hybrid:
             confirm_text += (
@@ -2926,16 +2935,17 @@ class MainWindow(QMainWindow):
                 "\n\nPersistence: a casper-rw / live persistence store is "
                 "created on the drive."
             )
-        prompt.setInformativeText(confirm_text)
-        prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        erase = prompt.addButton(
-            "Erase & write", QMessageBox.ButtonRole.AcceptRole
-        )
-        prompt.setDefaultButton(
-            prompt.buttons()[0]
-        )
-        prompt.exec()
-        if prompt.clickedButton() is not erase:
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 erase drive and write?",
+            message=(
+                f"Erase {name} ({drive['letter']}:) and write {iso_name}?"
+                f"\n\n{confirm_text}"
+            ),
+            accept="Erase & write",
+            accept_style="danger",
+        ):
             return
 
         current = self._recheck_drive(drive)
@@ -3142,23 +3152,20 @@ class MainWindow(QMainWindow):
         self._verify_handled = True
         mismatches = len(result.get("mismatches", []))
         bad = len(result.get("bad_sectors", []))
-        prompt = QMessageBox(self)
-        prompt.setIcon(QMessageBox.Icon.Warning)
-        prompt.setWindowTitle("Flint \u2014 verification failed")
-        prompt.setText("The write-back check found problems with the drive.")
-        prompt.setInformativeText(
-            f"{mismatches} mismatched region(s) and {bad} unreadable "
-            "sector(s). The drive may be damaged or the image was not "
-            "written correctly.\n\nRetry the write, or abort?"
-        )
-        retry = prompt.addButton(
-            "Retry write", QMessageBox.ButtonRole.AcceptRole
-        )
-        prompt.addButton("Abort", QMessageBox.ButtonRole.RejectRole)
-        prompt.setDefaultButton(prompt.buttons()[0])
-        prompt.exec()
-        if prompt.clickedButton() is retry and self._retry_payload is not None:
-            self._begin_write(*self._retry_payload)
+        if dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 verification failed",
+            message=(
+                "The write-back check found problems with the drive.\n\n"
+                f"{mismatches} mismatched region(s) and {bad} unreadable "
+                "sector(s). The drive may be damaged or the image was not "
+                "written correctly.\n\nRetry the write, or abort?"
+            ),
+            accept="Retry write",
+        ):
+            if self._retry_payload is not None:
+                self._begin_write(*self._retry_payload)
         else:
             self._finish_flash(False, message or "Verification failed", None)
 
@@ -3239,20 +3246,17 @@ class MainWindow(QMainWindow):
         drive = self._current_drive
         name = drive.get("model") or drive.get("name")
         letter = drive.get("letter") or "no drive letter"
-        prompt = QMessageBox(self)
-        prompt.setIcon(QMessageBox.Icon.Warning)
-        prompt.setWindowTitle("Flint \u2014 erase drive?")
-        prompt.setText(
-            f"Erase {name} ({letter}) \u2014 replace every byte with zeros?"
-        )
-        prompt.setInformativeText(self._confirm_text(drive))
-        prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        erase = prompt.addButton(
-            "Erase & wipe", QMessageBox.ButtonRole.AcceptRole
-        )
-        prompt.setDefaultButton(prompt.buttons()[0])
-        prompt.exec()
-        if prompt.clickedButton() is not erase:
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 erase drive?",
+            message=(
+                f"Erase {name} ({letter}) \u2014 replace every byte with "
+                f"zeros?\n\n{self._confirm_text(drive)}"
+            ),
+            accept="Erase & wipe",
+            accept_style="danger",
+        ):
             return
 
         current = self._recheck_drive(drive)
@@ -3344,13 +3348,49 @@ class MainWindow(QMainWindow):
             self._tray.setToolTip(
                 "Flint \u2014 Wipe done" if ok else "Flint"
             )
+        if ok:
+            dialogs.completion(
+                self,
+                kind="success",
+                title="Drive wiped",
+                message=(
+                    f"{target.get('model') or 'drive'} was erased: every "
+                    "byte was replaced with zeros."
+                    if target is not None
+                    else "The drive was erased: every byte was replaced "
+                    "with zeros."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+        elif message == "cancelled":
+            dialogs.completion(
+                self,
+                kind="warning",
+                title="Wipe cancelled",
+                message=(
+                    "The drive was partially wiped. Run wipe again to "
+                    "finish erasing it."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+        else:
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Wipe failed",
+                message=self._friendly_error(message or "Wipe failed"),
+                buttons=[("Close", "primary", "close")],
+            )
         self._active_write_drive = None
 
     def _on_eject_clicked(self) -> None:
         path = self._current_drive_path()
         if not path:
-            QMessageBox.information(
-                self, "Eject", "No drive selected."
+            dialogs.inform(
+                self,
+                kind="info",
+                title="Eject",
+                message="No drive selected.",
             )
             return
         try:
@@ -3358,12 +3398,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             ok, msg = False, str(exc) or "eject failed"
         if ok:
-            QMessageBox.information(
-                self, "Eject", "Drive ejected \u2014 safe to unplug."
+            dialogs.inform(
+                self,
+                kind="success",
+                title="Eject",
+                message="Drive ejected \u2014 safe to unplug.",
             )
         else:
-            QMessageBox.warning(
-                self, "Eject", msg or "Windows refused to eject the drive."
+            dialogs.inform(
+                self,
+                kind="error",
+                title="Eject",
+                message=msg or "Windows refused to eject the drive.",
             )
 
     @staticmethod
@@ -3545,3 +3591,53 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Information,
                     4000,
                 )
+
+        if succeeded:
+            if skipped_verify:
+                kind = "warning"
+                title = "Flash complete \u2014 not verified"
+                detail = skipped_note or (
+                    "The image was written, but verification was skipped: "
+                    "the image digest was unavailable. Re-select the image "
+                    "and flash again to verify."
+                )
+            else:
+                kind = "success"
+                title = "Flash complete"
+                detail = (
+                    "The image was written and verified."
+                    if verified_sha
+                    else "The image was written but verification was "
+                    "cancelled."
+                )
+            if boot and boot != "unknown":
+                detail += f"\n\nBoot: {boot}"
+            result = dialogs.completion(
+                self, kind=kind, title=title, message=detail
+            )
+            if result == "eject":
+                self._on_eject_clicked()
+            elif result == "copy":
+                self._on_copy_report_clicked()
+        elif error_text == "cancelled":
+            dialogs.completion(
+                self,
+                kind="warning",
+                title="Write cancelled",
+                message=(
+                    "The drive was left partially written and is not "
+                    "usable. Flash again before using it."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+        else:
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Flash failed",
+                message=self._friendly_error(error_text or "Failed"),
+                buttons=[
+                    ("Copy report", "ghost", "copy"),
+                    ("Close", "primary", "close"),
+                ],
+            )

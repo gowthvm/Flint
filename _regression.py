@@ -20,6 +20,21 @@ ISO = os.path.join(d, "test.iso")
 open(ISO, "wb").write(BLOB)
 TOTAL = 0
 
+# Capture themed completion popups instead of letting them block (they
+# are validated at the end of the run).
+from ui import dialogs as _dialogs_mod
+
+_ORIG_COMPLETION = _dialogs_mod.completion
+_POPUPS = []
+
+
+def _capture_completion(parent, *, kind, title, message, buttons=None):
+    _POPUPS.append((kind, title, message))
+    return None
+
+
+_dialogs_mod.completion = _capture_completion
+
 
 def check(name):
     global TOTAL
@@ -553,4 +568,10 @@ srv.close()
 check("single-instance guard")
 
 faulthandler.cancel_dump_traceback_later()
+_dialogs_mod.completion = _ORIG_COMPLETION
+kinds = [p[0] for p in _POPUPS]
+assert "success" in kinds and "warning" in kinds and "error" in kinds, kinds
+assert any(p[1] == "Verification passed" for p in _POPUPS)
+assert any(p[1] == "Drive wiped" for p in _POPUPS)
+check("completion popups fired (success/warning/error)")
 print(f"\nALL REGRESSION PASSED ({TOTAL} groups)")
