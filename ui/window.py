@@ -215,7 +215,7 @@ class IsoDropZone(QFrame):
         info.addWidget(self._iso_name)
         info.addWidget(self._iso_meta)
 
-        self._iso_check = QLabel("\u2713")
+        self._iso_check = QLabel("\u2713\ufe0e")
         self._iso_check.setObjectName("isoCheck")
         self._iso_check.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -1014,10 +1014,10 @@ class MainWindow(QMainWindow):
         logo_divider.setFixedHeight(1)
 
         nav_items = [
-            ("\u270e", "Write", True, None),
-            ("\u2714", "Verify", False, None),
+            ("\u270e\ufe0e", "Write", True, None),
+            ("\u2714\ufe0e", "Verify", False, None),
             ("\u21ba", "History", False, None),
-            ("\u2699", "Settings", False, None),
+            ("\u2699\ufe0e", "Settings", False, None),
         ]
 
         nav = QVBoxLayout()
@@ -1819,7 +1819,7 @@ class MainWindow(QMainWindow):
         self._history_list.setVisible(has_entries)
         self._history_empty.setVisible(not has_entries)
         for entry in reversed(entries):
-            marker = "\u2713" if entry.get("success") else "\u2715"
+            marker = "\u2713\ufe0e" if entry.get("success") else "\u2715"
             item = QListWidgetItem(
                 f"{marker}  {entry.get('iso', '?')}  \u2192  "
                 f"{entry.get('drive', '?')}"
@@ -1827,7 +1827,9 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, entry)
             duration = entry.get("duration", 0) or 0
             verified = "Yes" if entry.get("verified") else "No"
-            outcome = "\u2713 complete" if entry.get("success") else "\u2715 failed"
+            outcome = (
+                "\u2713\ufe0e complete" if entry.get("success") else "\u2715 failed"
+            )
             item.setToolTip(
                 f"{entry.get('timestamp', '')} \u00b7 "
                 f"{round(float(duration))} s \u00b7 "
@@ -3526,7 +3528,7 @@ class MainWindow(QMainWindow):
                 self._done_label.setText("Flash complete \u2014 not verified")
             else:
                 self._done_label.setText(
-                    "Verified \u2713" if verified_sha else "Flash complete"
+                    "Verified \u2713\ufe0e" if verified_sha else "Flash complete"
                 )
             self._done_bar.setVisible(True)
         elif error_text == "cancelled":

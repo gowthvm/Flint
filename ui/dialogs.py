@@ -21,10 +21,10 @@ from PyQt6.QtWidgets import (
 )
 
 KIND_ICONS = {
-    "success": "\u2713",
-    "warning": "\u26a0",
+    "success": "\u2713\ufe0e",
+    "warning": "\u26a0\ufe0e",
     "error": "\u2715",
-    "info": "\u2139",
+    "info": "\u2139\ufe0e",
 }
 
 

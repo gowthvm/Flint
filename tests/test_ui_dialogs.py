@@ -51,7 +51,7 @@ def test_dialog_structure_and_kind_icon(qapp):
     texts = [w.text() for w in dlg.children() if hasattr(w, "text")]
     assert "Flash complete" in texts
     assert "The image was written and verified." in texts
-    assert any(t == "\u2713" for t in texts)
+    assert any(t == "\u2713\ufe0e" for t in texts)
     dlg.deleteLater()
 
 
