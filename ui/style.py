@@ -669,17 +669,6 @@ QMenu::item:disabled {
     color: @faded;
 }
 
-QMenu::indicator {
-    width: $icon_medium;
-    height: $icon_medium;
-    image: none;
-}
-
-QMenu::indicator:checked {
-    background: @primary;
-    border-radius: 4px;
-}
-
 QMenu::separator {
     height: 1px;
     background: @border;

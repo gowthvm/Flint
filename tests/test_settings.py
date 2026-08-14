@@ -39,7 +39,7 @@ def test_settings_drops_wrong_typed_values_on_load(tmp_path):
         assert s.get("verify_after_write") is True
         assert s.get("window_geometry") is None
         assert s.get("chunk_size_mb") == 8
-        assert s.get("expert_mode") is False
+        assert s.get("expert_mode") is True
         assert s.get("onboarding_seen") is False
     finally:
         s._CACHE = None

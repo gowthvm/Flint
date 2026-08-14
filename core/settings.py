@@ -15,7 +15,7 @@ _DEFAULTS: dict[str, Any] = {
     "tray_hint_seen": False,
     "onboarding_seen": False,
     "ask_before_elevation": True,
-    "expert_mode": False,
+    "expert_mode": True,
     "partition_scheme": "auto",
     "target_system": "auto",
     "filesystem": "fat32",

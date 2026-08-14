@@ -1,0 +1,177 @@
+"""UI feature tests: expert default, toggle animation geometry,
+verify-page scroll, bottom-bar page scoping and dots-menu ticks."""
+
+import pytest
+from PyQt6.QtWidgets import QScrollArea
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    return app
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings(tmp_path):
+    import core.settings as s
+
+    original = s.SETTINGS_PATH
+    s.SETTINGS_PATH = tmp_path / "s.json"
+    s._CACHE = None
+    yield
+    s._CACHE = None
+    s.SETTINGS_PATH = original
+
+
+def _make_window(qapp, tmp_path, seed: dict | None = None):
+    import core.settings as s
+
+    values = {"onboarding_seen": True, "theme": "dark"}
+    values.update(seed or {})
+    s.set_many(**values)
+    from ui.window import MainWindow
+
+    w = MainWindow()
+    if w._poller.receivers(w._poller.drives_ready):
+        w._poller.drives_ready.disconnect()
+    w._poller.requestInterruption()
+    return w
+
+
+def test_expert_panel_visible_by_default(qapp, tmp_path):
+    import core.settings as s
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        assert s.get("expert_mode") is True
+        assert not w._expert_panel.isHidden()
+        assert w._partition_combo.isEnabled()
+    finally:
+        w._shutdown()
+
+
+def test_expert_mode_can_still_be_turned_off(qapp, tmp_path):
+    import core.settings as s
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        w._expert_toggle.setChecked(False)
+        assert w._expert_panel.isHidden()
+        assert not w._partition_combo.isEnabled()
+        assert s.get("expert_mode") is False
+    finally:
+        w._shutdown()
+
+
+def test_toggle_knob_moves_left_when_off(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path, seed={"verify_after_write": True})
+    try:
+        toggle = w._verify_toggle
+        assert toggle.isChecked()
+        assert toggle._knob.pos().x() == toggle._knob_x(True)
+        toggle.setChecked(False, animate=False)
+        assert not toggle.isChecked()
+        assert toggle._knob.pos().x() == toggle._knob_x(False)
+        toggle.setChecked(True, animate=False)
+        assert toggle.isChecked()
+        assert toggle._knob.pos().x() == toggle._knob_x(True)
+    finally:
+        w._shutdown()
+
+
+def test_toggle_starts_left_when_off(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path, seed={"verify_after_write": False})
+    try:
+        toggle = w._verify_toggle
+        assert not toggle.isChecked()
+        assert toggle._knob.pos().x() == toggle._knob_x(False)
+    finally:
+        w._shutdown()
+
+
+def test_verify_page_is_scrollable(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path)
+    try:
+        assert isinstance(w._pages.widget(2), QScrollArea)
+        assert w._pages.widget(2).widgetResizable()
+    finally:
+        w._shutdown()
+
+
+def test_bottombar_hidden_on_history_and_verify_pages(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path)
+    try:
+        assert not w._bottombar.isHidden()
+        w._on_nav_clicked(1)
+        assert w._pages.currentIndex() == 2
+        assert w._bottombar.isHidden()
+        w._on_nav_clicked(2)
+        assert w._pages.currentIndex() == 1
+        assert w._bottombar.isHidden()
+        w._on_nav_clicked(0)
+        assert w._pages.currentIndex() == 0
+        assert not w._bottombar.isHidden()
+    finally:
+        w._shutdown()
+
+
+def test_bottombar_stays_visible_when_nav_blocked_while_busy(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path)
+    try:
+        w._writing = True
+        w._on_nav_clicked(1)
+        assert w._pages.currentIndex() == 0
+        assert not w._bottombar.isHidden()
+        w._writing = False
+    finally:
+        w._shutdown()
+
+
+def test_dots_menu_ticks_active_theme_and_expert(qapp, tmp_path):
+    import core.settings as s
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        menu = w._build_dots_menu()
+        texts = [a.text() for a in menu.actions()]
+        assert "\u2713  Dark theme" in texts
+        assert "    Light theme" in texts
+        assert "    High contrast" in texts
+        assert "\u2713  Expert mode" in texts
+        assert not any(a.isCheckable() for a in menu.actions())
+        s.set_many(theme="light", expert_mode=False)
+        menu2 = w._build_dots_menu()
+        texts2 = [a.text() for a in menu2.actions()]
+        assert "\u2713  Light theme" in texts2
+        assert "    Dark theme" in texts2
+        assert "    Expert mode" in texts2
+    finally:
+        w._shutdown()
+
+
+def test_flash_without_drive_opens_picker_when_drives_exist(
+    qapp, tmp_path, monkeypatch
+):
+    w = _make_window(qapp, tmp_path, seed={"expert_mode": False})
+    try:
+        w._drives = [{"physical_path": r"\\.\PHYSICALDRIVE1"}]
+        opened = []
+        monkeypatch.setattr(w, "_show_drive_picker", lambda: opened.append(1))
+        w._iso_zone._path = "C:\\fake.iso"
+        w._on_flash_clicked()
+        assert opened
+    finally:
+        w._shutdown()
+
+
+def test_flash_without_drive_errors_when_none_detected(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path, seed={"expert_mode": False})
+    try:
+        w._drives = []
+        w._iso_zone._path = "C:\\fake.iso"
+        w._on_flash_clicked()
+        assert "plug one in first" in w._progress._error.text()
+    finally:
+        w._shutdown()

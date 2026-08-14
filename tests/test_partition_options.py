@@ -29,7 +29,7 @@ def test_settings_defaults(tmp_path):
     import core.settings as s
 
     s.SETTINGS_PATH = tmp_path / "s.json"
-    assert s.get("expert_mode") is False
+    assert s.get("expert_mode") is True
     assert s.get("partition_scheme") == "auto"
     assert s.get("target_system") == "auto"
     assert s.get("filesystem") == "fat32"

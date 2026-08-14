@@ -10,8 +10,11 @@ from typing import Any
 
 from PyQt6.QtCore import (
     QByteArray,
+    QEasingCurve,
     QEvent,
+    QPoint,
     QPointF,
+    QPropertyAnimation,
     Qt,
     QThread,
     QTimer,
@@ -510,9 +513,6 @@ class ToggleSwitch(QWidget):
             style.DESIGN_TOKENS["toggle_w"],
             style.DESIGN_TOKENS["toggle_h"],
         )
-        layout = QHBoxLayout(self._track)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(0)
 
         self._knob = QLabel()
         self._knob.setObjectName("toggleKnob")
@@ -520,13 +520,31 @@ class ToggleSwitch(QWidget):
             style.DESIGN_TOKENS["toggle_knob"],
             style.DESIGN_TOKENS["toggle_knob"],
         )
-        layout.addStretch(1)
-        layout.addWidget(self._knob)
+        self._knob.setParent(self._track)
+
+        self._anim = QPropertyAnimation(self._knob, b"pos", self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._knob.move(self._knob_x(self._checked), self._knob_y())
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self._track)
         self._apply()
+
+    @staticmethod
+    def _knob_x(checked: bool) -> int:
+        margin = 2
+        width = style.DESIGN_TOKENS["toggle_w"]
+        knob = style.DESIGN_TOKENS["toggle_knob"]
+        return width - knob - margin if checked else margin
+
+    @staticmethod
+    def _knob_y() -> int:
+        margin = 2
+        height = style.DESIGN_TOKENS["toggle_h"]
+        knob = style.DESIGN_TOKENS["toggle_knob"]
+        return height - knob - margin
 
     def _apply(self) -> None:
         self._track.setProperty("on", self._checked)
@@ -538,11 +556,19 @@ class ToggleSwitch(QWidget):
     def isChecked(self) -> bool:
         return self._checked
 
-    def setChecked(self, checked: bool) -> None:
+    def setChecked(self, checked: bool, animate: bool = True) -> None:
         if checked == self._checked:
             return
         self._checked = checked
         self._apply()
+        self._anim.stop()
+        target = self._knob_x(checked)
+        if animate and self.isVisible():
+            self._anim.setStartValue(self._knob.pos())
+            self._anim.setEndValue(QPoint(target, self._knob.y()))
+            self._anim.start()
+        else:
+            self._knob.move(target, self._knob.y())
         self.toggled.emit(checked)
 
     def mousePressEvent(self, event) -> None:
@@ -1104,6 +1130,7 @@ class MainWindow(QMainWindow):
         self._wipe_btn.setEnabled(drive is not None)
         self._done_bar.setVisible(False)
         if drive is None:
+            self._target_change.setText("Choose drive")
             self._chip_dot.setProperty("dim", True)
             self._drive_name.setProperty("dim", True)
             self._drive_sub.setProperty("dim", True)
@@ -1144,6 +1171,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_verify_target"):
                 self._verify_target.setText("Target: no drive selected")
         else:
+            self._target_change.setText("Change")
             name = drive["model"] or drive["name"]
             size = DriveDetector.format_size(
                 drive["size_gb"] * 1_000_000_000
@@ -1383,34 +1411,41 @@ class MainWindow(QMainWindow):
         bottom_divider.setFixedHeight(1)
         layout.addWidget(bottom_divider)
 
-        layout.addWidget(self._build_bottombar())
+        self._bottombar = self._build_bottombar()
+        layout.addWidget(self._bottombar)
         return main
 
-    def _show_dots_menu(self) -> None:
+    def _build_dots_menu(self) -> QMenu:
         menu = QMenu(self)
         theme = settings.get("theme")
-        light = menu.addAction("Light theme")
-        light.setCheckable(True)
-        light.setChecked(theme == "light")
+
+        def _tick(current: bool) -> str:
+            return "\u2713  " if current else "    "
+
+        light = menu.addAction(f"{_tick(theme == 'light')}Light theme")
         light.triggered.connect(lambda: self._set_theme("light"))
-        contrast = menu.addAction("High contrast")
-        contrast.setCheckable(True)
-        contrast.setChecked(theme == "high-contrast")
-        contrast.triggered.connect(lambda: self._set_theme("high-contrast"))
-        dark = menu.addAction("Dark theme")
-        dark.setCheckable(True)
-        dark.setChecked(theme == "dark")
+        contrast = menu.addAction(
+            f"{_tick(theme == 'high-contrast')}High contrast"
+        )
+        contrast.triggered.connect(
+            lambda: self._set_theme("high-contrast")
+        )
+        dark = menu.addAction(f"{_tick(theme == 'dark')}Dark theme")
         dark.triggered.connect(lambda: self._set_theme("dark"))
         menu.addSeparator()
-        expert = menu.addAction("Expert mode")
-        expert.setCheckable(True)
-        expert.setChecked(bool(settings.get("expert_mode")))
-        expert.triggered.connect(self._set_expert_mode)
+        expert_on = bool(settings.get("expert_mode"))
+        expert = menu.addAction(f"{_tick(expert_on)}Expert mode")
+        expert.triggered.connect(
+            lambda: self._set_expert_mode(not expert_on)
+        )
         menu.addSeparator()
         menu.addAction("Reset window size").triggered.connect(
             lambda: self.resize(900, 580)
         )
-        menu.exec(QCursor.pos())
+        return menu
+
+    def _show_dots_menu(self) -> None:
+        self._build_dots_menu().exec(QCursor.pos())
 
     def _set_theme(self, theme: str) -> None:
         from ui.style import build_style
@@ -1520,6 +1555,12 @@ class MainWindow(QMainWindow):
             self._reload_history()
 
     def _build_verify_page(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
         page = QWidget()
         col = QVBoxLayout(page)
         col.setContentsMargins(24, 20, 24, 20)
@@ -1572,7 +1613,9 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self._verify_cancel_btn)
         buttons.addWidget(self._verify_start_btn, 1)
         col.addLayout(buttons)
-        return page
+
+        scroll.setWidget(page)
+        return scroll
 
     def _on_page_verify_start(self) -> None:
         if self._busy():
@@ -1664,6 +1707,7 @@ class MainWindow(QMainWindow):
         if page == 1:
             self._reload_history()
         self._pages.setCurrentIndex(page)
+        self._bottombar.setVisible(page == 0)
 
     def _set_active_nav(self, index: int) -> None:
         for i, item in enumerate(self._nav_items):
@@ -2150,8 +2194,12 @@ class MainWindow(QMainWindow):
         target_col.addWidget(self._target_detail)
         target_row.addLayout(target_col)
         target_row.addStretch()
-        self._target_change = QLabel("\u21bb Choose\u2026")
-        self._target_change.setObjectName("driveSub")
+        self._target_change = QPushButton("Choose drive")
+        self._target_change.setObjectName("primary")
+        self._target_change.setMinimumHeight(
+            style.DESIGN_TOKENS["button_height"]
+        )
+        self._target_change.clicked.connect(self._show_drive_picker)
         target_row.addWidget(self._target_change)
 
         self._target_admin_btn = QPushButton("Run as administrator")
@@ -2660,6 +2708,15 @@ class MainWindow(QMainWindow):
         # Flash enabled when not busy and iso + drive selected
         try:
             self._flash_btn.setEnabled((not busy) and has_iso and has_drive)
+            if busy:
+                tip = "Wait for the current operation to finish"
+            elif not has_iso:
+                tip = "Select an image first"
+            elif not has_drive:
+                tip = "Select a target drive first"
+            else:
+                tip = "Write the image to the selected drive"
+            self._flash_btn.setToolTip(tip)
         except Exception:
             pass
         # Wipe enabled when a drive is selected and not busy
@@ -2712,7 +2769,12 @@ class MainWindow(QMainWindow):
             self._progress.set_error("Select an ISO image first")
             return
         if not self._current_drive:
-            self._progress.set_error("No USB drive connected")
+            if self._drives:
+                self._show_drive_picker()
+                return
+            self._progress.set_error(
+                "No USB drive detected \u2014 plug one in first"
+            )
             return
         drive = self._current_drive
         name = drive["model"] or drive["name"]
