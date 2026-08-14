@@ -109,4 +109,4 @@ write page. It adds:
 
 ## License
 
-- See the repository for license details.
+- [MIT License](LICENSE) — Copyright (c) 2026 Gowtham G.K
