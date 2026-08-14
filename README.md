@@ -2,7 +2,6 @@
 
 Write ISO/DD disk images to USB drives on Windows, then verify the result.
 
-![GitHub release](https://img.shields.io/github/v/release/gowthvm/Flint)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%2064--bit-0078d6)
 
 Flint is a lightweight, Windows-native utility for writing ISO and DD disk
