@@ -171,6 +171,15 @@ def test_flash_without_drive_opens_picker_when_drives_exist(
         w._shutdown()
 
 
+def test_app_icon_loaded_from_flint_ico(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path)
+    try:
+        icon = w._make_flint_icon()
+        assert not icon.isNull()
+    finally:
+        w._shutdown()
+
+
 def test_flash_without_drive_errors_when_none_detected(qapp, tmp_path):
     w = _make_window(qapp, tmp_path, seed={"expert_mode": False})
     try:

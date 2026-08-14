@@ -1763,6 +1763,15 @@ class MainWindow(QMainWindow):
                 )
 
     def _make_flint_icon(self) -> QIcon:
+        if getattr(sys, "frozen", False):
+            candidates = [os.path.join(sys._MEIPASS, "flint.ico")]
+        else:
+            candidates = [
+                str(Path(__file__).resolve().parent.parent / "flint.ico")
+            ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return QIcon(candidate)
         icon = QIcon()
         for size in (16, 32, 48, 64, 256):
             pixmap = QPixmap(size, size)

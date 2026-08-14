@@ -6,7 +6,7 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[("ui/reference.html", "ui")],
+    datas=[("ui/reference.html", "ui"), ("flint.ico", ".")],
     hiddenimports=[
         "wmi",
         "win32api",
