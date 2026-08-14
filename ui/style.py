@@ -350,15 +350,6 @@ QFrame#navItem:focus {
     border: 1px solid @muted;
 }
 
-QLabel#navIcon {
-    color: @muted;
-    font-size: 15px;
-}
-
-QLabel#navIcon[on="true"] {
-    color: @text;
-}
-
 QLabel#navText {
     color: @muted;
     font-size: 13px;

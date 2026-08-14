@@ -771,13 +771,11 @@ class NavItem(QFrame):
 
     def __init__(
         self,
-        glyph: str,
         text: str,
         active: bool,
         badge: str | None = None,
     ) -> None:
         super().__init__()
-        self._glyph = glyph
         self._text = text
         self._badge = badge
         self.setObjectName("navItem")
@@ -789,16 +787,10 @@ class NavItem(QFrame):
         row.setContentsMargins(10, 8, 10, 8)
         row.setSpacing(9)
 
-        self._icon = QLabel(glyph)
-        self._icon.setObjectName("navIcon")
-        self._icon.setProperty("on", active)
-        self._icon.setFixedWidth(16)
-
         label = QLabel(text)
         label.setObjectName("navText")
         label.setProperty("on", active)
 
-        row.addWidget(self._icon)
         row.addWidget(label)
         row.addStretch()
         if badge is not None:
@@ -811,11 +803,9 @@ class NavItem(QFrame):
 
     def set_active(self, active: bool) -> None:
         self.setProperty("on", active)
-        for widget in (self, self._icon):
-            widget.setProperty("on", active)
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
-            widget.update()
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
         if self._badge_label is not None:
             self._badge_label.setObjectName(
                 "badgeOn" if active else "badge"
@@ -1014,18 +1004,18 @@ class MainWindow(QMainWindow):
         logo_divider.setFixedHeight(1)
 
         nav_items = [
-            ("\u270e\ufe0e", "Write", True, None),
-            ("\u2714\ufe0e", "Verify", False, None),
-            ("\u21ba", "History", False, None),
-            ("\u2699\ufe0e", "Settings", False, None),
+            ("Write", True, None),
+            ("Verify", False, None),
+            ("History", False, None),
+            ("Settings", False, None),
         ]
 
         nav = QVBoxLayout()
         nav.setContentsMargins(8, 12, 8, 12)
         nav.setSpacing(1)
         self._nav_items: list[NavItem] = []
-        for index, (glyph, text, active, badge) in enumerate(nav_items):
-            item = NavItem(glyph, text, active, badge)
+        for index, (text, active, badge) in enumerate(nav_items):
+            item = NavItem(text, active, badge)
             item.clicked.connect(lambda i=index: self._on_nav_clicked(i))
             self._nav_items.append(item)
             nav.addWidget(item)
