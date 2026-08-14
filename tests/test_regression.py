@@ -1,5 +1,6 @@
-import runpy
 import pathlib
+import runpy
+
 
 def test_regression_script():
     # Run the legacy regression script. It uses offscreen Qt and asserts internally.

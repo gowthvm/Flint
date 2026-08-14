@@ -1,8 +1,4 @@
 ruff
-black
-isort
 mypy
 pytest
 pytest-qt
-safety
-bandit

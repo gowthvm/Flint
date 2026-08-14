@@ -1,6 +1,7 @@
 import ctypes
 import re
 from ctypes import wintypes
+from typing import Any
 
 _GUID_DEVCLASS_DISKDRIVE = (
     0x4D36E967, 0xE325, 0x11CE,
@@ -20,13 +21,13 @@ class _SP_DEVINFO_DATA(ctypes.Structure):
     ]
 
 
-def _guid_bytes(guid: tuple) -> ctypes.c_ubyte * 16:
+def _guid_bytes(guid: tuple[int, ...]) -> Any:
     data = ctypes.c_ubyte * 16
     guid_bytes = _encode_guid(guid)
     return data.from_buffer_copy(guid_bytes)
 
 
-def _encode_guid(guid):
+def _encode_guid(guid: tuple[int, ...]) -> bytes:
     import struct
 
     data1, data2, data3, *rest = guid
@@ -36,7 +37,7 @@ def _encode_guid(guid):
     )
 
 
-def _prep_setupapi():
+def _prep_setupapi() -> tuple[Any, Any]:
     setupapi = ctypes.windll.setupapi
     cfgmgr = ctypes.windll.cfgmgr32
     _SP_DEVINFO_PTR = ctypes.POINTER(_SP_DEVINFO_DATA)

@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -54,6 +55,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core import iso as iso_mod
 from core import settings
 from core.bootcheck import probe_bootability
 from core.drives import DriveDetector, DrivePoller
@@ -1832,11 +1834,32 @@ class MainWindow(QMainWindow):
             vtbl = ctypes.cast(
                 ptr, ctypes.POINTER(ctypes.c_void_p)
             )
-            hrinit = ctypes.WINFUNCTYPE(
-                ctypes.HRESULT, ctypes.c_void_p
-            )(vtbl[3])
-            hrinit(ptr)
-            self._tb = (ptr, vtbl)
+
+            def _vfn(index: int, *argtypes: Any) -> Any | None:
+                slot = vtbl[index]
+                if not slot:
+                    return None
+                entry = slot.value
+                if not entry:
+                    return None
+                return ctypes.WINFUNCTYPE(ctypes.HRESULT, *argtypes)(entry)
+
+            init = _vfn(3, ctypes.c_void_p)
+            set_value = _vfn(
+                9,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_ulonglong,
+                ctypes.c_ulonglong,
+            )
+            set_state = _vfn(
+                10, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int
+            )
+            if init is None or set_value is None or set_state is None:
+                return
+            if init(ptr) != 0:
+                return
+            self._tb = (ptr, set_value, set_state)
         except Exception:
             logger.exception("_init_taskbar failed to initialize COM taskbar integration")
             self._tb = None
@@ -1851,25 +1874,12 @@ class MainWindow(QMainWindow):
             self._init_taskbar()
             if self._tb is None:
                 return
-        ptr, vtbl = self._tb
+        ptr, set_value, set_state = self._tb
         hwnd = ctypes.c_void_p(0)
         try:
             hwnd = ctypes.c_void_p(int(self.winId()))
         except RuntimeError:
             return
-        set_value = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_ulonglong,
-            ctypes.c_ulonglong,
-        )(vtbl[9])
-        set_state = ctypes.WINFUNCTYPE(
-            ctypes.HRESULT,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-        )(vtbl[10])
         if percent is None:
             set_state(ptr, hwnd, 4 if error else 0)  # TBPF_ERROR / NOPROGRESS
         else:
@@ -1923,6 +1933,20 @@ class MainWindow(QMainWindow):
     def _shutdown(self) -> None:
         self._poller.requestInterruption()
         self._poller.wait(5000)
+        active = (
+            self._writer,
+            self._verifier,
+            self._page_verifier,
+            self._wipe_worker,
+        )
+        # Cancel and wait for every live worker: destroying a running
+        # QThread aborts the process and abandons the drive mid-write.
+        for worker in active:
+            if worker is not None and worker.isRunning():
+                worker.cancel()
+        for worker in active:
+            if worker is not None and worker.isRunning():
+                worker.wait(10000)
         for worker in self._retired_workers:
             if worker is not None and worker.isRunning():
                 worker.wait(2000)
@@ -2610,12 +2634,18 @@ class MainWindow(QMainWindow):
         return self._drive_path_for(self._current_drive)
 
     def _drive_path_for(self, drive: dict | None) -> str | None:
+        """Physical-disk path for destructive operations (fail closed).
+
+        Only ``\\\\.\\PHYSICALDRIVEn`` paths are accepted. Volume handles
+        (e.g. ``\\\\.\\E:``) would silently write into a single partition
+        instead of the whole disk and are never used for flash/wipe/verify.
+        """
         if not drive:
             return None
         path = drive["physical_path"]
-        if path.startswith("\\\\.\\"):
+        if path.startswith("\\\\.\\PHYSICALDRIVE"):
             return path
-        return f"\\\\.\\{path}"
+        return None
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for widget in self._controls:
@@ -2725,6 +2755,23 @@ class MainWindow(QMainWindow):
             if persistence_size_mb <= 0:
                 self._progress.set_error(
                     "Persistence size must be greater than zero"
+                )
+                return
+            if persistence_size_mb > 65536:
+                self._progress.set_error(
+                    "Persistence size is capped at 64 GiB"
+                )
+                return
+        filesystem = (
+            self._filesystem_combo.currentData() if expert else "fat32"
+        )
+        if not self._iso_hybrid and mode != "dd" and filesystem == "fat32":
+            largest = iso_mod.largest_iso_file_size(iso)
+            if largest > 0xFFFFFFFF:
+                self._progress.set_error(
+                    "The image contains a file over 4 GiB \u2014 FAT32 "
+                    "cannot store it. Pick NTFS or exFAT in Expert mode, "
+                    "or write raw (DD)."
                 )
                 return
         prompt = QMessageBox(self)
@@ -2858,8 +2905,14 @@ class MainWindow(QMainWindow):
         writer.total_bytes.connect(self._progress.set_total)
         writer.eta_seconds.connect(self._progress.set_eta)
         writer.phase.connect(self._progress.set_phase)
-        writer.verify_result.connect(self._on_verify_result)
-        writer.finished.connect(self._on_write_finished)
+        writer.verify_result.connect(
+            lambda ok, msg, res, w=writer: self._on_verify_result(
+                ok, msg, res, w
+            )
+        )
+        writer.finished.connect(
+            lambda ok, msg, w=writer: self._on_write_finished(ok, msg, w)
+        )
         writer.start()
 
     def _on_write_progress(self, percent: float) -> None:
@@ -2874,12 +2927,30 @@ class MainWindow(QMainWindow):
     def _on_write_note(self, note: str) -> None:
         self._write_note = note
 
-    def _on_write_finished(self, ok: bool, message: str) -> None:
+    def _on_write_finished(
+        self, ok: bool, message: str, worker: UsbWriter
+    ) -> None:
+        if worker is not self._writer:
+            # Stale signal from a superseded writer (e.g. a retry started
+            # after this writer finished): never treat it as current.
+            return
         self._write_duration = time.perf_counter() - self._write_started
-        worker = self._writer
         self._writer = None
-        if worker is not None:
-            self._retire(worker)
+        self._retire(worker)
+        if (
+            not ok
+            and message == "cancelled"
+            and self._verification_in_writer
+            and self._verify_handled
+        ):
+            # The write itself completed; only the verification was
+            # cancelled. Present that honestly instead of a false success.
+            self._progress.set_warning(
+                "Write completed \u2014 verification was cancelled; "
+                "the drive is written but was not verified."
+            )
+            self._finish_flash(True, "", None)
+            return
         if not ok:
             self._finish_flash(False, message or "Write failed", None)
             return
@@ -2916,13 +2987,26 @@ class MainWindow(QMainWindow):
             return
         self._finish_flash(True, "", None)
 
-    def _on_verify_result(self, ok: bool, message: str, result: dict) -> None:
+    def _on_verify_result(
+        self,
+        ok: bool,
+        message: str,
+        result: dict,
+        worker: UsbWriter,
+    ) -> None:
+        if worker is not self._writer:
+            # Stale signal from a superseded writer (a retry or a new flash
+            # already replaced it): never block on a dead worker's dialog.
+            return
         if ok:
             self._last_verify_message = message
             self._last_verify_digest = result.get("digest", "")
             return
         if message == "cancelled":
-            self._last_verify_message = "Verification cancelled"
+            self._verify_handled = True
+            self._last_verify_message = (
+                "Write completed \u2014 verification was cancelled"
+            )
             return
         # Mismatches or unreadable sectors: offer to retry the write.
         self._verify_handled = True
@@ -2949,7 +3033,13 @@ class MainWindow(QMainWindow):
             self._finish_flash(False, message or "Verification failed", None)
 
     def _retire(self, worker: QThread) -> None:
+        if worker is None:
+            return
         self._retired_workers.append(worker)
+        # Keep finished worker objects around only for graceful shutdown;
+        # drop the oldest so long sessions do not accumulate them forever.
+        if len(self._retired_workers) > 16:
+            self._retired_workers.pop(0).deleteLater()
 
     def _start_verify(self) -> None:
         iso = self._iso_zone.path
@@ -2972,7 +3062,9 @@ class MainWindow(QMainWindow):
         self._verifier = verifier
         verifier.progress.connect(self._on_verify_progress)
         verifier.stats.connect(self._on_verify_stats)
-        verifier.finished.connect(self._on_verify_finished)
+        verifier.finished.connect(
+            lambda ok, msg, v=verifier: self._on_verify_finished(ok, msg, v)
+        )
         verifier.start()
 
     def _on_verify_stats(self, written: int, total: int) -> None:
@@ -2986,11 +3078,23 @@ class MainWindow(QMainWindow):
                 f"Flint \u2014 Verifying\u2026 {percent:.0f}%"
             )
 
-    def _on_verify_finished(self, ok: bool, message: str) -> None:
-        worker = self._verifier
+    def _on_verify_finished(
+        self, ok: bool, message: str, worker: VerifyWorker
+    ) -> None:
+        if worker is not self._verifier:
+            # Stale signal from a superseded verifier: ignore it.
+            return
         self._verifier = None
-        if worker is not None:
-            self._retire(worker)
+        self._retire(worker)
+        if message == "cancelled":
+            # The write (if any) already completed; this only cancels the
+            # read-back. Do not claim the drive was left partially written.
+            self._progress.set_warning(
+                "Write completed \u2014 verification was cancelled; "
+                "the drive is written but was not verified."
+            )
+            self._finish_flash(True, "", None)
+            return
         if ok:
             self._finish_flash(True, "", message)
         else:

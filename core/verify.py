@@ -1,5 +1,6 @@
 import ctypes
 import hashlib
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -8,19 +9,65 @@ from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+logger = logging.getLogger("flint")
+
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
 SECTOR_SIZE = 4096
 MAX_MISMATCHES = 20
+
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
 class _Cancelled(Exception):
     """Raised internally when the caller's cancel callback fires."""
 
 
+def _kernel32() -> Any:
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.DeviceIoControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.DeviceIoControl.restype = ctypes.c_ulong
+    kernel32.ReadFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = ctypes.c_ulong
+    kernel32.SetFilePointerEx.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        ctypes.c_ulong,
+    ]
+    kernel32.SetFilePointerEx.restype = ctypes.c_ulong
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_ulong
+    return kernel32
+
+
 def _open_reader(path: str) -> Any:
     """Open a file or raw device for reading; return the handle or None."""
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32 = _kernel32()
     handle = kernel32.CreateFileW(
         path,
         0x80000000,  # GENERIC_READ
@@ -30,13 +77,13 @@ def _open_reader(path: str) -> Any:
         0,
         None,
     )
-    if not handle or handle == ctypes.c_void_p(-1).value:
+    if not handle or handle == _INVALID_HANDLE_VALUE:
         return None
     return handle
 
 
 def _device_size(handle: Any) -> int:
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _kernel32()
     length = ctypes.c_ulonglong()
     returned = ctypes.c_ulong()
     ok = kernel32.DeviceIoControl(
@@ -52,6 +99,23 @@ def _device_size(handle: Any) -> int:
     if not ok or length.value <= 0:
         return 0
     return length.value
+
+
+def _seek(handle: Any, offset: int, retries: int) -> bool:
+    """Position ``handle`` at ``offset``, retrying failed calls.
+
+    Returns False when every attempt failed (``_Cancelled`` is not raised;
+    callers keep the cancel check in the read loop).
+    """
+    kernel32 = _kernel32()
+    for _ in range(retries + 1):
+        position = ctypes.c_longlong()
+        if kernel32.SetFilePointerEx(
+            handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
+        ):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _read_chunk(
@@ -206,6 +270,18 @@ def verify_device(
                 if nread is None:
                     result["bad_sectors"].append(done - done % SECTOR_SIZE)
                     done += count
+                    # Both the device and the source file stayed at the old
+                    # position; skip the chunk on both sides so the tail of
+                    # the image is still read, hashed and compared.
+                    if iso_file is not None:
+                        iso_file.seek(done)
+                    if not _seek(handle, done, retries):
+                        result["error"] = (
+                            "could not reposition the device for read-back"
+                        )
+                        return result
+                    if progress is not None:
+                        progress(done, verify_size)
                     continue
                 if nread == 0:
                     result["error"] = "read-back ended before the image"
@@ -371,13 +447,20 @@ class VerifyWorker(QThread):
             self.progress.emit(done / total * 100.0)
             self.stats.emit(done, total)
 
-        ok, result = hash_drive(
-            self._drive_path,
-            self._size,
-            self._expected_sha256,
-            progress=on_progress,
-            is_cancelled=lambda: self._cancelled,
-        )
+        try:
+            ok, result = hash_drive(
+                self._drive_path,
+                self._size,
+                self._expected_sha256,
+                progress=on_progress,
+                is_cancelled=lambda: self._cancelled,
+            )
+        except Exception as exc:
+            # Never let a worker thread die silently: the UI would stay
+            # blocked with no way out.
+            logger.exception("VerifyWorker.run failed")
+            self.finished.emit(False, str(exc) or "verification failed")
+            return
         if not ok:
             self.finished.emit(False, result)
             return

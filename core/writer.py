@@ -22,6 +22,55 @@ class _NativeCancel(Exception):
     """Raised from the native progress callback to abort the write."""
 
 
+def _kernel32() -> Any:
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.DeviceIoControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.DeviceIoControl.restype = ctypes.c_ulong
+    kernel32.ReadFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = ctypes.c_ulong
+    kernel32.WriteFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.WriteFile.restype = ctypes.c_ulong
+    kernel32.FlushFileBuffers.argtypes = [ctypes.c_void_p]
+    kernel32.FlushFileBuffers.restype = ctypes.c_ulong
+    kernel32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
+    kernel32.SetThreadExecutionState.restype = ctypes.c_ulong
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_ulong
+    kernel32.GetLastError.restype = ctypes.c_ulong
+    return kernel32
+
+
 def _load_native_writer() -> Any:
     """Return the compiled ``core._native_writer`` module, or ``None``.
 
@@ -157,9 +206,8 @@ class UsbWriter(QThread):
     def cancel(self) -> None:
         self._canceled = True
 
-    def _open_drive(self) -> ctypes.c_void_p:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateFileW.restype = ctypes.c_void_p
+    def _open_drive(self) -> int:
+        kernel32 = _kernel32()
         handle = kernel32.CreateFileW(
             self.drive_path,
             self._GENERIC_READ | self._GENERIC_WRITE,
@@ -171,10 +219,10 @@ class UsbWriter(QThread):
         )
         if not handle or handle == self._INVALID_HANDLE_VALUE:
             raise OSError(f"drive not writable: {self.drive_path}")
-        return handle
+        return int(handle)
 
-    def _drive_size(self, handle: ctypes.c_void_p) -> int:
-        kernel32 = ctypes.windll.kernel32
+    def _drive_size(self, handle: int) -> int:
+        kernel32 = _kernel32()
         size = ctypes.c_ulonglong()
         returned = ctypes.c_ulong()
         ok = kernel32.DeviceIoControl(
@@ -191,8 +239,8 @@ class UsbWriter(QThread):
             raise OSError("failed to query drive size")
         return size.value
 
-    def _write_chunk(self, handle: ctypes.c_void_p, data: bytes) -> None:
-        kernel32 = ctypes.windll.kernel32
+    def _write_chunk(self, handle: int, data: bytes) -> None:
+        kernel32 = _kernel32()
         buffer = ctypes.create_string_buffer(data)
         written = ctypes.c_ulong()
         ok = kernel32.WriteFile(
@@ -203,18 +251,18 @@ class UsbWriter(QThread):
             None,
         )
         if not ok:
-            raise OSError(f"write failed: {ctypes.windll.kernel32.GetLastError()}")
+            raise OSError(f"write failed: {kernel32.GetLastError()}")
         if written.value != len(data):
             raise OSError("short write on drive")
 
-    def _flush(self, handle: ctypes.c_void_p) -> None:
-        if not ctypes.windll.kernel32.FlushFileBuffers(handle):
+    def _flush(self, handle: int) -> None:
+        if not _kernel32().FlushFileBuffers(handle):
             raise OSError(
                 "flush failed: data may not have reached the drive"
             )
 
-    def _device_control(self, handle: ctypes.c_void_p, code: int) -> bool:
-        kernel32 = ctypes.windll.kernel32
+    def _device_control(self, handle: int, code: int) -> bool:
+        kernel32 = _kernel32()
         returned = ctypes.c_ulong()
         return bool(
             kernel32.DeviceIoControl(
@@ -229,13 +277,12 @@ class UsbWriter(QThread):
             )
         )
 
-    def _lock_volumes(self) -> list[ctypes.c_void_p]:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateFileW.restype = ctypes.c_void_p
+    def _lock_volumes(self) -> list[int]:
+        kernel32 = _kernel32()
         _GENERIC_READ = 0x80000000
         _GENERIC_WRITE = 0x40000000
         _OPEN_EXISTING = 3
-        held: list[ctypes.c_void_p] = []
+        held: list[int] = []
         for letter in self.letters:
             path = f"\\\\.\\{letter}:"
             handle = kernel32.CreateFileW(
@@ -249,10 +296,12 @@ class UsbWriter(QThread):
             )
             if not handle or handle == self._INVALID_HANDLE_VALUE:
                 continue
-            self._device_control(handle, self._FSCTL_DISMOUNT_VOLUME)
+            self._device_control(int(handle), self._FSCTL_DISMOUNT_VOLUME)
             locked = False
             for _ in range(5):
-                if self._device_control(handle, self._FSCTL_LOCK_VOLUME):
+                if self._device_control(
+                    int(handle), self._FSCTL_LOCK_VOLUME
+                ):
                     locked = True
                     break
                 time.sleep(0.2)
@@ -263,17 +312,17 @@ class UsbWriter(QThread):
                     f"Volume {letter}: is in use by another program. "
                     "Close it and try again."
                 )
-            held.append(handle)
+            held.append(int(handle))
         return held
 
-    def _unlock_volumes(self, held: list[ctypes.c_void_p]) -> None:
-        kernel32 = ctypes.windll.kernel32
+    def _unlock_volumes(self, held: list[int]) -> None:
+        kernel32 = _kernel32()
         for handle in held:
             self._device_control(handle, self._FSCTL_UNLOCK_VOLUME)
             kernel32.CloseHandle(handle)
 
     def run(self) -> None:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _kernel32()
         kernel32.SetThreadExecutionState(
             self._ES_CONTINUOUS
             | self._ES_SYSTEM_REQUIRED
@@ -300,6 +349,10 @@ class UsbWriter(QThread):
                 self.verify_sha256 or self.bad_block_scan
             ):
                 self._verify_after_write()
+            if self._finished:
+                # A cancelled verification already reported its outcome;
+                # never follow it with a (True, "") success signal.
+                return
             self.finished.emit(True, "")
         except Exception as exc:
             logger.exception("UsbWriter.run failed")
@@ -309,6 +362,9 @@ class UsbWriter(QThread):
 
     def _run_filecopy(self) -> None:
         """Repartition the drive, format it, then copy ISO contents."""
+        if self._canceled:
+            self._finish_cancelled()
+            return
         self.phase.emit("Preparing partition")
         letter = diskpart.prepare_partition(
             diskpart.drive_number_from_path(self.drive_path),
@@ -316,12 +372,18 @@ class UsbWriter(QThread):
             self.filesystem,
         )
         self.progress.emit(10.0)
+        if self._canceled:
+            self._finish_cancelled()
+            return
         if self.windows_to_go:
             self.phase.emit("Applying Windows image")
             diskpart.apply_windows_image(self.iso_path, letter)
         else:
             self.phase.emit("Copying files")
             diskpart.copy_iso_files(self.iso_path, letter)
+        if self._canceled:
+            self._finish_cancelled()
+            return
         if self.persistence and not self.windows_to_go:
             self.phase.emit("Creating persistence")
             paths = iso_mod.list_iso_paths(self.iso_path)
@@ -336,29 +398,37 @@ class UsbWriter(QThread):
         self.progress.emit(100.0)
         self.finished.emit(True, "")
 
+    def _finish_cancelled(self) -> None:
+        self._finished = True
+        self.finished.emit(False, "cancelled")
+
     def _run_inner(self) -> None:
+        handle = None
         try:
             total = os.path.getsize(self.iso_path)
             if total <= 0:
                 raise ValueError("ISO file is empty")
             handle = self._open_drive()
-            try:
-                drive_size = self._drive_size(handle)
-                if drive_size < total:
-                    self._finished = True
-                    self.finished.emit(
-                        False, "drive is too small for this image"
-                    )
-                    return
-            except OSError as exc:
+            drive_size = self._drive_size(handle)
+            if drive_size < total:
                 self._finished = True
-                self.finished.emit(False, str(exc))
+                self.finished.emit(
+                    False, "drive is too small for this image"
+                )
                 return
         except Exception as exc:
             logger.exception("UsbWriter._run_inner: setup failed")
             self._finished = True
             self.finished.emit(False, str(exc))
             return
+        finally:
+            if handle is not None and self._finished:
+                # Pre-flight failures return before the write loop; release
+                # the drive handle here so Windows does not keep it busy.
+                ctypes.windll.kernel32.CloseHandle(handle)
+                handle = None
+
+        assert handle is not None  # pre-flight failures returned above
 
         self.total_bytes.emit(total)
 
@@ -494,7 +564,12 @@ class UsbWriter(QThread):
             is_cancelled=lambda: self._canceled,
         )
         if result["error"] == "cancelled" or self._canceled:
+            # The write itself completed; only the verification was
+            # cancelled. Report it as cancelled so the UI does not present
+            # a false success and does not write a "verified" history entry.
+            self._finished = True
             self.verify_result.emit(False, "cancelled", result)
+            self.finished.emit(False, "cancelled")
             return
         self.verify_result.emit(result["ok"], self._verify_message(result), result)
 

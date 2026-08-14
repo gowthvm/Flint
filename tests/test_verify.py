@@ -7,6 +7,7 @@ files too), so no real hardware is needed.
 """
 
 import hashlib
+import random
 
 import pytest
 
@@ -214,6 +215,68 @@ def test_verify_reports_persistent_bad_sector(tmp_path, monkeypatch):
     assert result["ok"] is False
     assert result["bad_sectors"] == [64 * 1024]
     assert result["mismatches"] == []
+
+
+def test_verify_skips_bad_chunk_and_keeps_comparing_the_tail(tmp_path, monkeypatch):
+    """M5 regression: when a chunk can never be read, both the device and
+    the source file must advance past it so the tail is still read, hashed
+    and compared. The old code left the device stuck at the bad chunk,
+    re-reading it as if it were the tail (desync).
+
+    The payload is deliberately non-periodic: the old periodic test blob
+    (a repeated 64-byte pattern) hid this because every 64 KiB chunk
+    happened to look identical.
+    """
+    rng = random.Random(42)
+    payload = rng.randbytes(300_000)
+    iso = tmp_path / "iso.bin"
+    iso.write_bytes(payload)
+    device = tmp_path / "device.bin"
+    device.write_bytes(payload)
+    calls = {"n": 0}
+
+    def fail_second_chunk(byref_read):
+        calls["n"] += 1
+        return 2 <= calls["n"] <= 5
+
+    _patch_readfile(monkeypatch, fail_second_chunk)
+    progress: list[tuple[int, int]] = []
+    result = verify.verify_device(
+        str(device),
+        source_iso=str(iso),
+        chunk_size=64 * 1024,
+        retries=3,
+        progress=lambda d, t: progress.append((d, t)),
+    )
+
+    # Exactly one bad sector: chunk 2 was skipped, everything after it was
+    # still read from the right offset.
+    assert result["bad_sectors"] == [64 * 1024]
+    assert result["mismatches"] == []
+    # The scan ran to the very end of the image (tail was not dropped).
+    assert progress[-1] == (300_000, 300_000)
+    # The digest covers the real bytes read back: chunk 1 + the tail after
+    # the skipped chunk, in order. A desynced verifier would hash the bad
+    # chunk's bytes a second time instead of the tail.
+    expected_digest = hashlib.sha256(payload[:64 * 1024] + payload[128 * 1024:])
+    assert result["digest"] == expected_digest.hexdigest()
+
+
+def test_verify_worker_run_never_dies_silently(qapp, monkeypatch):
+    """H1 regression: an unexpected exception inside VerifyWorker.run must
+    be reported through finished() so the UI never stays locked."""
+    results: list[tuple[bool, str]] = []
+
+    def boom(drive_path, size, expected_sha256, progress=None, is_cancelled=None):
+        raise RuntimeError("simulated verify crash")
+
+    monkeypatch.setattr(verify, "hash_drive", boom)
+    worker = verify.VerifyWorker(r"\\.\PHYSICALDRIVE9", "digest", 1000)
+    worker.finished.connect(lambda ok, msg: results.append((ok, msg)))
+
+    worker.run()
+
+    assert results == [(False, "simulated verify crash")]
 
 
 def test_verify_zero_retries_means_single_attempt(tmp_path, monkeypatch):

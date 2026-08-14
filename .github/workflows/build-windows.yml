@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -13,17 +16,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -86,12 +82,15 @@ jobs:
           path: dist/flint.exe.sha256
 
       - name: Create GitHub release and upload assets
-        uses: softprops/action-gh-release@v2
+        # Pinned to a specific release tag of softprops/action-gh-release;
+        # the floating @v2 major tag is a mutable target.
+        uses: softprops/action-gh-release@v2.2.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: build-${{ github.run_number }}
           name: Flint build ${{ github.run_number }}
+          target_commitish: ${{ github.ref_name }}
           body: |
             Automated build from workflow run ${{ github.run_number }}.
 
@@ -99,5 +98,7 @@ jobs:
           files: |
             dist/flint.exe
             dist/flint.exe.sha256
-          draft: false
+          # Draft, not auto-published: workflow_dispatch runs on branches
+          # other than main used to create mislabeled releases.
+          draft: true
           prerelease: false

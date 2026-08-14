@@ -218,3 +218,74 @@ def test_clear_iso_resets_hybrid_state(qapp, tmp_path):
         assert w._mode_combo.isEnabled()
     finally:
         w._shutdown()
+
+
+# ---------------------------------------------------------------------------
+# largest_iso_file_size (FAT32 >4 GiB pre-flight, L4)
+# ---------------------------------------------------------------------------
+
+def test_largest_iso_file_size_small_tree(tmp_path):
+    path = str(tmp_path / "plain.iso")
+    build_iso(path, linux_casper_tree())
+    assert iso.largest_iso_file_size(path) == 2048
+
+
+def _big_file_iso(path: str) -> None:
+    """Tiny ISO whose root holds a subdirectory with a large file record
+    (the file data area is never read by the scanner, so no huge file is
+    actually written to disk). ISO9660 size fields are 32-bit, so the
+    largest representable value is just under 4 GiB."""
+    import struct
+
+    LOGICAL = 2048
+
+    def rec(extent: int, size: int, is_dir: bool, name: bytes) -> bytes:
+        n = len(name)
+        length = 33 + n + (1 if n % 2 == 0 else 0)
+        r = bytearray(length)
+        r[0] = length
+        r[2:6] = struct.pack("<I", extent)
+        r[10:14] = struct.pack("<I", size)
+        r[25] = 0x02 if is_dir else 0x00
+        r[32] = len(name)
+        r[33 : 33 + len(name)] = name
+        return bytes(r)
+
+    root_extent, sub_extent, file_extent = 18, 19, 21
+    root_blob = (
+        rec(root_extent, 105, True, b".")
+        + rec(root_extent, 0, True, b"..")
+        + rec(sub_extent, 111, True, b"sub")
+    )
+    sub_blob = (
+        rec(sub_extent, 111, True, b".")
+        + rec(root_extent, 0, True, b"..")
+        + rec(file_extent, 4_000_000_000, False, b"big.iso;1")
+    )
+
+    pvd = bytearray(LOGICAL)
+    pvd[1:6] = b"CD001"
+    pvd[156:190] = rec(root_extent, len(root_blob), True, b".")
+
+    with open(path, "wb") as f:
+        f.write(b"\x00" * (16 * LOGICAL))
+        f.write(pvd)
+        f.write(b"\x00" * LOGICAL)  # terminator (unused by scanner)
+        f.write(root_blob + b"\x00" * (-len(root_blob) % LOGICAL))
+        f.write(sub_blob + b"\x00" * (-len(sub_blob) % LOGICAL))
+
+
+def test_largest_iso_file_size_large_file(tmp_path):
+    path = tmp_path / "big.iso"
+    _big_file_iso(str(path))
+    assert iso.largest_iso_file_size(str(path)) == 4_000_000_000
+
+
+def test_largest_iso_file_size_udf_only(tmp_path):
+    path = tmp_path / "udf.iso"
+    path.write_bytes(b"\x00" * (2048 * 20))
+    assert iso.largest_iso_file_size(str(path)) == -1
+
+
+def test_largest_iso_file_size_missing(tmp_path):
+    assert iso.largest_iso_file_size(str(tmp_path / "nope.iso")) == -1

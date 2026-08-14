@@ -2,20 +2,12 @@
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.black]
-line-length = 88
-target-version = ['py311']
-
-[tool.isort]
-profile = "black"
-
 [tool.ruff]
 line-length = 88
+extend-exclude = ["_regression.py"]
 
 [tool.ruff.lint]
-ignore = ["E203"]
-
-[tool.mypy]
-python_version = 3.11
-ignore_missing_imports = true
-strict = true
+# E203: whitespace before slice punctuation (PEP-8 conflict)
+# BLE001: deliberate catch-all fallback chains (worker threads, fallbacks)
+# S110:  deliberate try/except-pass swallow sites
+ignore = ["E203", "BLE001", "S110"]

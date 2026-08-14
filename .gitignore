@@ -52,5 +52,12 @@ temp/
 # Wheels
 *.whl
 
+# Secrets and signing material (never commit these)
+*.pfx
+*.key
+*.pem
+*.cer
+.env
+
 # Local CI / artifacts folder (do not commit built EXEs)
 flint-dist/

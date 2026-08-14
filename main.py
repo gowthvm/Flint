@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 import traceback
-import logging
+from contextlib import ExitStack
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -16,6 +16,7 @@ from ui.style import build_style
 from ui.window import MainWindow
 
 logger = setup_logging()
+_crash_file_stack = ExitStack()
 _SINGLE_INSTANCE_NAME = "FlintFlashingApp_v1"
 _CRASH_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", os.environ.get("TEMP", ".")),
@@ -31,7 +32,12 @@ def _log(message: str) -> None:
 def _install_crash_logging() -> None:
     try:
         os.makedirs(os.path.dirname(_CRASH_PATH), exist_ok=True)
-        crash = open(_CRASH_PATH, "a", encoding="utf-8")
+        # The file must stay open for the process lifetime (faulthandler and
+        # the excepthook write to it), so it is kept in a module-level
+        # ExitStack rather than closed at the end of this function.
+        crash = _crash_file_stack.enter_context(
+            open(_CRASH_PATH, "a", encoding="utf-8")  # noqa: SIM115
+        )
         faulthandler.enable(crash)
 
         def _hook(exc_type, exc_value, exc_tb) -> None:

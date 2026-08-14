@@ -37,6 +37,7 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
     unsigned long long done = 0;
     int is_device = 0;
     int ok = 0;
+    DWORD saved_err = 0;
 
     (void)self;
 
@@ -141,10 +142,14 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
             pos.QuadPart = (LONGLONG)done;
             if (!SetFilePointerEx(trim, pos, NULL, FILE_BEGIN) ||
                 !SetEndOfFile(trim)) {
+                /* go through cleanup so the buffer and in_handle are
+                 * released; saved_err survives CloseHandle clobbering it */
                 DWORD err = GetLastError();
                 CloseHandle(trim);
-                PyErr_SetFromWindowsErr(err);
-                return NULL;
+                trim = INVALID_HANDLE_VALUE;
+                saved_err = err;
+                ok = 0;
+                goto cleanup;
             }
         }
         CloseHandle(trim);
@@ -162,7 +167,10 @@ cleanup:
     if (ok == -1)
         return NULL; /* exception already set by the callback */
     if (!ok) {
-        PyErr_SetFromWindowsErr(GetLastError());
+        if (saved_err != 0)
+            PyErr_SetFromWindowsErr(saved_err);
+        else
+            PyErr_SetFromWindowsErr(GetLastError());
         return NULL;
     }
     return PyLong_FromUnsignedLongLong(done);

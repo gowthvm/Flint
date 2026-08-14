@@ -16,6 +16,10 @@ a = Analysis(
         "pythoncom",
         "pywintypes",
         "psutil",
+        # Loaded dynamically via importlib in core/writer.py; PyInstaller's
+        # static analysis does not see it. Without this the native writer
+        # silently falls back to buffered Python IO in the packaged app.
+        "core._native_writer",
     ],
     hookspath=[],
     hooksconfig={},

@@ -57,9 +57,10 @@ def is_hybrid_iso(path: str) -> bool:
 
     Detection is an in-process fast heuristic on the first 36 KiB:
     - the ISO9660 marker at the primary volume descriptor (32769),
-    - the MBR boot signature (55AA) at offset 510,
-    - a non-empty MBR partition table, and/or the syslinux ``ISOHYBRID``
-      marker written into the MBR boot code.
+    - the syslinux ``ISOHYBRID`` marker written into the MBR boot code
+      (decisive on its own),
+    - the MBR boot signature (55AA) at offset 510 together with a non-empty
+      MBR partition table.
     El Torito presence alone is not decisive (plain bootable CD images have
     it too). When the image is unreadable or too small this returns False and
     callers default to raw (DD), which is safe either way.
@@ -72,6 +73,11 @@ def is_hybrid_iso(path: str) -> bool:
         != _ISO9660_MARKER
     ):
         return False
+    # The syslinux ISOHYBRID marker is decisive on its own: it only appears
+    # in images produced with isohybrid and guarantees the MBR was installed
+    # (some of those images carry no 0x55AA boot signature).
+    if _ISOHYBRID_STRING in head[:_MBR_PARTITION_START]:
+        return True
     if (
         head[_MBR_SIGNATURE_START : _MBR_SIGNATURE_END]
         != b"\x55\xaa"
@@ -82,8 +88,7 @@ def is_hybrid_iso(path: str) -> bool:
         entry != b"\x00" * 16
         for entry in (table[i : i + 16] for i in range(0, 64, 16))
     )
-    has_marker = _ISOHYBRID_STRING in head[:_MBR_PARTITION_START]
-    return has_partition or has_marker
+    return has_partition
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +211,72 @@ def list_iso_paths(path: str) -> set[str]:
     except OSError:
         return out
     return out
+
+
+def largest_iso_file_size(path: str) -> int:
+    """Largest single file (bytes) in the ISO9660 tree, or -1 when the
+    image has no readable ISO9660 bridge (e.g. pure UDF).
+
+    Used as a pre-flight check for FAT32 targets, which cannot store files
+    over 4 GiB.
+    """
+    largest = -1
+    try:
+        with open(path, "rb") as f:
+            pvd = _read_logical(f, 16)
+            if pvd[1:6] != _ISO9660_MARKER:
+                return -1
+            root = _parse_dir_record(pvd, _PVD_ROOT_RECORD_OFFSET)
+            if root is None:
+                return -1
+            budget = [_MAX_RECORDS]
+
+            def walk(
+                extent: int, size: int, depth: int, parent_extent: int
+            ) -> None:
+                nonlocal largest
+                if (
+                    depth > _MAX_DEPTH
+                    or size <= 0
+                    or size > _MAX_DIR_BYTES
+                    or budget[0] <= 0
+                ):
+                    return
+                sectors = (size + _LOGICAL_SECTOR - 1) // _LOGICAL_SECTOR
+                for _ in range(sectors + 1):
+                    data = _read_logical(f, extent)
+                    off = 0
+                    up: int | None = None
+                    while off + 33 <= len(data):
+                        rec = _parse_dir_record(data, off)
+                        if rec is None:
+                            break
+                        if rec["name"] == "..":
+                            up = rec["extent"]
+                        elif rec["name"] not in ("", ".", "\x00"):
+                            budget[0] -= 1
+                            if budget[0] <= 0:
+                                return
+                            if rec["is_dir"] and rec["extent"] > 0:
+                                walk(
+                                    rec["extent"],
+                                    rec["size"],
+                                    depth + 1,
+                                    extent,
+                                )
+                            else:
+                                largest = max(largest, rec["size"])
+                        off += rec["length"]
+                    if up is None or up <= 0:
+                        return
+                    if up == parent_extent:
+                        return
+                    extent = up
+
+            walk(root["extent"], root["size"], 0, root["extent"])
+    except OSError:
+        return -1
+    return largest
 
 
 def _scan_raw(path: str, needles: list[bytes]) -> bool:

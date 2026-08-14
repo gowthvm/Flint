@@ -1,4 +1,11 @@
 # Flint — Bootable USB Writer (Windows)
+ _______  ___      ___   __    _  _______ 
+|       ||   |    |   | |  |  | ||       |
+|    ___||   |    |   | |   |_| ||_     _|
+|   |___ |   |    |   | |       |  |   |  
+|    ___||   |___ |   | |  _    |  |   |  
+|   |    |       ||   | | | |   |  |   |  
+|___|    |_______||___| |_|  |__|  |___|  
 
 Flint is a lightweight, Windows-native utility for writing ISO/DD images to USB
 drives. It's built with PyQt6 and uses low-level Windows disk APIs for reliable
@@ -25,6 +32,9 @@ Releases & Signing
   computes its SHA-256 checksum (`certutil -hashfile dist\flint.exe SHA256`)
   and uploads both as workflow artifacts and as GitHub release assets.
   Trigger it from the Actions tab (workflow_dispatch) or by pushing to master.
+  Releases are created as **drafts** (tagged `build-<run-number>`) and need
+  manual publishing on the GitHub releases page — workflows dispatched from
+  branches other than `master` used to create mislabeled live releases.
 - Code signing is **optional**: it runs only when both repository secrets are
   set (Settings → Secrets and variables → Actions):
   - `WINDOWS_SIGNING_PFX` — your code-signing certificate as a **base64 string**
@@ -127,6 +137,10 @@ Performance & Native writer
   not built, writes automatically fall back to pure-Python buffered IO — the
   native writer is strictly optional and the toggle simply does nothing if the
   extension is missing.
+- After rebuilding the extension, make sure no stale
+  `core/_native_writer.cp3xx-win_amd64.pyd` from an older Python build is
+  lying around: it shadows the module and can silently deactivate the native
+  writer (delete it, then rebuild).
 
 Verification & bad-block scan
 - After a raw write, "Verify after write" reads the drive back (streaming
@@ -135,16 +149,26 @@ Verification & bad-block scan
   reports the offsets of any mismatched regions.
 - "Bad-block scan" retries failed reads up to the configured number of times
   (1–10, default 3) and reports the 4096-aligned offsets of sectors that
-  never read back.
+  never read back. Unreadable chunks are skipped on both the drive and the
+  source image, so the rest of the image is still verified.
 - When the check finds mismatches or unreadable sectors, Flint offers to
-  retry the write or abort. Verification is skipped after file-copy writes
-  (the drive is not byte-identical to the image).
+  retry the write or abort. A cancelled verification reports the write as
+  completed-but-unverified — never as a false success. Verification is
+  skipped after file-copy writes (the drive is not byte-identical to the
+  image).
+- Before a raw write to a FAT32 target, Flint checks the image for files over
+  4 GiB (impossible on FAT32) and refuses to proceed unless you switch the
+  filesystem to NTFS/exFAT or write raw (DD).
 
 Safety & limitations
 - Target platform: 64-bit Windows only.
 - Flint writes raw images directly to disks — this will irreversibly erase data.
   Always confirm the target and back up important data before use.
 - Use elevated permissions when required; Flint will prompt to elevate.
+  Note that the packaged executable requests elevation at launch
+  (`uac_admin=True` in `flint.spec`), so the whole app runs elevated rather
+  than elevating per-operation. Revisit this flag if you ever add a
+  non-elevated workflow.
 
 Support & contribution
 - Open issues and pull requests on GitHub: https://github.com/gowthvm/Flint

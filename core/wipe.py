@@ -1,9 +1,10 @@
 import ctypes
+import logging
 import time
 from collections import deque
+from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
-import logging
 
 logger = logging.getLogger("flint")
 
@@ -49,8 +50,7 @@ class WipeWorker(QThread):
         self._canceled = True
 
     def _open_drive(self) -> ctypes.c_void_p:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32 = self._kernel32()
         handle = kernel32.CreateFileW(
             self.drive_path,
             self._GENERIC_READ | self._GENERIC_WRITE,
@@ -62,10 +62,46 @@ class WipeWorker(QThread):
         )
         if not handle or handle == self._INVALID_HANDLE_VALUE:
             raise OSError(f"drive not writable: {self.drive_path}")
-        return handle
+        return ctypes.c_void_p(handle)
+
+    @staticmethod
+    def _kernel32() -> Any:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CreateFileW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+        ]
+        kernel32.DeviceIoControl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_void_p,
+        ]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.WriteFile.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_void_p,
+        ]
+        kernel32.FlushFileBuffers.argtypes = [ctypes.c_void_p]
+        kernel32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
+        kernel32.SetThreadExecutionState.restype = ctypes.c_ulong
+        return kernel32
 
     def _drive_size(self, handle: ctypes.c_void_p) -> int:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = self._kernel32()
         size = ctypes.c_ulonglong()
         returned = ctypes.c_ulong()
         ok = kernel32.DeviceIoControl(
@@ -83,7 +119,7 @@ class WipeWorker(QThread):
         return size.value
 
     def _device_control(self, handle: ctypes.c_void_p, code: int) -> bool:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = self._kernel32()
         returned = ctypes.c_ulong()
         return bool(
             kernel32.DeviceIoControl(
@@ -99,8 +135,7 @@ class WipeWorker(QThread):
         )
 
     def _lock_volumes(self) -> list[ctypes.c_void_p]:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32 = self._kernel32()
         _GENERIC_READ = 0x80000000
         _GENERIC_WRITE = 0x40000000
         _OPEN_EXISTING = 3
@@ -136,13 +171,13 @@ class WipeWorker(QThread):
         return held
 
     def _unlock_volumes(self, held: list[ctypes.c_void_p]) -> None:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = self._kernel32()
         for handle in held:
             self._device_control(handle, self._FSCTL_UNLOCK_VOLUME)
             kernel32.CloseHandle(handle)
 
     def _write_chunk(self, handle: ctypes.c_void_p, data: bytes) -> None:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = self._kernel32()
         buffer = ctypes.create_string_buffer(data)
         written = ctypes.c_ulong()
         ok = kernel32.WriteFile(
@@ -158,7 +193,7 @@ class WipeWorker(QThread):
             raise OSError("short write on drive")
 
     def run(self) -> None:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = self._kernel32()
         kernel32.SetThreadExecutionState(
             self._ES_CONTINUOUS
             | self._ES_SYSTEM_REQUIRED

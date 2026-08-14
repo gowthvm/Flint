@@ -263,6 +263,108 @@ def test_writer_chunk_size_clamped_to_minimum():
     assert w.chunk_size == writer.DEFAULT_CHUNK_SIZE
 
 
+# ------------------------------------------------- audit fixes (M1/M3/L3) ----
+
+
+def test_writer_verify_cancel_reports_cancelled_not_success(tmp_path, monkeypatch):
+    """M1 regression: cancelling during the post-write verification must
+    emit finished(False, "cancelled") — never a false success, and no
+    "verified" history entry may be produced."""
+    w, _ = _monkeypatched_writer(
+        monkeypatch, tmp_path, verify_after_write=True, verify_sha256=True
+    )
+    results: list[tuple[bool, str]] = []
+    verify_results: list[tuple[bool, str]] = []
+    w.finished.connect(lambda ok, msg: results.append((ok, msg)))
+    w.verify_result.connect(lambda ok, msg, res: verify_results.append((ok, msg)))
+
+    def fake_verify(device_path, source_iso=None, chunk_size=None,
+                    retries=None, progress=None, is_cancelled=None):
+        # Simulate the user cancelling while the read-back is running.
+        w._canceled = True
+        return {
+            "ok": False, "mismatches": [], "bad_sectors": [],
+            "digest": "", "speed_mbps": 0.0, "error": "cancelled",
+        }
+
+    monkeypatch.setattr(writer.verify_mod, "verify_device", fake_verify)
+    # Fake the drive handle away: chunk writes must not touch real hardware.
+    monkeypatch.setattr(w, "_write_chunk", lambda handle, data: None)
+
+    w.run()
+
+    assert verify_results == [(False, "cancelled")]
+    assert results == [(False, "cancelled")]
+
+
+def test_writer_preflight_failure_closes_drive_handle(tmp_path, monkeypatch):
+    """M3 regression: when the drive-size check fails before the write
+    loop, the drive handle must be closed (previously it leaked and kept
+    the drive busy until the app quit)."""
+    w, _ = _monkeypatched_writer(monkeypatch, tmp_path)
+    results: list[tuple[bool, str]] = []
+    closed: list = []
+    w.finished.connect(lambda ok, msg: results.append((ok, msg)))
+    real_close = writer.ctypes.windll.kernel32.CloseHandle
+
+    def boom_size(handle):
+        raise OSError("cannot query drive size")
+
+    def recording_close(handle):
+        closed.append(handle)
+        return real_close(handle)
+
+    monkeypatch.setattr(w, "_drive_size", boom_size)
+    monkeypatch.setattr(writer.ctypes.windll.kernel32, "CloseHandle", recording_close)
+
+    w.run()
+
+    assert results == [(False, "cannot query drive size")]
+    # Compare by value: ctypes pointer equality is identity in newer pythons.
+    assert [h.value for h in closed] == [12345]
+
+
+def test_filecopy_cancel_before_start_reports_cancelled(tmp_path, monkeypatch):
+    """L3: cancel before the file-copy path begins must not proceed."""
+    monkeypatch.setattr(
+        writer.diskpart, "resolve_write_mode", lambda mode, iso: "filecopy"
+    )
+    w, _ = _monkeypatched_writer(monkeypatch, tmp_path)
+    results: list[tuple[bool, str]] = []
+    w.finished.connect(lambda ok, msg: results.append((ok, msg)))
+    w.cancel()
+
+    w.run()
+
+    assert results == [(False, "cancelled")]
+
+
+def test_filecopy_cancel_midway_reports_cancelled(tmp_path, monkeypatch):
+    """L3: cancelling between the prepare/copy phases must abort cleanly
+    instead of continuing to flash or hanging."""
+    monkeypatch.setattr(
+        writer.diskpart, "resolve_write_mode", lambda mode, iso: "filecopy"
+    )
+    monkeypatch.setattr(
+        writer.diskpart, "prepare_partition",
+        lambda number, scheme, filesystem: "X",
+    )
+
+    def cancel_after_partition(iso_path, letter):
+        w._canceled = True
+
+    monkeypatch.setattr(
+        writer.diskpart, "copy_iso_files", cancel_after_partition
+    )
+    w, _ = _monkeypatched_writer(monkeypatch, tmp_path)
+    results: list[tuple[bool, str]] = []
+    w.finished.connect(lambda ok, msg: results.append((ok, msg)))
+
+    w.run()
+
+    assert results == [(False, "cancelled")]
+
+
 # ------------------------------------------------------------ benchmark -----
 
 

@@ -1,9 +1,10 @@
 import ctypes
+from typing import Any
 
 _GPT_SIG = b"EFI PART"
 
 
-def probe_bootability(drive_path: str, size_read: int = 65536) -> dict:
+def probe_bootability(drive_path: str, size_read: int = 65536) -> dict[str, Any]:
     """Best-effort bootability probe on a flashed raw drive.
 
     Reads the first `size_read` bytes and reports:
@@ -16,6 +17,23 @@ def probe_bootability(drive_path: str, size_read: int = 65536) -> dict:
     """
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     _GENERIC_READ = 0x80000000
     _FILE_SHARE_READ = 0x1
     _FILE_SHARE_WRITE = 0x2
@@ -34,7 +52,7 @@ def probe_bootability(drive_path: str, size_read: int = 65536) -> dict:
     if not handle or handle == _INVALID_HANDLE_VALUE:
         return {"error": "could not open drive for bootability check"}
 
-    report: dict = {
+    report: dict[str, Any] = {
         "mbr_signature": False,
         "gpt": False,
         "efi_partition": False,

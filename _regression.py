@@ -229,7 +229,7 @@ w2._iso_zone._digest = None
 w2._active_write_drive = FAKE
 w2._current_drive = None
 w2._write_started = time.perf_counter() - 1.0
-w2._on_write_finished(True, "")
+w2._on_write_finished(True, "", None)
 assert w2._done_label.text() == "Flash complete \u2014 not verified"
 assert not w2._done_bar.isHidden() and "Verification skipped" in w2._progress._error.text()
 e = h.load_history()[-1]

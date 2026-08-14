@@ -1,10 +1,10 @@
+import logging
 import shutil
 from typing import Any
 
 import psutil
 import wmi
 from PyQt6.QtCore import QThread, pyqtSignal
-import logging
 
 logger = logging.getLogger("flint")
 
@@ -28,7 +28,7 @@ class DrivePoller(QThread):
         while not self.isInterruptionRequested():
             try:
                 drives = self._detector.list_removable_drives()
-            except Exception as exc:
+            except Exception:
                 logger.exception("DrivePoller failed to list drives")
                 drives = []
             self.drives_ready.emit(drives)
@@ -43,7 +43,7 @@ class DriveDetector:
         self.last_error: str | None = None
 
     @staticmethod
-    def format_size(num_bytes: float | int) -> str:
+    def format_size(num_bytes: float) -> str:
         gb = num_bytes / 1_000_000_000
         if gb >= 1:
             return f"{round(gb)} GB"
@@ -70,11 +70,11 @@ class DriveDetector:
                     caption = getattr(logical, "Caption", "")
                     if caption and caption[1:2] == ":":
                         letters.append(caption[0])
-        except Exception as exc:
+        except Exception:
             logger.exception("_drive_letters failed")
         return letters
 
-    def list_removable_drives(self) -> list[dict]:
+    def list_removable_drives(self) -> list[dict[str, Any]]:
         wmi_error: Exception | None = None
         try:
             drives = self._list_with_wmi()
@@ -96,9 +96,9 @@ class DriveDetector:
             self.last_error = None
         return []
 
-    def _list_with_wmi(self) -> list[dict]:
+    def _list_with_wmi(self) -> list[dict[str, Any]]:
         conn = wmi.WMI()
-        result: list[dict] = []
+        result: list[dict[str, Any]] = []
         for disk in conn.Win32_DiskDrive():
             if not self._is_removable(disk):
                 continue
@@ -119,10 +119,77 @@ class DriveDetector:
             )
         return result
 
-    def _list_with_psutil(self) -> list[dict]:
+    @staticmethod
+    def _physical_drive_for_letter(letter: str) -> str | None:
+        """Map a drive letter to its ``\\\\.\\PHYSICALDRIVEn`` path.
+
+        Uses IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS. Returns None when the
+        volume spans multiple disks or the query fails — callers must skip
+        such drives (fail closed) rather than write to a volume handle.
+        """
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateFileW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+        ]
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_ulong
+
+        class _DiskExtent(ctypes.Structure):
+            _fields_ = [
+                ("DiskNumber", ctypes.c_ulong),
+                ("StartingOffset", ctypes.c_longlong),
+                ("ExtentLength", ctypes.c_longlong),
+            ]
+
+        class _VolumeDiskExtents(ctypes.Structure):
+            _fields_ = [
+                ("NumberOfDiskExtents", ctypes.c_ulong),
+                ("DiskExtents", _DiskExtent * 1),
+            ]
+
+        handle = kernel32.CreateFileW(
+            f"\\\\.\\{letter}:",
+            0x80000000,  # GENERIC_READ
+            0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+            None,
+            3,  # OPEN_EXISTING
+            0,
+            None,
+        )
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            extents = _VolumeDiskExtents()
+            returned = ctypes.c_ulong()
+            ok = kernel32.DeviceIoControl(
+                handle,
+                0x00560000,  # IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
+                None,
+                0,
+                ctypes.byref(extents),
+                ctypes.sizeof(extents),
+                ctypes.byref(returned),
+                None,
+            )
+            if ok and extents.NumberOfDiskExtents == 1:
+                return f"\\\\.\\PHYSICALDRIVE{extents.DiskExtents[0].DiskNumber}"
+            return None
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def _list_with_psutil(self) -> list[dict[str, Any]]:
         import win32file
 
-        result: list[dict] = []
+        result: list[dict[str, Any]] = []
         for part in psutil.disk_partitions(all=False):
             letter = self._drive_letter_from_path(part.device)
             if letter is None:
@@ -132,14 +199,23 @@ class DriveDetector:
                     win32file.GetDriveType(part.device)
                     == win32file.DRIVE_REMOVABLE
                 )
-            except Exception as exc:
+            except Exception:
                 logger.exception("win32file.GetDriveType failed")
                 removable = False
             if not removable:
                 continue
+            physical = self._physical_drive_for_letter(letter)
+            if physical is None:
+                # Fail closed: writing to a volume handle (\\\\.\\E:) would
+                # silently corrupt a single partition instead of the disk.
+                logger.warning(
+                    "psutil fallback: skipping %s: no physical-drive mapping",
+                    letter,
+                )
+                continue
             try:
                 size_bytes = shutil.disk_usage(part.mountpoint).total
-            except Exception as exc:
+            except Exception:
                 logger.exception("shutil.disk_usage failed for %s", part.mountpoint)
                 size_bytes = 0
             result.append(
@@ -151,7 +227,7 @@ class DriveDetector:
                     "model": f"USB Drive {letter}:",
                     "serial": "",
                     "letters": [letter],
-                    "physical_path": part.device,
+                    "physical_path": physical,
                 }
             )
         return result
