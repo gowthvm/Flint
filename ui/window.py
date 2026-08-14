@@ -870,6 +870,11 @@ class MainWindow(QMainWindow):
         self._clone_worker: CloneWorker | None = None
         self._backup_digest = ""
         self._backup_out = ""
+        self._queue_items: list[str] = []
+        self._queue_index = 0
+        self._queue_active = False
+        self._queue_ok = 0
+        self._queue_last_succeeded = False
         self._sidecar_status = "missing"
         self._sidecar_detail = ""
         self._retired_workers: list[QThread] = []
@@ -928,6 +933,11 @@ class MainWindow(QMainWindow):
             self._persistence_size,
             self._persistence_unit,
             self._wtg_toggle,
+            self._queue_list,
+            self._queue_add_btn,
+            self._queue_remove_btn,
+            self._queue_clear_btn,
+            self._flash_queue_btn,
         ]
 
         # Keep primary action states in sync with selections and busy state
@@ -1003,6 +1013,7 @@ class MainWindow(QMainWindow):
             or self._wipe_worker is not None
             or self._backup_worker is not None
             or self._clone_worker is not None
+            or self._queue_active
         )
 
     def _build_sidebar(self) -> QWidget:
@@ -2474,6 +2485,52 @@ class MainWindow(QMainWindow):
 
         col.addWidget(self._build_verify_options())
 
+        queue_block = QFrame()
+        queue_block.setObjectName("block")
+        queue_col = QVBoxLayout(queue_block)
+        queue_col.setContentsMargins(14, 12, 14, 12)
+        queue_col.setSpacing(8)
+        queue_header = QHBoxLayout()
+        queue_title = QLabel("FLASH QUEUE")
+        queue_title.setObjectName("capLabel")
+        queue_title.setProperty("colorRole", "muted")
+        queue_hint = QLabel(
+            "Flash several images to the same drive, one after another"
+        )
+        queue_hint.setObjectName("capLabel")
+        queue_hint.setProperty("colorRole", "muted")
+        queue_header.addWidget(queue_title)
+        queue_header.addStretch()
+        queue_header.addWidget(queue_hint)
+        queue_col.addLayout(queue_header)
+        self._queue_list = QListWidget()
+        self._queue_list.setFixedHeight(92)
+        queue_col.addWidget(self._queue_list)
+        queue_buttons = QHBoxLayout()
+        self._queue_add_btn = QPushButton("Add images\u2026")
+        self._queue_add_btn.setObjectName("ghost")
+        self._queue_add_btn.clicked.connect(self._on_queue_add_clicked)
+        self._queue_remove_btn = QPushButton("Remove selected")
+        self._queue_remove_btn.setObjectName("ghost")
+        self._queue_remove_btn.clicked.connect(self._on_queue_remove_clicked)
+        self._queue_clear_btn = QPushButton("Clear")
+        self._queue_clear_btn.setObjectName("ghost")
+        self._queue_clear_btn.clicked.connect(self._on_queue_clear_clicked)
+        self._flash_queue_btn = QPushButton("Flash queue")
+        self._flash_queue_btn.setObjectName("primary")
+        self._flash_queue_btn.setMinimumHeight(
+            style.DESIGN_TOKENS["button_height"]
+        )
+        self._flash_queue_btn.clicked.connect(self._on_flash_queue_clicked)
+        queue_buttons.addWidget(self._queue_add_btn)
+        queue_buttons.addWidget(self._queue_remove_btn)
+        queue_buttons.addWidget(self._queue_clear_btn)
+        queue_buttons.addStretch()
+        queue_buttons.addWidget(self._flash_queue_btn)
+        queue_col.addLayout(queue_buttons)
+        self._queue_block = queue_block
+        col.addWidget(queue_block)
+
         self._progress = ProgressArea()
         self._progress.set_ready()
         col.addWidget(self._progress)
@@ -3638,6 +3695,193 @@ class MainWindow(QMainWindow):
         self._active_write_drive = None
         self._update_controls_state()
 
+    def _queue_images(self) -> list[str]:
+        return [
+            self._queue_list.item(i).text()
+            for i in range(self._queue_list.count())
+        ]
+
+    def _on_queue_add_clicked(self) -> None:
+        if self._busy():
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add images to the queue",
+            "",
+            "Disk images (*.iso *.img);;All files (*)",
+        )
+        existing = set(self._queue_images())
+        for path in paths:
+            if path not in existing:
+                self._queue_list.addItem(path)
+                existing.add(path)
+
+    def _on_queue_remove_clicked(self) -> None:
+        if self._busy():
+            return
+        for item in self._queue_list.selectedItems():
+            self._queue_list.takeItem(self._queue_list.row(item))
+
+    def _on_queue_clear_clicked(self) -> None:
+        if self._busy():
+            return
+        self._queue_list.clear()
+
+    def _mark_queue_item(self, index: int, state: str) -> None:
+        item = self._queue_list.item(index)
+        if item is not None:
+            item.setText(f"{state} \u00b7 {item.text().rsplit(' \u00b7 ', 1)[-1]}")
+
+    def _on_flash_queue_clicked(self) -> None:
+        if self._busy():
+            return
+        images = self._queue_images()
+        if not images:
+            self._progress.set_error("Add images to the queue first")
+            return
+        if not self._current_drive:
+            self._progress.set_error("Select a USB drive first")
+            return
+        drive = self._current_drive
+        name = drive.get("model") or drive.get("name")
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Flint \u2014 flash queue?",
+            message=(
+                f"Write {len(images)} image"
+                f"{'s' if len(images) != 1 else ''} to {name}?\n\n"
+                f"Every image replaces the whole drive; all existing data "
+                f"is erased.\n\n{self._confirm_text(drive)}"
+            ),
+            accept=f"Flash {len(images)}",
+            accept_style="danger",
+        ):
+            return
+        current = self._recheck_drive(drive)
+        if current is None:
+            self._progress.set_error(
+                "Drive changed or disconnected \u2014 refresh and re-pick"
+            )
+            return
+        if not self._require_typed_confirmation(current, None):
+            self._progress.set_error("Confirmation failed — aborting")
+            return
+        self._queue_items = images
+        self._queue_index = 0
+        self._queue_ok = 0
+        self._queue_active = True
+        for index in range(self._queue_list.count()):
+            self._mark_queue_item(index, "pending")
+        self._start_queue_item(0)
+
+    def _start_queue_item(self, index: int) -> None:
+        if index >= len(self._queue_items):
+            return
+        image = self._queue_items[index]
+        drive = self._current_drive
+        if drive is None:
+            self._fail_queue("no drive selected")
+            return
+        self._mark_queue_item(index, "flashing")
+        # Per-item safety: an unreadable or mismatching sidecar blocks the
+        # item cheaply (digest unknown here; the writer hashes the image
+        # itself during verification).
+        status, _detail = checksum_mod.check_sidecar(image, None)
+        if status in ("error", "mismatch"):
+            self._fail_queue(f"checksum problem on {image}")
+            return
+        letters = drive.get("letters") or (
+            [drive["letter"]] if drive.get("letter") else []
+        )
+        expert = bool(settings.get("expert_mode"))
+        writer_kwargs = {
+            "verify_after_write": self._verify_toggle.isChecked(),
+            "verify_sha256": self._verify_sha_toggle.isChecked(),
+            "bad_block_scan": self._bad_block_toggle.isChecked(),
+            "bad_block_retries": self._bad_block_retries_value(),
+        }
+        if expert:
+            writer_kwargs.update(
+                {
+                    "partition_scheme": self._partition_combo.currentData(),
+                    "target_system": self._target_combo.currentData(),
+                    "filesystem": self._filesystem_combo.currentData(),
+                    "write_mode": self._mode_combo.currentData(),
+                    "chunk_size": self._buffer_combo.currentData()
+                    * 1024
+                    * 1024,
+                    "use_native": self._native_toggle.isChecked(),
+                }
+            )
+        self._begin_write(
+            image, self._drive_path_for(drive) or "", letters, writer_kwargs, drive
+        )
+
+    def _fail_queue(self, reason: str) -> None:
+        self._queue_active = False
+        self._writing = False
+        self._poller.resume()
+        self._set_controls_enabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._progress.set_error(self._friendly_error(reason or "Queue failed"))
+        dialogs.completion(
+            self,
+            kind="error",
+            title="Queue failed",
+            message=(
+                f"The queue stopped at image {self._queue_index + 1} of "
+                f"{len(self._queue_items)}: {reason}"
+            ),
+            buttons=[("Close", "primary", "close")],
+        )
+
+    def _maybe_start_next_queue_item(self) -> None:
+        """Called after each flash finishes while a queue is active."""
+        if not self._queue_active:
+            return
+        index = self._queue_index
+        succeeded = self._queue_last_succeeded
+        self._queue_index += 1
+        if succeeded:
+            self._queue_ok += 1
+            self._mark_queue_item(index, "done")
+            if self._queue_index < len(self._queue_items):
+                self._start_queue_item(self._queue_index)
+            else:
+                self._queue_active = False
+                dialogs.completion(
+                    self,
+                    kind="success",
+                    title="Queue complete",
+                    message=(
+                        f"All {len(self._queue_items)} image"
+                        f"{'s' if len(self._queue_items) != 1 else ''} "
+                        "were written to "
+                        f"{(self._active_write_drive or self._current_drive or {}).get('model') or 'the drive'}."
+                    ),
+                    buttons=[("Close", "primary", "close")],
+                )
+        else:
+            self._mark_queue_item(index, "failed")
+            self._queue_active = False
+            self._progress.set_error(
+                self._friendly_error(
+                    "The queue stopped at image "
+                    f"{index + 1} of {len(self._queue_items)}"
+                )
+            )
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Queue stopped",
+                message=(
+                    f"Image {index + 1} of {len(self._queue_items)} failed. "
+                    "The remaining images were not flashed."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+
     def _start_drive_operation(self, worker: QThread) -> None:
         """Common busy-state setup for backup/clone operations."""
         self._progress.reset()
@@ -4125,32 +4369,46 @@ class MainWindow(QMainWindow):
                 )
             if boot and boot != "unknown":
                 detail += f"\n\nBoot: {boot}"
-            result = dialogs.completion(
-                self, kind=kind, title=title, message=detail
-            )
-            if result == "eject":
-                self._on_eject_clicked()
-            elif result == "copy":
-                self._on_copy_report_clicked()
         elif error_text == "cancelled":
-            dialogs.completion(
-                self,
-                kind="warning",
-                title="Write cancelled",
-                message=(
-                    "The drive was left partially written and is not "
-                    "usable. Flash again before using it."
-                ),
-                buttons=[("Close", "primary", "close")],
+            kind = "warning"
+            title = "Write cancelled"
+            detail = (
+                "The drive was left partially written and is not usable. "
+                "Flash again before using it."
             )
         else:
-            dialogs.completion(
-                self,
-                kind="error",
-                title="Flash failed",
-                message=self._friendly_error(error_text or "Failed"),
-                buttons=[
-                    ("Copy report", "ghost", "copy"),
-                    ("Close", "primary", "close"),
-                ],
-            )
+            kind = "error"
+            title = "Flash failed"
+            detail = self._friendly_error(error_text or "Failed")
+
+        # Per-item popups are suppressed while a queue is running; the
+        # queue logic shows a single summary at the end instead.
+        if not self._queue_active:
+            if succeeded:
+                result = dialogs.completion(
+                    self, kind=kind, title=title, message=detail
+                )
+                if result == "eject":
+                    self._on_eject_clicked()
+                elif result == "copy":
+                    self._on_copy_report_clicked()
+            else:
+                buttons = (
+                    [("Close", "primary", "close")]
+                    if error_text == "cancelled"
+                    else [
+                        ("Copy report", "ghost", "copy"),
+                        ("Close", "primary", "close"),
+                    ]
+                )
+                dialogs.completion(
+                    self,
+                    kind=kind,
+                    title=title,
+                    message=detail,
+                    buttons=buttons,
+                )
+
+        if self._queue_active:
+            self._queue_last_succeeded = succeeded
+            self._maybe_start_next_queue_item()
