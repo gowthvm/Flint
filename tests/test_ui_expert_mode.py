@@ -41,7 +41,8 @@ def _make_window(qapp, tmp_path):
 def test_expert_panel_hidden_and_controls_disabled_by_default(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
-        assert w._expert_panel.isHidden()
+        assert w._expert_options_body.isHidden()
+        assert not w._expert_toggle.isHidden()
         assert not w._partition_combo.isEnabled()
         assert not w._target_combo.isEnabled()
         assert not w._filesystem_combo.isEnabled()
@@ -56,7 +57,7 @@ def test_enabling_expert_mode_shows_panel_and_enables_controls(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
         w._expert_toggle.setChecked(True)
-        assert not w._expert_panel.isHidden()
+        assert not w._expert_options_body.isHidden()
         assert w._partition_combo.isEnabled()
         assert w._target_combo.isEnabled()
         assert w._filesystem_combo.isEnabled()
@@ -73,7 +74,8 @@ def test_disabling_expert_mode_hides_panel_and_persists(qapp, tmp_path):
     try:
         w._expert_toggle.setChecked(True)
         w._expert_toggle.setChecked(False)
-        assert w._expert_panel.isHidden()
+        assert w._expert_options_body.isHidden()
+        assert not w._expert_toggle.isHidden()
         assert not w._partition_combo.isEnabled()
         assert s.get("expert_mode") is False
     finally:
@@ -115,7 +117,7 @@ def test_help_buttons_open_reference_with_anchors(qapp, tmp_path, monkeypatch):
     try:
         buttons = [
             b
-            for b in w._expert_panel.findChildren(QPushButton)
+            for b in w._expert_options_body.findChildren(QPushButton)
             if b.objectName() == "helpBtn"
         ]
         buttons += [

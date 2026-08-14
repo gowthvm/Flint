@@ -2290,6 +2290,12 @@ class MainWindow(QMainWindow):
         toggle_row.addStretch()
         col.addLayout(toggle_row)
 
+        body = QWidget()
+        body_col = QVBoxLayout(body)
+        body_col.setContentsMargins(0, 0, 0, 0)
+        body_col.setSpacing(8)
+        col.addWidget(body)
+
         self._partition_combo = QComboBox()
         self._partition_combo.addItem("Auto (GPT for UEFI, MBR for legacy)", "auto")
         self._partition_combo.addItem("GPT", "gpt")
@@ -2348,7 +2354,7 @@ class MainWindow(QMainWindow):
                 )
             )
             row.addWidget(combo, 1)
-            col.addLayout(row)
+            body_col.addLayout(row)
 
         self._native_toggle = ToggleSwitch(
             checked=bool(settings.get("native_writer"))
@@ -2372,7 +2378,7 @@ class MainWindow(QMainWindow):
             )
         )
         native_row.addStretch()
-        col.addLayout(native_row)
+        body_col.addLayout(native_row)
         self._native_toggle.toggled.connect(self._on_expert_changed)
 
         self._persistence_toggle = ToggleSwitch(checked=False)
@@ -2399,7 +2405,7 @@ class MainWindow(QMainWindow):
         persistence_row.addStretch()
         persistence_row.addWidget(self._persistence_size)
         persistence_row.addWidget(self._persistence_unit)
-        col.addLayout(persistence_row)
+        body_col.addLayout(persistence_row)
         self._persistence_row_widgets = [
             self._persistence_toggle,
             self._persistence_size,
@@ -2422,14 +2428,16 @@ class MainWindow(QMainWindow):
             self._help_button("windows-to-go", "Help: Windows To Go")
         )
         wtg_row.addStretch()
-        col.addLayout(wtg_row)
+        body_col.addLayout(wtg_row)
         self._wtg_row = wtg_row
 
         self._persistence_toggle.toggled.connect(self._on_expert_changed)
         self._wtg_toggle.toggled.connect(self._on_wtg_changed)
         self._expert_toggle.toggled.connect(self._set_expert_mode)
-        self._expert_panel = card
-        self._expert_panel.setVisible(bool(settings.get("expert_mode")))
+        self._expert_options_body = body
+        self._expert_options_body.setVisible(
+            bool(settings.get("expert_mode"))
+        )
         self._update_expert_visibility()
         self._update_expert_hint()
         return card
@@ -2611,7 +2619,7 @@ class MainWindow(QMainWindow):
     def _set_expert_mode(self, enabled: bool) -> None:
         settings.set_many(expert_mode=bool(enabled))
         self._expert_toggle.setChecked(bool(enabled))
-        self._expert_panel.setVisible(bool(enabled))
+        self._expert_options_body.setVisible(bool(enabled))
         self._update_expert_visibility()
         self._update_expert_hint()
 

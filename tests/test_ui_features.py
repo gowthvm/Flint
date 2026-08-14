@@ -46,7 +46,7 @@ def test_expert_panel_visible_by_default(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
         assert s.get("expert_mode") is True
-        assert not w._expert_panel.isHidden()
+        assert not w._expert_options_body.isHidden()
         assert w._partition_combo.isEnabled()
     finally:
         w._shutdown()
@@ -58,9 +58,14 @@ def test_expert_mode_can_still_be_turned_off(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
         w._expert_toggle.setChecked(False)
-        assert w._expert_panel.isHidden()
+        assert w._expert_options_body.isHidden()
+        assert not w._expert_toggle.isHidden()
         assert not w._partition_combo.isEnabled()
         assert s.get("expert_mode") is False
+        w._expert_toggle.setChecked(True)
+        assert not w._expert_options_body.isHidden()
+        assert w._partition_combo.isEnabled()
+        assert s.get("expert_mode") is True
     finally:
         w._shutdown()
 
