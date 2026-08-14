@@ -435,7 +435,13 @@ class UsbWriter(QThread):
         if self.use_native:
             native_mod = _load_native_writer()
             if native_mod is not None:
-                self._run_native(native_mod, total)
+                try:
+                    self._run_native(native_mod, total)
+                finally:
+                    # The extension opens its own handles; this Python-side
+                    # drive handle must still be released (it is only closed
+                    # by the Python-path finally below).
+                    ctypes.windll.kernel32.CloseHandle(handle)
                 return
 
         written = 0

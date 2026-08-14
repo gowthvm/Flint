@@ -1,7 +1,10 @@
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("flint")
 
 _APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Flint"
 SETTINGS_PATH = _APP_DIR / "settings.json"
@@ -84,11 +87,20 @@ def get(key: str) -> Any:
 
 
 def set_many(**values: Any) -> None:
-    """Update settings in-memory and persist atomically to disk."""
-    _APP_DIR.mkdir(parents=True, exist_ok=True)
+    """Update settings in-memory and persist atomically to disk.
+
+    Persistence failures (read-only appdata dir, missing permissions, disk
+    errors) are logged and swallowed: the in-memory values still apply for
+    this session, and a later save may succeed. Callers never crash or
+    block close on a settings write.
+    """
     data = _ensure_loaded()
     data.update(values)
-    tmp = SETTINGS_PATH.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    tmp.replace(SETTINGS_PATH)
+    try:
+        _APP_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = SETTINGS_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(SETTINGS_PATH)
+    except OSError:
+        logger.exception("failed to persist settings")

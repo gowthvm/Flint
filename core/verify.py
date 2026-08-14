@@ -14,6 +14,11 @@ logger = logging.getLogger("flint")
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
 SECTOR_SIZE = 4096
 MAX_MISMATCHES = 20
+# Mismatch entries only keep a bounded window of the differing chunk
+# starting at its first differing byte: full 8-320 MiB chunks held in memory
+# caused multi-GB retention on large images. Offsets and lengths are
+# preserved; the window is enough context to diagnose corruption.
+MISMATCH_SAMPLE_SIZE = SECTOR_SIZE
 
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
@@ -199,9 +204,12 @@ def verify_device(
 
     - ``ok``          - True when nothing failed (no mismatches, no
                         unreadable sectors, digest matches when expected)
-    - ``mismatches``  - ``[(offset, length, expected, actual)]`` byte
-                        comparisons that differ (only with ``source_iso``,
-                        capped at ``MAX_MISMATCHES`` entries)
+    - ``mismatches``  - ``[(offset, length, sample_offset, expected,
+                        actual)]`` byte comparisons that differ (only with
+                        ``source_iso``, capped at ``MAX_MISMATCHES``
+                        entries). ``sample_offset`` is where the stored
+                        window starts inside the chunk; expected/actual hold
+                        at most ``MISMATCH_SAMPLE_SIZE`` bytes from there
     - ``bad_sectors`` - 4096-aligned offsets that could not be read after
                         ``retries`` retries; those chunks are skipped
     - ``digest``      - SHA-256 of the bytes that were read back
@@ -294,8 +302,32 @@ def verify_device(
                         expected != data
                         and len(result["mismatches"]) < MAX_MISMATCHES
                     ):
+                        # Snapshot a bounded window starting at the FIRST
+                        # differing byte (a full chunk can be hundreds of
+                        # MB; corruption can sit anywhere inside it). The
+                        # sample offset within the chunk is stored too, so
+                        # callers can reconstruct absolute positions.
+                        first_diff = next(
+                            (
+                                i
+                                for i, (a, b) in enumerate(
+                                    zip(expected, data)
+                                )
+                                if a != b
+                            ),
+                            0,
+                        )
+                        win = min(
+                            nread - first_diff, MISMATCH_SAMPLE_SIZE
+                        )
                         result["mismatches"].append(
-                            (done, nread, expected, data)
+                            (
+                                done,
+                                nread,
+                                first_diff,
+                                expected[first_diff : first_diff + win],
+                                data[first_diff : first_diff + win],
+                            )
                         )
                 done += nread
                 if progress is not None:

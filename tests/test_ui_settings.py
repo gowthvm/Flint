@@ -122,7 +122,13 @@ def test_theme_radio_applies_theme(qapp, tmp_path):
         w._shutdown()
 
 
-def test_close_blocked_while_busy(qapp, tmp_path):
+def test_close_blocked_while_busy(qapp, tmp_path, monkeypatch):
+    from ui import dialogs as d
+
+    warned = []
+    monkeypatch.setattr(
+        d, "inform", lambda parent, **kw: warned.append(kw)
+    )
     w = _make_window(qapp, tmp_path)
     w.show()
     try:
@@ -130,6 +136,7 @@ def test_close_blocked_while_busy(qapp, tmp_path):
         w.close()
         assert w.isVisible()
         assert not w.isHidden()
+        assert warned, "busy close must explain itself without a tray"
         w._writing = False
     finally:
         w._shutdown()

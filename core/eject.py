@@ -115,7 +115,7 @@ def eject_drive(drive_path: str) -> tuple[bool, str]:
             if not parsed or int(parsed.group(1)) != target_index:
                 continue
 
-            name_buf = ctypes.create_unicode_buffer(128)
+            name_buf = ctypes.create_unicode_buffer(512)
             config_ret = cfgmgr.CM_Request_Device_EjectW(
                 data.DevInst,
                 None,

@@ -88,11 +88,17 @@ def test_verify_detects_single_corruption_at_known_offset(tmp_path):
 
     assert result["ok"] is False
     assert len(result["mismatches"]) == 1
-    offset, length, expected, actual = result["mismatches"][0]
+    offset, length, sample_offset, expected, actual = result["mismatches"][0]
     assert offset <= 500_000 < offset + length
+    # The snapshot window starts at the first differing byte.
+    assert offset + sample_offset == 500_000
     assert expected != actual
-    assert expected == payload[offset : offset + length]
-    assert actual == bytes(corrupted)[offset : offset + length]
+    assert expected == payload[
+        offset + sample_offset : offset + sample_offset + len(expected)
+    ]
+    assert actual == bytes(corrupted)[
+        offset + sample_offset : offset + sample_offset + len(actual)
+    ]
 
 
 def test_verify_detects_multiple_corruptions(tmp_path):
@@ -110,9 +116,14 @@ def test_verify_detects_multiple_corruptions(tmp_path):
     assert len(result["mismatches"]) == 3
     offsets = [m[0] for m in result["mismatches"]]
     assert offsets == sorted(set(offsets))
-    for offset, length, expected, actual in result["mismatches"]:
+    for offset, length, sample_offset, expected, actual in result[
+        "mismatches"
+    ]:
         assert expected != actual
-        assert expected == payload[offset : offset + length]
+        assert expected == payload[
+            offset
+            + sample_offset : offset + sample_offset + len(expected)
+        ]
 
 
 def test_verify_device_smaller_than_iso(tmp_path):

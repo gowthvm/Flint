@@ -9,7 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  test:
+    name: Test & lint
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -25,7 +26,42 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install -r requirements-dev.txt
+
+      - name: Build native writer extension
+        run: |
+          python setup.py build_ext --inplace
+
+      - name: Lint
+        run: |
+          ruff check .
+
+      - name: Type check core
+        run: |
+          mypy core --ignore-missing-imports
+
+      - name: Run tests
+        run: |
+          python -m pytest -q
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.22.0
 
       - name: Build native writer extension
         run: |
@@ -65,9 +101,21 @@ jobs:
           certutil -hashfile dist\flint.exe SHA256 > dist\flint.exe.sha256.txt
           $hash = ((Get-Content dist\flint.exe.sha256.txt)[1]).Trim().ToLower()
           Remove-Item dist\flint.exe.sha256.txt
-          "SHA256 (flint.exe) = $hash" | Set-Content -Encoding ascii dist\flint.exe.sha256
+          # Bare lowercase hex (sha256sum-compatible), not a label line.
+          $hash | Set-Content -Encoding ascii dist\flint.exe.sha256
           Add-Content -Path $env:GITHUB_ENV -Value "FLINT_SHA256=$hash"
           Get-Content dist\flint.exe.sha256
+
+      - name: Smoke test built executable
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath (Join-Path $pwd 'dist\flint.exe') -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) {
+            throw "flint.exe exited during smoke test (exit code $($p.ExitCode))"
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Host 'flint.exe started and stayed alive; smoke test passed'
 
       - name: Upload dist
         uses: actions/upload-artifact@v4

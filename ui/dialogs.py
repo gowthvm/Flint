@@ -55,6 +55,9 @@ class FlintDialog(QDialog):
         self._check: QCheckBox | None = None
         self._field: QLineEdit | None = None
         self.setObjectName("flintDialog")
+        # The frameless window has no native title bar; still expose the
+        # title for accessibility (screen readers, task switching).
+        self.setWindowTitle(title or "Flint")
         self.setWindowFlags(
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )

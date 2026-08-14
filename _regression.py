@@ -25,6 +25,7 @@ TOTAL = 0
 from ui import dialogs as _dialogs_mod
 
 _ORIG_COMPLETION = _dialogs_mod.completion
+_ORIG_INFORM = _dialogs_mod.inform
 _POPUPS = []
 
 
@@ -33,7 +34,13 @@ def _capture_completion(parent, *, kind, title, message, buttons=None):
     return None
 
 
+def _capture_inform(parent, *, kind="info", title="", message="", check=None):
+    _POPUPS.append((kind, title, message))
+    return None
+
+
 _dialogs_mod.completion = _capture_completion
+_dialogs_mod.inform = _capture_inform
 
 
 def check(name):
@@ -264,6 +271,132 @@ check("captured write drive in report")
 
 w2._shutdown()
 check("shutdown waits + retires workers")
+
+# ---------- batch 3: audit fixes ----------
+w5 = MainWindow()
+_hush_poller(w5)
+w5._detector.list_removable_drives = lambda: [FAKE]
+w5._select_drive(FAKE)
+
+# ISO load (click / Ctrl+O / drop) is blocked while busy
+w5._iso_zone._browse_guard = lambda: True
+w5._iso_zone.load_iso(ISO)
+assert w5._iso_zone.path is None
+w5._iso_zone._browse_guard = None
+w5._iso_zone.load_iso(ISO)
+w5._iso_zone._worker.wait(10000)
+app.processEvents()
+assert w5._iso_zone.path == ISO
+check("ISO load blocked while busy")
+
+# verify mismatch snapshots are bounded, sample_offset anchored at the
+# first differing byte
+big_iso = os.path.join(d, "big.iso")
+big_payload = os.urandom(3 * 1024 * 1024)
+open(big_iso, "wb").write(big_payload)
+big_dev = os.path.join(d, "big.dev")
+corrupted = bytearray(big_payload)
+corrupted[2 * 1024 * 1024 + 7] ^= 0xFF
+open(big_dev, "wb").write(bytes(corrupted))
+res = v.verify_device(big_dev, source_iso=big_iso, chunk_size=1024 * 1024)
+assert len(res["mismatches"]) == 1, res["mismatches"]
+off, length, sample_off, expected, actual = res["mismatches"][0]
+assert off == 2 * 1024 * 1024 and length == 1024 * 1024
+assert sample_off == 7
+assert len(expected) == len(actual) == v.MISMATCH_SAMPLE_SIZE
+assert expected == big_payload[off + 7 : off + 7 + len(expected)]
+assert actual == bytes(corrupted)[off + 7 : off + 7 + len(actual)]
+check("verify mismatch bounded snapshots")
+
+# wipe cancel surfaces the partial-wipe warning and a wipe report
+w5._current_drive = FAKE
+w5._active_write_drive = FAKE
+w5._write_started = time.perf_counter()
+w5._on_wipe_finished(False, "cancelled")
+assert any(p[1] == "Wipe cancelled" for p in _POPUPS)
+assert w5._last_report is not None and w5._last_report["iso"] == "\u2014 wipe \u2014"
+assert w5._last_report["success"] is False
+check("wipe cancel popup + wipe report")
+
+# corrupted history entries (junk duration) must not crash the page
+h.append_history({"success": True, "iso": "x.iso", "drive": "d",
+                  "duration": "not-a-number"})
+w5._reload_history()
+assert w5._history_list.count() >= 1
+check("corrupted history entry tolerated")
+
+# eject guards: no drive, then drive vanished between selection and eject
+w5._current_drive = None
+w5._active_write_drive = None
+w5._on_eject_clicked()
+assert any(p[1] == "Eject" and p[2] == "No drive selected." for p in _POPUPS)
+w5._current_drive = FAKE
+w5._detector.list_removable_drives = lambda: []  # drive removed meanwhile
+w5._on_eject_clicked()
+assert any("no longer present" in p[2] for p in _POPUPS)
+w5._detector.list_removable_drives = lambda: [FAKE]
+w5._on_eject_clicked()
+assert any("drive not found in device list" in p[2] for p in _POPUPS)
+check("eject guards (no drive / drive vanished / unmatched)")
+
+# taskbar progress retries after a cooldown instead of latching forever
+calls = {"n": 0}
+w5._init_taskbar = lambda: calls.__setitem__("n", calls["n"] + 1)
+w5._tb = None
+w5._tb_last_try = time.monotonic()
+w5._set_taskbar_progress(10.0)
+assert calls == {"n": 0}
+w5._tb_last_try = time.monotonic() - 10
+w5._set_taskbar_progress(10.0)
+assert calls == {"n": 1}
+check("taskbar retry cooldown")
+
+# failure / cancel set an honest chip title
+w5._finish_flash(False, "boom", None)
+assert w5._progress._title.text() == "Failed"
+w5._finish_flash(False, "cancelled", None)
+assert w5._progress._title.text() == "Cancelled"
+check("failure chip titles")
+
+# in-writer verify switches the chip to verify presentation and freezes
+# the measured write duration at that point
+w5._write_started = time.perf_counter() - 3.0
+w5._write_duration = 0.0
+w5._on_write_phase("Verifying")
+assert w5._write_duration > 2.0
+assert w5._progress._title.text() == "Verifying\u2026"
+w5._on_write_phase("Writing (native)")
+assert w5._progress._title.text() == "Writing (native)\u2026"
+check("in-writer verify phase presentation")
+
+# letterless drives render with a placeholder instead of a bare colon
+w5._current_drive = {**FAKE, "letter": "", "letters": []}
+w5._update_drive_ui()
+assert "no drive letter" in w5._target_detail.text()
+w5._current_drive = FAKE
+w5._update_drive_ui()
+assert "E:" in w5._target_detail.text()
+check("letterless drive label")
+
+# a stale write-finished signal retires (and never resurrects) its worker
+import core.writer
+dummy = core.writer.UsbWriter(ISO, r"\\.\PHYSICALDRIVE7")
+w5._on_write_finished(True, "", dummy)
+assert dummy in w5._retired_workers
+check("stale write signal retired")
+
+# poller suspend/resume + busy-guarded manual scan
+w5._poller.suspend()
+w5._poller.resume()
+w5._writing = True
+w5._request_scan()
+w5._writing = False
+w5._poller.request_scan()
+check("poller suspend + busy scan guard")
+
+w5._shutdown()
+w5._shutdown()
+check("shutdown idempotent")
 
 # ---------- batch 2: flows ----------
 w3 = MainWindow()
@@ -569,6 +702,7 @@ check("single-instance guard")
 
 faulthandler.cancel_dump_traceback_later()
 _dialogs_mod.completion = _ORIG_COMPLETION
+_dialogs_mod.inform = _ORIG_INFORM
 kinds = [p[0] for p in _POPUPS]
 assert "success" in kinds and "warning" in kinds and "error" in kinds, kinds
 assert any(p[1] == "Verification passed" for p in _POPUPS)

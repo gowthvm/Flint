@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 from typing import Any
 
@@ -20,12 +21,28 @@ class DrivePoller(QThread):
         self._detector = detector
         self._interval_ms = interval_ms
         self._scan_requested = False
+        self._suspended = False
 
     def request_scan(self) -> None:
         self._scan_requested = True
 
+    def suspend(self) -> None:
+        """Pause polling while a drive is being written/verified/wiped.
+
+        WMI enumeration during an active write is wasted work and can
+        contend with the raw-device traffic; results are dropped by the UI
+        while busy anyway.
+        """
+        self._suspended = True
+
+    def resume(self) -> None:
+        self._suspended = False
+
     def run(self) -> None:
         while not self.isInterruptionRequested():
+            if self._suspended:
+                self.msleep(self._interval_ms)
+                continue
             try:
                 drives = self._detector.list_removable_drives()
             except Exception:
@@ -96,11 +113,30 @@ class DriveDetector:
             self.last_error = None
         return []
 
+    def _system_disk_paths(self) -> set[str]:
+        """DeviceIDs of the disks hosting the OS drive (never flashable).
+
+        A USB boot drive or a machine whose system disk also reports
+        "removable" must never appear in the target list: flashing it would
+        erase the running OS.
+        """
+        system = (os.environ.get("SystemDrive") or "C:").strip()
+        letter = system[0] if system else "C"
+        physical = self._physical_drive_for_letter(letter)
+        return {physical} if physical else set()
+
     def _list_with_wmi(self) -> list[dict[str, Any]]:
         conn = wmi.WMI()
         result: list[dict[str, Any]] = []
+        system_disks = self._system_disk_paths()
         for disk in conn.Win32_DiskDrive():
             if not self._is_removable(disk):
+                continue
+            device_id = getattr(disk, "DeviceID", "") or ""
+            if device_id in system_disks:
+                logger.info(
+                    "skipping system disk %s in drive listing", device_id
+                )
                 continue
             letters = self._drive_letters(disk)
             size = getattr(disk, "Size", None)

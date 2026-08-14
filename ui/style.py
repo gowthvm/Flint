@@ -107,11 +107,6 @@ QLabel {
     font-size: $font_sm;
 }
 
-QLabel[colorRole="primary"] {
-    color: @text;
-    font-weight: 500;
-}
-
 QLabel[colorRole="muted"] {
     color: @muted;
     font-size: $font_sm;
@@ -120,16 +115,6 @@ QLabel[colorRole="muted"] {
 QLabel[colorRole="label"] {
     color: @faded;
     font-size: $font_sm;
-}
-
-QLabel[colorRole="caps"] {
-    color: @faded;
-    font-size: $font_xs;
-    font-weight: 600;
-}
-
-QLabel[colorRole="error"] {
-    color: @error;
 }
 
 QProgressBar {
@@ -279,7 +264,6 @@ QComboBox QAbstractItemView {
     color: @text;
     selection-background-color: @track;
     selection-color: @text;
-    outline: 0;
 }
 
 QListWidget {
@@ -395,6 +379,14 @@ QFrame#driveCard {
 
 QFrame#driveCard:hover {
     border-color: @muted;
+}
+
+QFrame#driveChip:focus {
+    border-color: @muted;
+}
+
+QWidget#toggleSwitch:focus QLabel#toggleTrack {
+    border: 1px solid @muted;
 }
 
 QLabel#doneSummary {
@@ -606,8 +598,8 @@ QLabel#progError {
     color: @error;
 }
 
-QLabel#progError[error="false"] {
-    color: @muted;
+QLabel#progError[level="warning"] {
+    color: @warning;
 }
 
 QLabel#verifyLabel {
@@ -772,6 +764,23 @@ QDialog#flintDialog QCheckBox {
     color: @muted;
     font-size: $font_sm;
     spacing: 6px;
+}
+
+QDialog#flintDialog QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid @border;
+    border-radius: 4px;
+    background: @card;
+}
+
+QDialog#flintDialog QCheckBox::indicator:checked {
+    background: @primary;
+    border-color: @primary;
+}
+
+QDialog#flintDialog QCheckBox::indicator:focus {
+    border-color: @muted;
 }
 """
 

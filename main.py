@@ -3,15 +3,17 @@ import faulthandler
 import os
 import subprocess
 import sys
+import time
 import traceback
 from contextlib import ExitStack
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
 
 from core import settings
 from core.log import setup_logging
+from ui import dialogs
 from ui.style import build_style
 from ui.window import MainWindow
 
@@ -107,22 +109,51 @@ def _ensure_admin() -> None:
     sys.exit(0)
 
 
+_server_global: QLocalServer | None = None
+
+
+def release_single_instance() -> None:
+    """Drop the single-instance lock before spawning an elevated relaunch.
+
+    The relaunched process must be able to acquire the pipe; without this,
+    the old instance (still alive while it shuts down) holds it and the new
+    instance exits thinking another copy is running.
+    """
+    global _server_global
+    if _server_global is None:
+        return
+    server = _server_global
+    _server_global = None
+    try:
+        server.close()
+        QLocalServer.removeServer(_SINGLE_INSTANCE_NAME)
+    except Exception:
+        logger.exception("failed to release single-instance lock")
+
+
 def _acquire_single_instance(
     name: str = _SINGLE_INSTANCE_NAME,
 ) -> QLocalServer | None:
-    probe = QLocalSocket()
-    probe.connectToServer(name)
-    if probe.waitForConnected(500):
-        probe.write(b"show")
-        probe.flush()
-        probe.waitForBytesWritten(500)
-        probe.disconnectFromServer()
-        return None
-    QLocalServer.removeServer(name)
-    server = QLocalServer()
-    if not server.listen(name):
-        return None
-    return server
+    # If another instance is alive, poke it to come to the foreground and
+    # exit. A listen failure right after that means the other instance is
+    # mid-exit (e.g. an elevation relaunch): retry briefly instead of
+    # exiting immediately.
+    for _ in range(6):
+        probe = QLocalSocket()
+        probe.connectToServer(name)
+        if probe.waitForConnected(500):
+            probe.write(b"show")
+            probe.flush()
+            probe.waitForBytesWritten(500)
+            probe.disconnectFromServer()
+            return None
+        probe.abort()
+        QLocalServer.removeServer(name)
+        server = QLocalServer()
+        if server.listen(name):
+            return server
+        time.sleep(0.3)
+    return None
 
 
 def _maybe_show_crash_report(window: MainWindow) -> None:
@@ -136,17 +167,20 @@ def _maybe_show_crash_report(window: MainWindow) -> None:
     if len(content) <= seen or not content[seen:].strip():
         return
     settings.set_many(crash_report_seen_bytes=len(content))
-    box = QMessageBox(window)
-    box.setIcon(QMessageBox.Icon.Warning)
-    box.setWindowTitle("Flint \u2014 crashed last time")
-    box.setText("Flint crashed on a previous run.")
-    box.setInformativeText("The crash report has been saved to disk.")
-    copy_btn = box.addButton(
-        "Copy report", QMessageBox.ButtonRole.AcceptRole
+    dlg = dialogs.FlintDialog(
+        window,
+        kind="warning",
+        title="Flint \u2014 crashed last time",
+        message=(
+            "Flint crashed on a previous run.\n\n"
+            "The crash report has been saved to disk."
+        ),
+        buttons=[
+            ("Copy report", "ghost", "copy"),
+            ("Ignore", "primary", "no"),
+        ],
     )
-    box.addButton("Ignore", QMessageBox.ButtonRole.RejectRole)
-    box.exec()
-    if box.clickedButton() is copy_btn:
+    if dlg.run() == "copy":
         QApplication.clipboard().setText(
             content[seen:].strip() or content.strip()
         )
@@ -164,6 +198,8 @@ def main() -> int:
     if server is None:
         _log("another instance is running; exiting")
         return 0
+    global _server_global
+    _server_global = server
 
     window = MainWindow()
 

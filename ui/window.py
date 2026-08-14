@@ -149,6 +149,7 @@ class IsoDropZone(QFrame):
         self._hash_finished = False
         self._retired_workers: list[QThread] = []
         self._clear_guard = None
+        self._browse_guard = None
         self.setToolTip("Drop an ISO or click to browse (Ctrl+O)")
 
         self._empty = self._build_empty_state()
@@ -285,6 +286,8 @@ class IsoDropZone(QFrame):
         return None
 
     def _browse(self) -> None:
+        if self._browse_guard is not None and self._browse_guard():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select image",
@@ -326,6 +329,8 @@ class IsoDropZone(QFrame):
 
     def load_iso(self, path: str) -> None:
         if not path or not os.path.isfile(path):
+            return
+        if self._browse_guard is not None and self._browse_guard():
             return
         self._drop_error.setVisible(False)
         self._drop_timer.stop()
@@ -492,6 +497,7 @@ class ToggleSwitch(QWidget):
 
     def __init__(self, checked: bool = True) -> None:
         super().__init__()
+        self.setObjectName("toggleSwitch")
         self._checked = checked
         self.setFixedSize(
             style.DESIGN_TOKENS["toggle_w"],
@@ -724,14 +730,14 @@ class ProgressArea(QFrame):
 
     def set_error(self, message: str) -> None:
         self._error.setText(message)
-        self._error.setProperty("error", True)
+        self._error.setProperty("level", "error")
         self._error.style().unpolish(self._error)
         self._error.style().polish(self._error)
         self._error.setVisible(True)
 
     def set_warning(self, message: str) -> None:
         self._error.setText(message)
-        self._error.setProperty("error", False)
+        self._error.setProperty("level", "warning")
         self._error.style().unpolish(self._error)
         self._error.style().polish(self._error)
         self._error.setVisible(True)
@@ -857,10 +863,16 @@ class MainWindow(QMainWindow):
         self._page_verifier: VerifyWorker | None = None
         self._wipe_worker: WipeWorker | None = None
         self._retired_workers: list[QThread] = []
+        # Threads that refused to stop within the shutdown grace period.
+        # Destroying a running QThread aborts the process mid-write, so they
+        # are kept referenced until process exit instead of being deleted.
+        self._zombies: list[QThread] = []
+        self._shutdown_done = False
         self._last_report: dict | None = None
         self._controls: list[QWidget] = []
         self._writing = False
         self._write_started = 0.0
+        self._write_duration = 0.0
         self._write_was_filecopy = False
         self._verify_handled = False
         self._verification_in_writer = False
@@ -872,7 +884,8 @@ class MainWindow(QMainWindow):
         self._iso_hybrid = False
         self._tray: QSystemTrayIcon | None = None
         self._tb = None
-        self._tb_tried = False
+        self._tb_last_try = 0.0
+        self._ejecting = False
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -933,6 +946,7 @@ class MainWindow(QMainWindow):
         self._update_verify_controls()
         self._dots_btn.clicked.connect(self._show_dots_menu)
         self._iso_zone._clear_guard = lambda: self._busy()
+        self._iso_zone._browse_guard = lambda: self._busy()
         self._verify_zone._clear_guard = lambda: self._busy()
         QShortcut(QKeySequence("F5"), self).activated.connect(
             self._request_scan
@@ -1085,9 +1099,17 @@ class MainWindow(QMainWindow):
                     drive["size_gb"] * 1_000_000_000
                 )
                 serial = self._serial_tail(drive)
+                letters = drive.get("letters") or (
+                    [drive["letter"]] if drive.get("letter") else []
+                )
+                letter_label = (
+                    ", ".join(f"{l}:" for l in letters)
+                    if letters
+                    else "no drive letter"
+                )
                 label = (
                     f"{drive['model'] or drive['name']} \u00b7 "
-                    f"{size} \u00b7 {drive['letter']}:"
+                    f"{size} \u00b7 {letter_label}"
                 )
                 if serial:
                     label += f" \u00b7 S/N \u2026{serial}"
@@ -1172,11 +1194,18 @@ class MainWindow(QMainWindow):
             self._drive_sub.setProperty("dim", False)
             self._target_detail.setProperty("dim", False)
             self._drive_name.setText(name)
-            self._drive_sub.setText(
-                f"{size} \u00b7 {drive['bus_type']} \u00b7 "
-                f"{drive['letter']}:"
+            letters = drive.get("letters") or (
+                [drive["letter"]] if drive.get("letter") else []
             )
-            detail = f"{name} \u00b7 {size} \u00b7 {drive['letter']}:"
+            letter_label = (
+                ", ".join(f"{l}:" for l in letters)
+                if letters
+                else "no drive letter"
+            )
+            self._drive_sub.setText(
+                f"{size} \u00b7 {drive['bus_type']} \u00b7 {letter_label}"
+            )
+            detail = f"{name} \u00b7 {size} \u00b7 {letter_label}"
             if serial:
                 detail += f" \u00b7 S/N \u2026{serial}"
             self._target_detail.setText(detail)
@@ -1185,7 +1214,7 @@ class MainWindow(QMainWindow):
             self._subtitle.setText(f"{name} \u00b7 {size} selected")
             if hasattr(self, "_verify_target"):
                 self._verify_target.setText(
-                    f"Target: {name} \u00b7 {drive['letter']}:"
+                    f"Target: {name} \u00b7 {letter_label}"
                 )
         for widget in (
             self._chip_dot,
@@ -1243,6 +1272,15 @@ class MainWindow(QMainWindow):
         ):
             logger.info("user chose to continue without elevation from UI")
             return
+        try:
+            # Release the single-instance pipe BEFORE spawning: the new
+            # elevated process must be able to acquire it while this one is
+            # still shutting down.
+            from main import release_single_instance
+
+            release_single_instance()
+        except Exception:
+            logger.exception("failed to release single-instance lock")
         try:
             result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", cmd, args, None, 5
@@ -1368,8 +1406,11 @@ class MainWindow(QMainWindow):
             if selected is None:
                 self._current_drive = None
         self._update_drive_ui()
+        self._update_controls_state()
 
     def _request_scan(self) -> None:
+        if self._busy():
+            return
         self._poller.request_scan()
 
     def _on_iso_selected(self, path: str) -> None:
@@ -1494,6 +1535,12 @@ class MainWindow(QMainWindow):
         tray_row.addWidget(tray_label)
         tray_row.addStretch()
         bcol.addLayout(tray_row)
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._close_to_tray_toggle.setEnabled(False)
+            tray_label.setToolTip(
+                "No system tray is available on this session \u2014 "
+                "closing the window will always quit the app."
+            )
 
         actions = QFrame()
         actions.setObjectName("block")
@@ -1736,6 +1783,7 @@ class MainWindow(QMainWindow):
             )
         verifier = VerifyWorker(drive_path, expected, size)
         self._page_verifier = verifier
+        self._poller.suspend()
         self._verify_progress.reset()
         self._verify_progress.set_verifying()
         self._verify_start_btn.setEnabled(False)
@@ -1757,6 +1805,7 @@ class MainWindow(QMainWindow):
         self._page_verifier = None
         if worker is not None:
             self._retire(worker)
+        self._poller.resume()
         self._verify_start_btn.setEnabled(True)
         self._verify_cancel_btn.setEnabled(False)
         self._set_taskbar_progress(None)
@@ -1815,14 +1864,19 @@ class MainWindow(QMainWindow):
                 f"{entry.get('drive', '?')}"
             )
             item.setData(Qt.ItemDataRole.UserRole, entry)
-            duration = entry.get("duration", 0) or 0
+            try:
+                duration = float(entry.get("duration", 0) or 0)
+            except (TypeError, ValueError):
+                # Hand-edited or imported history can carry junk durations;
+                # never crash the page render over one entry.
+                duration = 0.0
             verified = "Yes" if entry.get("verified") else "No"
             outcome = (
                 "\u2713\ufe0e complete" if entry.get("success") else "\u2715 failed"
             )
             item.setToolTip(
                 f"{entry.get('timestamp', '')} \u00b7 "
-                f"{round(float(duration))} s \u00b7 "
+                f"{round(duration)} s \u00b7 "
                 f"Verification: {verified} \u00b7 {outcome}"
             )
             self._history_list.addItem(item)
@@ -1977,13 +2031,13 @@ class MainWindow(QMainWindow):
             )
 
             def _vfn(index: int, *argtypes: Any) -> Any | None:
+                # Indexing the vtable pointer yields the raw slot address as
+                # an int (it is POINTER(c_void_p)); c_void_p instances are
+                # returned only by functions, not by pointer indexing.
                 slot = vtbl[index]
                 if not slot:
                     return None
-                entry = slot.value
-                if not entry:
-                    return None
-                return ctypes.WINFUNCTYPE(ctypes.HRESULT, *argtypes)(entry)
+                return ctypes.WINFUNCTYPE(ctypes.HRESULT, *argtypes)(int(slot))
 
             init = _vfn(3, ctypes.c_void_p)
             set_value = _vfn(
@@ -2009,9 +2063,12 @@ class MainWindow(QMainWindow):
         self, percent: float | None, error: bool = False
     ) -> None:
         if self._tb is None:
-            if self._tb_tried:
+            # A failed first attempt (e.g. Explorer not ready yet) must not
+            # latch forever: retry at most every 5 seconds.
+            now = time.monotonic()
+            if self._tb_last_try and now - self._tb_last_try < 5:
                 return
-            self._tb_tried = True
+            self._tb_last_try = now
             self._init_taskbar()
             if self._tb is None:
                 return
@@ -2066,26 +2123,44 @@ class MainWindow(QMainWindow):
         )
 
     def _shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
         self._poller.requestInterruption()
-        self._poller.wait(5000)
         active = (
             self._writer,
             self._verifier,
             self._page_verifier,
             self._wipe_worker,
         )
-        # Cancel and wait for every live worker: destroying a running
-        # QThread aborts the process and abandons the drive mid-write.
+        # Cancel and wait for every live worker with the event loop pumping.
+        # Never destroy a running QThread (that aborts the process and
+        # abandons the drive mid-write); if a worker is still alive after the
+        # grace period, keep a reference so it is not garbage-collected and
+        # let the process exit without touching it.
         for worker in active:
             if worker is not None and worker.isRunning():
                 worker.cancel()
+        deadline = time.monotonic() + 30.0
+        while any(
+            w is not None and w.isRunning() for w in active
+        ):
+            for worker in active:
+                if worker is not None and worker.isRunning():
+                    worker.wait(100)
+            QApplication.processEvents()
+            if time.monotonic() > deadline:
+                break
         for worker in active:
             if worker is not None and worker.isRunning():
-                worker.wait(10000)
+                self._zombies.append(worker)
+            elif worker is not None:
+                self._retire(worker)
+        if not self._poller.wait(2000):
+            self._zombies.append(self._poller)
         for worker in self._retired_workers:
-            if worker is not None and worker.isRunning():
-                worker.wait(2000)
-            worker.deleteLater()
+            if worker is not None and not worker.isRunning():
+                worker.deleteLater()
         self._retired_workers.clear()
 
     def closeEvent(self, event) -> None:
@@ -2102,6 +2177,16 @@ class MainWindow(QMainWindow):
                     "You can minimise the window to the taskbar.",
                     QSystemTrayIcon.MessageIcon.Information,
                     3000,
+                )
+            else:
+                dialogs.inform(
+                    self,
+                    kind="warning",
+                    title="Flint \u2014 write in progress",
+                    message=(
+                        "A write is in progress \u2014 closing is disabled.\n"
+                        "You can minimise the window to the taskbar."
+                    ),
                 )
             return
         self._save_settings()
@@ -2208,7 +2293,7 @@ class MainWindow(QMainWindow):
         dots = QPushButton("\u22ef")
         dots.setObjectName("iconBtn")
         dots.setFixedSize(30, 30)
-        dots.setToolTip("Options \u2014 themes, reset window")
+        dots.setToolTip("Open settings")
         self._dots_btn = dots
 
         row.addLayout(left)
@@ -2927,12 +3012,20 @@ class MainWindow(QMainWindow):
                 "\n\nPersistence: a casper-rw / live persistence store is "
                 "created on the drive."
             )
+        letters = drive.get("letters") or (
+            [drive["letter"]] if drive.get("letter") else []
+        )
+        letter_label = (
+            ", ".join(f"{l}:" for l in letters)
+            if letters
+            else "no drive letter"
+        )
         if not dialogs.confirm(
             self,
             kind="warning",
             title="Flint \u2014 erase drive and write?",
             message=(
-                f"Erase {name} ({drive['letter']}:) and write {iso_name}?"
+                f"Erase {name} ({letter_label}) and write {iso_name}?"
                 f"\n\n{confirm_text}"
             ),
             accept="Erase & write",
@@ -3005,6 +3098,8 @@ class MainWindow(QMainWindow):
         self._wipe_btn.setEnabled(False)
         self._writing = True
         self._write_started = time.perf_counter()
+        self._write_duration = 0.0
+        self._poller.suspend()
         self._verify_handled = False
         self._last_verify_message = ""
         self._last_verify_digest = ""
@@ -3036,7 +3131,7 @@ class MainWindow(QMainWindow):
         writer.written_bytes.connect(self._progress.set_written)
         writer.total_bytes.connect(self._progress.set_total)
         writer.eta_seconds.connect(self._progress.set_eta)
-        writer.phase.connect(self._progress.set_phase)
+        writer.phase.connect(self._on_write_phase)
         writer.verify_result.connect(
             lambda ok, msg, res, w=writer: self._on_verify_result(
                 ok, msg, res, w
@@ -3059,14 +3154,33 @@ class MainWindow(QMainWindow):
     def _on_write_note(self, note: str) -> None:
         self._write_note = note
 
+    def _on_write_phase(self, phase: str) -> None:
+        if phase == "Verifying":
+            # The in-writer verify reuses the write progress bar: freeze the
+            # measured write time now (the write itself is done) and switch
+            # the chip into verify presentation so stale write speed stats
+            # are not shown as if the drive were still being written.
+            if self._write_duration == 0.0 and self._write_started > 0:
+                self._write_duration = (
+                    time.perf_counter() - self._write_started
+                )
+            self._progress.set_verifying()
+            return
+        self._progress.set_phase(phase)
+
     def _on_write_finished(
         self, ok: bool, message: str, worker: UsbWriter
     ) -> None:
         if worker is not self._writer:
             # Stale signal from a superseded writer (e.g. a retry started
-            # after this writer finished): never treat it as current.
+            # after this writer finished): never treat it as current, but
+            # still collect it for graceful shutdown.
+            self._retire(worker)
             return
-        self._write_duration = time.perf_counter() - self._write_started
+        if self._write_duration == 0.0:
+            self._write_duration = (
+                time.perf_counter() - self._write_started
+            )
         self._writer = None
         self._retire(worker)
         if (
@@ -3129,6 +3243,7 @@ class MainWindow(QMainWindow):
         if worker is not self._writer:
             # Stale signal from a superseded writer (a retry or a new flash
             # already replaced it): never block on a dead worker's dialog.
+            self._retire(worker)
             return
         if ok:
             self._last_verify_message = message
@@ -3167,8 +3282,12 @@ class MainWindow(QMainWindow):
         self._retired_workers.append(worker)
         # Keep finished worker objects around only for graceful shutdown;
         # drop the oldest so long sessions do not accumulate them forever.
+        # Never deleteLater a thread that is still running: that destroys
+        # the QThread while its run() executes and aborts the process.
         if len(self._retired_workers) > 16:
-            self._retired_workers.pop(0).deleteLater()
+            oldest = self._retired_workers.pop(0)
+            if oldest is not None and not oldest.isRunning():
+                oldest.deleteLater()
 
     def _start_verify(self) -> None:
         iso = self._iso_zone.path
@@ -3211,7 +3330,9 @@ class MainWindow(QMainWindow):
         self, ok: bool, message: str, worker: VerifyWorker
     ) -> None:
         if worker is not self._verifier:
-            # Stale signal from a superseded verifier: ignore it.
+            # Stale signal from a superseded verifier: ignore it, but still
+            # collect the (finished) thread object.
+            self._retire(worker)
             return
         self._verifier = None
         self._retire(worker)
@@ -3277,6 +3398,7 @@ class MainWindow(QMainWindow):
         self._flash_btn.setEnabled(False)
         self._writing = True
         self._write_started = time.perf_counter()
+        self._poller.suspend()
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Wiping\u2026")
 
@@ -3297,6 +3419,7 @@ class MainWindow(QMainWindow):
         if worker is not None:
             self._retire(worker)
         self._writing = False
+        self._poller.resume()
         self._set_controls_enabled(True)
         self._cancel_btn.setEnabled(False)
         self._set_taskbar_progress(None, error=not ok)
@@ -3325,17 +3448,19 @@ class MainWindow(QMainWindow):
                 self._progress.set_error(
                     self._friendly_error(message or "Wipe failed")
                 )
+        report: dict | None = None
         if target is not None:
-            append_history(
-                flash_report(
-                    "\u2014 wipe \u2014",
-                    target["model"] or target["name"],
-                    time.perf_counter() - self._write_started,
-                    verified=False,
-                    success=ok,
-                    drive_serial=target.get("serial"),
-                )
+            report = flash_report(
+                "\u2014 wipe \u2014",
+                target["model"] or target["name"],
+                time.perf_counter() - self._write_started,
+                verified=False,
+                success=ok,
+                drive_serial=target.get("serial"),
             )
+            append_history(report)
+        # Copy-report must offer the wipe report (not a previous flash's).
+        self._last_report = report
         if self._tray is not None:
             self._tray.setToolTip(
                 "Flint \u2014 Wipe done" if ok else "Flint"
@@ -3374,9 +3499,36 @@ class MainWindow(QMainWindow):
                 buttons=[("Close", "primary", "close")],
             )
         self._active_write_drive = None
+        self._update_controls_state()
 
     def _on_eject_clicked(self) -> None:
-        path = self._current_drive_path()
+        if self._ejecting:
+            return
+        target = self._active_write_drive or self._current_drive
+        fresh = None
+        if target is not None:
+            try:
+                # Re-resolve the drive: the completion popup may stay open
+                # for minutes, during which the drive could have been
+                # swapped. Ejecting a different physical drive would be a
+                # surprise, so only eject the serial that was written.
+                fresh = self._recheck_drive(target)
+            except Exception:
+                logger.exception("drive recheck failed during eject")
+            if fresh is None:
+                dialogs.inform(
+                    self,
+                    kind="warning",
+                    title="Eject",
+                    message=(
+                        "The drive is no longer present \u2014 it may "
+                        "already have been removed."
+                    ),
+                )
+                return
+            path = self._drive_path_for(fresh)
+        else:
+            path = None
         if not path:
             dialogs.inform(
                 self,
@@ -3385,24 +3537,28 @@ class MainWindow(QMainWindow):
                 message="No drive selected.",
             )
             return
+        self._ejecting = True
         try:
-            ok, msg = eject_drive(path)
-        except Exception as exc:
-            ok, msg = False, str(exc) or "eject failed"
-        if ok:
-            dialogs.inform(
-                self,
-                kind="success",
-                title="Eject",
-                message="Drive ejected \u2014 safe to unplug.",
-            )
-        else:
-            dialogs.inform(
-                self,
-                kind="error",
-                title="Eject",
-                message=msg or "Windows refused to eject the drive.",
-            )
+            try:
+                ok, msg = eject_drive(path)
+            except Exception as exc:
+                ok, msg = False, str(exc) or "eject failed"
+            if ok:
+                dialogs.inform(
+                    self,
+                    kind="success",
+                    title="Eject",
+                    message="Drive ejected \u2014 safe to unplug.",
+                )
+            else:
+                dialogs.inform(
+                    self,
+                    kind="error",
+                    title="Eject",
+                    message=msg or "Windows refused to eject the drive.",
+                )
+        finally:
+            self._ejecting = False
 
     @staticmethod
     def _friendly_error(message: str) -> str:
@@ -3472,6 +3628,7 @@ class MainWindow(QMainWindow):
         skipped_note: str | None = None,
     ) -> None:
         self._writing = False
+        self._poller.resume()
         self._verify_hint.setVisible(False)
         self._set_controls_enabled(True)
         self._cancel_btn.setEnabled(False)
@@ -3479,6 +3636,7 @@ class MainWindow(QMainWindow):
         self._set_taskbar_progress(None, error=not succeeded)
         self._writer = None
         self._verifier = None
+        self._update_controls_state()
 
         target = self._active_write_drive or self._current_drive
 
@@ -3526,6 +3684,7 @@ class MainWindow(QMainWindow):
                 "Write cancelled \u2014 the drive was left partially "
                 "written and is not usable. Flash again before using it."
             )
+            self._progress._title.setText("Cancelled")
             self._done_label.setText("Write cancelled")
             self._done_summary.setText(
                 "The drive needs a complete write before use."
@@ -3535,6 +3694,7 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 self._friendly_error(error_text or "Failed")
             )
+            self._progress._title.setText("Failed")
             self._done_bar.setVisible(False)
 
         if boot and succeeded:

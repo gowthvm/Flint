@@ -1,9 +1,12 @@
 import json
+import logging
 import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("flint")
 
 _APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Flint"
 HISTORY_PATH = _APP_DIR / "history.json"
@@ -24,16 +27,21 @@ def load_history() -> list[dict[str, Any]]:
 
 
 def save_history(entries: list[dict[str, Any]]) -> None:
-    _APP_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "entries": entries,
-    }
-    tmp = HISTORY_PATH.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    tmp.replace(HISTORY_PATH)
+    try:
+        _APP_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "entries": entries,
+        }
+        tmp = HISTORY_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        tmp.replace(HISTORY_PATH)
+    except OSError:
+        # A history write must never crash a flash flow or block close:
+        # log and continue with the in-memory entry.
+        logger.exception("failed to persist history")
 
 
 def append_history(entry: dict[str, Any]) -> None:
