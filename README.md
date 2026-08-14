@@ -1,4 +1,5 @@
 # Flint — Bootable USB Writer (Windows)
+```
  _______  ___      ___   __    _  _______ 
 |       ||   |    |   | |  |  | ||       |
 |    ___||   |    |   | |   |_| ||_     _|
@@ -6,6 +7,8 @@
 |    ___||   |___ |   | |  _    |  |   |  
 |   |    |       ||   | | | |   |  |   |  
 |___|    |_______||___| |_|  |__|  |___|  
+
+```
 
 Flint is a lightweight, Windows-native utility for writing ISO/DD images to USB
 drives. It's built with PyQt6 and uses low-level Windows disk APIs for reliable
