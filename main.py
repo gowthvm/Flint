@@ -6,6 +6,7 @@ import sys
 import time
 import traceback
 from contextlib import ExitStack
+from types import TracebackType
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -42,7 +43,11 @@ def _install_crash_logging() -> None:
         )
         faulthandler.enable(crash)
 
-        def _hook(exc_type, exc_value, exc_tb) -> None:
+        def _hook(
+            exc_type: type[BaseException],
+            exc_value: BaseException,
+            exc_tb: TracebackType | None,
+        ) -> None:
             try:
                 crash.write(
                     "".join(
@@ -181,9 +186,11 @@ def _maybe_show_crash_report(window: MainWindow) -> None:
         ],
     )
     if dlg.run() == "copy":
-        QApplication.clipboard().setText(
-            content[seen:].strip() or content.strip()
-        )
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(
+                content[seen:].strip() or content.strip()
+            )
 
 
 def main() -> int:
@@ -213,9 +220,14 @@ def main() -> int:
     def _on_new_instance() -> None:
         while server.hasPendingConnections():
             conn = server.nextPendingConnection()
-            conn.readyRead.connect(
-                lambda c=conn: (c.readAll(), window._force_show())
-            )
+            if conn is None:
+                continue
+
+            def _on_data(c: QLocalSocket = conn) -> None:
+                c.readAll()
+                window._force_show()
+
+            conn.readyRead.connect(_on_data)
 
     server.newConnection.connect(_on_new_instance)
 

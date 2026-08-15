@@ -134,7 +134,7 @@ The packaged executable runs scripts without a window:
 
 ```text
 flint.exe --cli flash --image image.iso --drive E: --confirm <serial> [--verify]
-flint.exe --cli verify --drive <serial> [--sha256 <hex>]
+flint.exe --cli verify --drive <serial> [--sha256 <hex> --image image.iso]
 flint.exe --cli wipe --drive <serial> --confirm <serial> [--method zero|random|dod]
 flint.exe --cli backup --drive <serial> --out backup.img
 flint.exe --cli clone --from <serial> --to <serial> --confirm <serial of --to>
@@ -143,6 +143,9 @@ flint.exe --cli queue --file list.txt --drive <serial> --confirm <serial>
 
 - `--confirm` must match the target drive's full serial number — the headless
   equivalent of the GUI's typed confirmation.
+- `verify` without a digest runs a read-only bad-block scan; with `--sha256`
+  it compares only the image's byte range against the drive, so `--image` is
+  required to know how many bytes to check.
 - The queue file holds one image path per line (`#` comments allowed); images
   are flashed to the same drive in order, stopping on the first failure.
 - Output is line-oriented with a final `RESULT ok|fail|canceled: …` line.

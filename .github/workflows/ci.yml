@@ -29,9 +29,9 @@ jobs:
       - name: Lint (config in pyproject.toml)
         run: |
           ruff check .
-      - name: Type check core
+      - name: Type check
         run: |
-          mypy core --ignore-missing-imports
+          mypy core ui main.py --ignore-missing-imports
       - name: Run tests
         run: |
           python -m pytest -q

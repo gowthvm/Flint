@@ -5,10 +5,11 @@ import os
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import (
+from PyQt6.QtCore import (  # type: ignore[attr-defined]
     QByteArray,
     QEasingCurve,
     QEvent,
@@ -23,14 +24,20 @@ from PyQt6.QtCore import (
     pyqtSignal,
 )
 from PyQt6.QtGui import (
+    QCloseEvent,
     QColor,
     QCursor,
     QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
     QGuiApplication,
     QIcon,
+    QKeyEvent,
     QKeySequence,
+    QMouseEvent,
     QPainter,
     QPixmap,
+    QPolygonF,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -92,6 +99,14 @@ from ui import dialogs, style
 logger = logging.getLogger("flint")
 
 
+def _restyle(widget: QWidget) -> None:
+    """Repolish a widget so property-driven stylesheet selectors apply."""
+    style = widget.style()
+    if style is not None:
+        style.unpolish(widget)
+        style.polish(widget)
+
+
 class IsoWorker(QThread):
     hash_done = pyqtSignal(str, bool, str)
     progress = pyqtSignal(int)
@@ -150,6 +165,7 @@ class IsoDetectWorker(QThread):
 class IsoDropZone(QFrame):
     iso_selected = pyqtSignal(str)
     iso_analysis = pyqtSignal(str, bool, bool, bool)  # path, linux, windows, hybrid
+    hash_done = pyqtSignal(str, bool, str)  # path, ok, digest
 
     def __init__(self) -> None:
         super().__init__()
@@ -163,8 +179,8 @@ class IsoDropZone(QFrame):
         self._digest: str | None = None
         self._hash_finished = False
         self._retired_workers: list[QThread] = []
-        self._clear_guard = None
-        self._browse_guard = None
+        self._clear_guard: Callable[[], bool] | None = None
+        self._browse_guard: Callable[[], bool] | None = None
         self.setToolTip("Drop an ISO or click to browse (Ctrl+O)")
 
         self._empty = self._build_empty_state()
@@ -252,12 +268,14 @@ class IsoDropZone(QFrame):
         row.addWidget(self._iso_check)
         return widget
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
         if event.button() == Qt.MouseButton.LeftButton:
             self._browse()
         super().mousePressEvent(event)
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        assert event is not None
         if event.key() in (
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,
@@ -267,14 +285,20 @@ class IsoDropZone(QFrame):
         else:
             super().keyPressEvent(event)
 
-    def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
+    def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
+        assert event is not None
+        mime = event.mimeData()
+        assert mime is not None
+        if mime.hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    def dropEvent(self, event) -> None:
-        urls = event.mimeData().urls()
+    def dropEvent(self, event: QDropEvent | None) -> None:
+        assert event is not None
+        mime = event.mimeData()
+        assert mime is not None
+        urls = mime.urls()
         if not urls:
             event.ignore()
             return
@@ -288,9 +312,11 @@ class IsoDropZone(QFrame):
             self._drop_timer.start(3600)
             event.acceptProposedAction()
 
-    def _first_iso_url(self, event):
-        urls = event.mimeData().urls()
-        for url in urls:
+    def _first_iso_url(self, event: QDropEvent) -> QUrl | None:
+        mime = event.mimeData()
+        if mime is None:
+            return None
+        for url in mime.urls():
             if (
                 url.isLocalFile()
                 and url.toLocalFile().lower().endswith(
@@ -339,8 +365,7 @@ class IsoDropZone(QFrame):
         self._loaded.setVisible(False)
         self._empty.setVisible(True)
         self.setProperty("loaded", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        _restyle(self)
 
     def load_iso(self, path: str) -> None:
         if not path or not os.path.isfile(path):
@@ -365,8 +390,7 @@ class IsoDropZone(QFrame):
         self._loaded.setVisible(True)
         self._empty.setVisible(False)
         self.setProperty("loaded", True)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        _restyle(self)
         self.iso_selected.emit(path)
 
         worker = IsoWorker(path)
@@ -413,12 +437,12 @@ class IsoDropZone(QFrame):
             self._set_meta(True, f"{size} \u00b7 SHA256 verified")
         else:
             self._set_meta(False, f"{size} \u00b7 SHA256 failed")
+        self.hash_done.emit(path, ok, digest)
 
     def _set_meta(self, ok: bool, text: str) -> None:
         self._iso_meta.setText(text)
         self._iso_meta.setProperty("error", not ok)
-        self._iso_meta.style().unpolish(self._iso_meta)
-        self._iso_meta.style().polish(self._iso_meta)
+        _restyle(self._iso_meta)
 
 
 class ShaInput(QLineEdit):
@@ -427,17 +451,24 @@ class ShaInput(QLineEdit):
         self.setObjectName("shaInput")
         self.setAcceptDrops(True)
 
-    def dragEnterEvent(self, event) -> None:
+    def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
+        assert event is not None
         mime = event.mimeData()
-        if mime.hasText() or any(
-            url.isLocalFile() for url in mime.urls()
+        if mime is None or not (
+            mime.hasText() or any(
+                url.isLocalFile() for url in mime.urls()
+            )
         ):
-            event.acceptProposedAction()
-        else:
             event.ignore()
+            return
+        event.acceptProposedAction()
 
-    def dropEvent(self, event) -> None:
-        urls = [u for u in event.mimeData().urls() if u.isLocalFile()]
+    def dropEvent(self, event: QDropEvent | None) -> None:
+        assert event is not None
+        mime = event.mimeData()
+        if mime is None:
+            return
+        urls = [u for u in mime.urls() if u.isLocalFile()]
         if urls:
             for url in urls:
                 try:
@@ -490,8 +521,7 @@ class SegmentedControl(QWidget):
     def _apply(self) -> None:
         for i, button in enumerate(self._buttons):
             button.setObjectName("segOn" if i == self._active else "seg")
-            button.style().unpolish(button)
-            button.style().polish(button)
+            _restyle(button)
             button.update()
 
     def _select(self, index: int) -> None:
@@ -502,7 +532,7 @@ class SegmentedControl(QWidget):
         self._apply()
         self.valueChanged.emit(self._value)
 
-    @pyqtProperty(str, notify=valueChanged)
+    @pyqtProperty(str, notify=valueChanged)  # type: ignore[untyped-decorator]
     def value(self) -> str:
         return self._value
 
@@ -567,10 +597,8 @@ class ToggleSwitch(QWidget):
 
     def _apply(self) -> None:
         self._track.setProperty("on", self._checked)
-        self._track.style().unpolish(self._track)
-        self._track.style().polish(self._track)
-        self._knob.style().unpolish(self._knob)
-        self._knob.style().polish(self._knob)
+        _restyle(self._track)
+        _restyle(self._knob)
 
     def isChecked(self) -> bool:
         return self._checked
@@ -590,12 +618,14 @@ class ToggleSwitch(QWidget):
             self._knob.move(target, self._knob.y())
         self.toggled.emit(checked)
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
         if event.button() == Qt.MouseButton.LeftButton:
             self.setChecked(not self._checked)
         super().mousePressEvent(event)
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        assert event is not None
         if event.key() in (
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,
@@ -746,15 +776,13 @@ class ProgressArea(QFrame):
     def set_error(self, message: str) -> None:
         self._error.setText(message)
         self._error.setProperty("level", "error")
-        self._error.style().unpolish(self._error)
-        self._error.style().polish(self._error)
+        _restyle(self._error)
         self._error.setVisible(True)
 
     def set_warning(self, message: str) -> None:
         self._error.setText(message)
         self._error.setProperty("level", "warning")
-        self._error.style().unpolish(self._error)
-        self._error.style().polish(self._error)
+        _restyle(self._error)
         self._error.setVisible(True)
 
     @staticmethod
@@ -771,12 +799,14 @@ class DriveChip(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        assert event is not None
         if event.key() in (
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,
@@ -815,7 +845,7 @@ class NavItem(QFrame):
         row.addWidget(label)
         row.addStretch()
         if badge is not None:
-            self._badge_label = QLabel(badge)
+            self._badge_label: QLabel | None = QLabel(badge)
             self._badge_label.setObjectName("badgeOn" if active else "badge")
             self._badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             row.addWidget(self._badge_label)
@@ -824,17 +854,16 @@ class NavItem(QFrame):
 
     def set_active(self, active: bool) -> None:
         self.setProperty("on", active)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        _restyle(self)
         self.update()
         if self._badge_label is not None:
             self._badge_label.setObjectName(
                 "badgeOn" if active else "badge"
             )
-            self._badge_label.style().unpolish(self._badge_label)
-            self._badge_label.style().polish(self._badge_label)
+            _restyle(self._badge_label)
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        assert event is not None
         if event.key() in (
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,
@@ -844,7 +873,8 @@ class NavItem(QFrame):
         else:
             super().keyPressEvent(event)
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
@@ -870,9 +900,9 @@ class MainWindow(QMainWindow):
             self.setMinimumSize(860, 540)
 
         self._detector = DriveDetector()
-        self._current_drive: dict | None = None
-        self._active_write_drive: dict | None = None
-        self._drives: list[dict] = []
+        self._current_drive: dict[str, Any] | None = None
+        self._active_write_drive: dict[str, Any] | None = None
+        self._drives: list[dict[str, Any]] = []
         self._writer: UsbWriter | None = None
         self._verifier: VerifyWorker | None = None
         self._page_verifier: VerifyWorker | None = None
@@ -897,7 +927,7 @@ class MainWindow(QMainWindow):
         # are kept referenced until process exit instead of being deleted.
         self._zombies: list[QThread] = []
         self._shutdown_done = False
-        self._last_report: dict | None = None
+        self._last_report: dict[str, Any] | None = None
         self._controls: list[QWidget] = []
         self._writing = False
         self._write_started = 0.0
@@ -907,7 +937,7 @@ class MainWindow(QMainWindow):
         self._verification_in_writer = False
         self._last_verify_message = ""
         self._last_verify_digest = ""
-        self._retry_payload: tuple | None = None
+        self._retry_payload: tuple[Any, ...] | None = None
         self._iso_linux = False
         self._iso_windows = False
         self._iso_hybrid = False
@@ -955,14 +985,8 @@ class MainWindow(QMainWindow):
         ]
 
         # Keep primary action states in sync with selections and busy state
-        try:
-            self._iso_zone.iso_selected.connect(self._on_iso_selected)
-        except Exception:
-            pass
-        try:
-            self._iso_zone.hash_done.connect(self._on_iso_hash_ready)
-        except Exception:
-            pass
+        self._iso_zone.iso_selected.connect(self._on_iso_selected)
+        self._iso_zone.hash_done.connect(self._on_iso_hash_ready)
         self._iso_zone.iso_analysis.connect(self._on_iso_analysis)
         self._update_controls_state()
 
@@ -1130,6 +1154,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if not self._drives:
             action = menu.addAction("No USB drive detected")
+            assert action is not None
             action.setEnabled(False)
         else:
             selected_path = (
@@ -1155,6 +1180,7 @@ class MainWindow(QMainWindow):
                 if serial:
                     label += f" \u00b7 S/N \u2026{serial}"
                 action = menu.addAction(label)
+                assert action is not None
                 action.setCheckable(True)
                 action.setChecked(
                     drive.get("physical_path") == selected_path
@@ -1164,12 +1190,14 @@ class MainWindow(QMainWindow):
                 )
         menu.addSeparator()
         backup_action = menu.addAction("Backup this drive to an image\u2026")
+        assert backup_action is not None
         backup_action.setEnabled(self._current_drive is not None)
         backup_action.setToolTip(
             "Read the selected drive into a disk image file"
         )
         backup_action.triggered.connect(self._on_backup_clicked)
         clone_action = menu.addAction("Clone this drive to another\u2026")
+        assert clone_action is not None
         clone_action.setEnabled(self._current_drive is not None)
         clone_action.setToolTip(
             "Copy the selected drive onto a second drive"
@@ -1177,10 +1205,11 @@ class MainWindow(QMainWindow):
         clone_action.triggered.connect(self._on_clone_clicked)
         menu.addSeparator()
         refresh = menu.addAction("\u21bb Refresh")
+        assert refresh is not None
         refresh.triggered.connect(self._request_scan)
         menu.exec(QCursor.pos())
 
-    def _select_drive(self, drive: dict) -> None:
+    def _select_drive(self, drive: dict[str, Any]) -> None:
         if self._busy():
             return
         self._current_drive = drive
@@ -1276,11 +1305,10 @@ class MainWindow(QMainWindow):
             self._drive_sub,
             self._target_detail,
         ):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+            _restyle(widget)
 
     @staticmethod
-    def _serial_tail(drive: dict) -> str | None:
+    def _serial_tail(drive: dict[str, Any]) -> str | None:
         serial = (drive.get("serial") or "").strip()
         if len(serial) >= 4:
             return serial[-4:]
@@ -1349,9 +1377,11 @@ class MainWindow(QMainWindow):
             return
         self._save_settings()
         self._shutdown()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
-    def _drive_content_summary(self, drive: dict | None) -> str | None:
+    def _drive_content_summary(self, drive: dict[str, Any] | None) -> str | None:
         if not drive:
             return None
         letters = drive.get("letters") or (
@@ -1376,7 +1406,7 @@ class MainWindow(QMainWindow):
         )
 
     def _confirm_text(
-        self, drive: dict | None, iso_path: str | None = None
+        self, drive: dict[str, Any] | None, iso_path: str | None = None
     ) -> str:
         if not drive:
             return ""
@@ -1410,7 +1440,7 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def _require_typed_confirmation(
-        self, drive: dict | None, iso_path: str | None = None
+        self, drive: dict[str, Any] | None, iso_path: str | None = None
     ) -> bool:
         """Require the user to type a short confirmation string before destructive ops.
 
@@ -1443,7 +1473,7 @@ class MainWindow(QMainWindow):
             return entered == want
         return entered.lower() == want.lower()
 
-    def _on_drives_ready(self, drives: list) -> None:
+    def _on_drives_ready(self, drives: list[dict[str, Any]]) -> None:
         if self._busy():
             return
         self._drives = drives
@@ -1517,8 +1547,7 @@ class MainWindow(QMainWindow):
                 "flashing is blocked until it is removed or fixed."
             )
         self._sidecar_label.setVisible(True)
-        self._sidecar_label.style().unpolish(self._sidecar_label)
-        self._sidecar_label.style().polish(self._sidecar_label)
+        _restyle(self._sidecar_label)
 
     def _build_main(self) -> QWidget:
         main = QWidget()
@@ -1551,11 +1580,12 @@ class MainWindow(QMainWindow):
 
     def _build_dots_menu(self) -> QMenu:
         menu = QMenu(self)
-        menu.addAction("Settings").triggered.connect(
-            lambda: self._on_nav_clicked(3)
-        )
+        settings_action = menu.addAction("Settings")
+        assert settings_action is not None
+        settings_action.triggered.connect(lambda: self._on_nav_clicked(3))
         menu.addSeparator()
         update_action = menu.addAction("Check for updates\u2026")
+        assert update_action is not None
         update_action.setEnabled(self._update_checker is None)
         update_action.triggered.connect(self._on_check_updates_clicked)
         return menu
@@ -1592,7 +1622,9 @@ class MainWindow(QMainWindow):
             radio = QRadioButton(label)
             radio.setChecked(theme == key)
             radio.toggled.connect(
-                lambda checked, t=key: checked and self._set_theme(t)
+                lambda checked, t=key: (
+                    self._set_theme(t) if checked else None
+                )
             )
             self._theme_radios[key] = radio
             acol.addWidget(radio)
@@ -1671,7 +1703,9 @@ class MainWindow(QMainWindow):
     def _set_theme(self, theme: str) -> None:
         from ui.style import build_style
 
-        QApplication.instance().setStyleSheet(build_style(theme))
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.setStyleSheet(build_style(theme))
         settings.set_many(theme=theme)
 
     def _build_history_page(self) -> QWidget:
@@ -1883,7 +1917,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self._verify_mode.setText(
-                f"Comparing against: {os.path.basename(iso)}"
+                f"Comparing against: {os.path.basename(iso or '')}"
             )
         verifier = VerifyWorker(drive_path, expected, size)
         self._page_verifier = verifier
@@ -2002,7 +2036,9 @@ class MainWindow(QMainWindow):
             mono=True,
         )
         if dlg.run() == "copy":
-            QApplication.clipboard().setText(report_text)
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(report_text)
             if self._tray is not None:
                 self._tray.showMessage(
                     "Flint",
@@ -2012,12 +2048,15 @@ class MainWindow(QMainWindow):
                 )
 
     def _make_flint_icon(self) -> QIcon:
+        candidates: list[str] = []
         if getattr(sys, "frozen", False):
-            candidates = [os.path.join(sys._MEIPASS, "flint.ico")]
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                candidates.append(os.path.join(meipass, "flint.ico"))
         else:
-            candidates = [
+            candidates.append(
                 str(Path(__file__).resolve().parent.parent / "flint.ico")
-            ]
+            )
         for candidate in candidates:
             if os.path.isfile(candidate):
                 return QIcon(candidate)
@@ -2050,7 +2089,7 @@ class MainWindow(QMainWindow):
                 QPointF(size * 0.14, size * 0.62),
                 QPointF(size * 0.14, size * 0.30),
             ]
-            painter.drawPolygon(points)
+            painter.drawPolygon(QPolygonF(points))
             painter.setBrush(QColor("#ffffff"))
             painter.drawEllipse(
                 QPointF(size * 0.5, size * 0.5),
@@ -2070,9 +2109,11 @@ class MainWindow(QMainWindow):
         self._tray.activated.connect(self._on_tray_activated)
         menu = QMenu(self)
         show_action = menu.addAction("Show Flint")
+        assert show_action is not None
         show_action.triggered.connect(self._show_from_tray)
         menu.addSeparator()
         quit_action = menu.addAction("Quit")
+        assert quit_action is not None
         quit_action.triggered.connect(self._on_tray_quit)
         self._tray.setContextMenu(menu)
         self._tray.show()
@@ -2092,7 +2133,9 @@ class MainWindow(QMainWindow):
             return
         self._save_settings()
         self._shutdown()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
@@ -2198,7 +2241,8 @@ class MainWindow(QMainWindow):
             self.showNormal()
         self._force_show()
 
-    def changeEvent(self, event) -> None:
+    def changeEvent(self, event: QEvent | None) -> None:
+        assert event is not None
         if event.type() == QEvent.Type.WindowStateChange:
             self._lifecycle_log(
                 f"changeEvent minimized={self.isMinimized()} "
@@ -2206,7 +2250,8 @@ class MainWindow(QMainWindow):
             )
         super().changeEvent(event)
 
-    def event(self, e) -> bool:
+    def event(self, e: QEvent | None) -> bool:
+        assert e is not None
         if e.type() in (
             QEvent.Type.Show,
             QEvent.Type.Hide,
@@ -2264,12 +2309,13 @@ class MainWindow(QMainWindow):
                 self._retire(worker)
         if not self._poller.wait(2000):
             self._zombies.append(self._poller)
-        for worker in self._retired_workers:
-            if worker is not None and not worker.isRunning():
-                worker.deleteLater()
+        for retired in self._retired_workers:
+            if retired is not None and not retired.isRunning():
+                retired.deleteLater()
         self._retired_workers.clear()
 
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event: QCloseEvent | None) -> None:
+        assert event is not None
         self._lifecycle_log(
             f"closeEvent writing={self._writing} "
             f"visible={self.isVisible()}"
@@ -2301,7 +2347,9 @@ class MainWindow(QMainWindow):
             self.hide()
             return
         self._shutdown()
-        QApplication.instance().quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
         event.accept()
 
     def _lifecycle_log(self, message: str) -> None:
@@ -2366,6 +2414,7 @@ class MainWindow(QMainWindow):
             ),
         ):
             action = wipe_menu.addAction(label)
+            assert action is not None
             action.setToolTip(tip)
             action.triggered.connect(
                 lambda _, m=method: self._on_wipe_clicked(m)
@@ -3028,7 +3077,7 @@ class MainWindow(QMainWindow):
     def _current_drive_path(self) -> str | None:
         return self._drive_path_for(self._current_drive)
 
-    def _drive_path_for(self, drive: dict | None) -> str | None:
+    def _drive_path_for(self, drive: dict[str, Any] | None) -> str | None:
         """Physical-disk path for destructive operations (fail closed).
 
         Only ``\\\\.\\PHYSICALDRIVEn`` paths are accepted. Volume handles
@@ -3037,7 +3086,7 @@ class MainWindow(QMainWindow):
         """
         if not drive:
             return None
-        path = drive["physical_path"]
+        path: str = drive["physical_path"]
         if path.startswith("\\\\.\\PHYSICALDRIVE"):
             return path
         return None
@@ -3092,7 +3141,7 @@ class MainWindow(QMainWindow):
         if self._clone_worker is not None:
             self._clone_worker.cancel()
 
-    def _recheck_drive(self, drive: dict) -> dict | None:
+    def _recheck_drive(self, drive: dict[str, Any]) -> dict[str, Any] | None:
         drives = self._detector.list_removable_drives()
         current = next(
             (
@@ -3250,7 +3299,7 @@ class MainWindow(QMainWindow):
         drive_letters = current.get("letters") or (
             [current["letter"]] if current.get("letter") else []
         )
-        writer_kwargs = {
+        writer_kwargs: dict[str, Any] = {
             "verify_after_write": self._verify_toggle.isChecked(),
             "verify_sha256": self._verify_sha_toggle.isChecked(),
             "bad_block_scan": self._bad_block_toggle.isChecked(),
@@ -3281,8 +3330,8 @@ class MainWindow(QMainWindow):
         iso: str,
         drive_path: str,
         drive_letters: list[str],
-        writer_kwargs: dict,
-        drive: dict,
+        writer_kwargs: dict[str, Any],
+        drive: dict[str, Any],
     ) -> None:
         """Reset the UI state and start a UsbWriter with the given options.
 
@@ -3320,7 +3369,7 @@ class MainWindow(QMainWindow):
             **writer_kwargs,
         )
         self._writer = writer
-        self._write_note = None
+        self._write_note: str | None = None
         writer.mode.connect(self._on_write_mode)
         writer.note.connect(self._on_write_note)
         writer.progress.connect(self._on_write_progress)
@@ -3434,7 +3483,7 @@ class MainWindow(QMainWindow):
         self,
         ok: bool,
         message: str,
-        result: dict,
+        result: dict[str, Any],
         worker: UsbWriter,
     ) -> None:
         if worker is not self._writer:
@@ -3653,7 +3702,7 @@ class MainWindow(QMainWindow):
                 self._progress.set_error(
                     self._friendly_error(message or "Wipe failed")
                 )
-        report: dict | None = None
+        report: dict[str, Any] | None = None
         if target is not None:
             report = flash_report(
                 "\u2014 wipe \u2014",
@@ -3714,10 +3763,12 @@ class MainWindow(QMainWindow):
         self._update_controls_state()
 
     def _queue_images(self) -> list[str]:
-        return [
-            self._queue_list.item(i).text()
-            for i in range(self._queue_list.count())
-        ]
+        items: list[str] = []
+        for i in range(self._queue_list.count()):
+            item = self._queue_list.item(i)
+            if item is not None:
+                items.append(item.text())
+        return items
 
     def _on_queue_add_clicked(self) -> None:
         if self._busy():
@@ -3811,7 +3862,7 @@ class MainWindow(QMainWindow):
             )
 
     def _start_update_download(
-        self, url: str, dest: str, release: dict
+        self, url: str, dest: str, release: dict[str, Any]
     ) -> None:
         if self._update_downloader is not None:
             return
@@ -4049,7 +4100,7 @@ class MainWindow(QMainWindow):
                 buttons=[("Close", "primary", "close")],
             )
 
-    def _start_drive_operation(self, worker: QThread) -> None:
+    def _start_drive_operation(self, worker: Any) -> None:
         """Common busy-state setup for backup/clone operations."""
         self._progress.reset()
         self._done_bar.setVisible(False)
@@ -4143,6 +4194,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         label = "Clone onto\u2026"
         action = menu.addAction(label)
+        assert action is not None
         action.setEnabled(False)
         menu.addSeparator()
         for drive in self._drives:
@@ -4158,6 +4210,7 @@ class MainWindow(QMainWindow):
             if serial:
                 text += f" \u00b7 S/N \u2026{serial}"
             act = menu.addAction(text)
+            assert act is not None
             act.setData(drive)
         target_action = menu.exec(QCursor.pos())
         if target_action is None:
@@ -4356,7 +4409,9 @@ class MainWindow(QMainWindow):
         if self._last_report is None:
             return
         text = self._build_report_text(self._last_report)
-        QApplication.clipboard().setText(text)
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
         if self._tray is not None:
             self._tray.showMessage(
                 "Flint",
@@ -4366,7 +4421,7 @@ class MainWindow(QMainWindow):
             )
 
     @staticmethod
-    def _build_report_text(entry: dict) -> str:
+    def _build_report_text(entry: dict[str, Any]) -> str:
         lines = [
             "Flint flash report",
             f"Date: {entry.get('timestamp', '?')}",
@@ -4479,7 +4534,7 @@ class MainWindow(QMainWindow):
             self._done_summary.setText("")
             self._done_summary.setToolTip("")
 
-        report: dict | None = None
+        report: dict[str, Any] | None = None
         if target is not None and self._iso_zone.path is not None:
             iso_size = os.path.getsize(self._iso_zone.path)
             avg_mbps = (

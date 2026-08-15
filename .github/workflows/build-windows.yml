@@ -36,9 +36,9 @@ jobs:
         run: |
           ruff check .
 
-      - name: Type check core
+      - name: Type check
         run: |
-          mypy core --ignore-missing-imports
+          mypy core ui main.py --ignore-missing-imports
 
       - name: Run tests
         run: |

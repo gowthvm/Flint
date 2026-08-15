@@ -1,6 +1,8 @@
 """CLI headless mode: argument parsing, validation and command dispatch
 (real drives and workers are never touched; both are faked)."""
 
+import os
+
 import pytest
 
 from core import cli
@@ -243,3 +245,63 @@ def test_version_flag(capsys):
 
     assert cli.main(["--cli", "--version"]) == cli.EXIT_OK
     assert f"Flint {APP_VERSION}" in capsys.readouterr().out
+
+
+def test_verify_sha256_requires_image(monkeypatch, capsys):
+    """The digest covers only image bytes, so --image must be given to
+    know how many bytes to compare (whole-drive comparison of a larger
+    disk would never match the image digest)."""
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+
+    rc = cli.main(
+        ["--cli", "verify", "--drive", "E", "--sha256", "a" * 64]
+    )
+    assert rc == cli.EXIT_USAGE
+    out = capsys.readouterr().out
+    assert "--image" in out
+
+
+def test_verify_sha256_missing_image_file(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+
+    rc = cli.main(
+        [
+            "--cli",
+            "verify",
+            "--drive",
+            "E",
+            "--sha256",
+            "a" * 64,
+            "--image",
+            "nope.iso",
+        ]
+    )
+    assert rc == cli.EXIT_USAGE
+    assert "not found" in capsys.readouterr().out
+
+
+def test_verify_sha256_derives_size_from_image(tmp_path, monkeypatch):
+    image = tmp_path / "img.iso"
+    image.write_bytes(os.urandom(4096))
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    calls: list[tuple] = []
+
+    def _fake_verify_raw(path, size, expected, letters):
+        calls.append((path, size, expected, letters))
+        return cli.EXIT_OK
+
+    monkeypatch.setattr(cli, "_cmd_verify_raw", _fake_verify_raw)
+    rc = cli.main(
+        [
+            "--cli",
+            "verify",
+            "--drive",
+            "E",
+            "--sha256",
+            "a" * 64,
+            "--image",
+            str(image),
+        ]
+    )
+    assert rc == cli.EXIT_OK
+    assert calls == [(r"\\.\PHYSICALDRIVE3", 4096, "a" * 64, ["E"])]

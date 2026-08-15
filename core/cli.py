@@ -4,7 +4,7 @@ Usage (all commands require elevation, which the packaged executable has
 via its manifest; in development a UAC relaunch is attempted):
 
     flint --cli flash  --image <file> --drive <serial|letter|path> --confirm <serial> [--verify]
-    flint --cli verify --drive <serial|letter|path> [--sha256 <hex>]
+    flint --cli verify --drive <serial|letter|path> [--sha256 <hex> --image <file>]
     flint --cli wipe   --drive <serial|letter|path> --confirm <serial> [--method zero|random|dod]
     flint --cli backup --drive <serial|letter|path> --out <file> [--confirm <serial>]
     flint --cli clone  --from <serial|letter|path> --to <serial|letter|path> --confirm <serial of --to>
@@ -16,6 +16,12 @@ via its manifest; in development a UAC relaunch is attempted):
 destroyed; this is the headless equivalent of the GUI's typed
 confirmation. Commands are validated against the live drive list, so a
 wrong serial can never match another drive.
+
+``verify`` runs a read-only bad-block scan of the whole drive when no
+digest is given; with ``--sha256`` the digest covers only the image
+bytes, so ``--image <file>`` is required to know how many bytes to
+compare (a whole drive is usually larger than the flashed image and
+would never match the image digest).
 
 Output is line-oriented: progress lines ``FLINT <pct> <speed>MB/s ETA <s>s``
 plus a final ``RESULT ok|fail|canceled: <message>``. Exit codes:
@@ -85,7 +91,8 @@ def _usage() -> str:
         "Usage: flint --cli <command> [options]\n"
         "  flash  --image <file> --drive <serial|letter|path>"
         " --confirm <serial> [--verify]\n"
-        "  verify --drive <serial|letter|path> [--sha256 <hex>]\n"
+        "  verify --drive <serial|letter|path>"
+        " [--sha256 <hex> --image <file>]\n"
         "  wipe   --drive <serial|letter|path> --confirm <serial>"
         " [--method zero|random|dod]\n"
         "  backup --drive <serial|letter|path> --out <file>"
@@ -299,7 +306,20 @@ def _cmd_verify(opts: dict[str, str | bool]) -> int:
         ):
             _print("RESULT fail: --sha256 must be a 64-hex digest")
             return EXIT_USAGE
-        size = int(drive.get("size_gb", 0) * 1_000_000_000)
+        # The digest covers only the image bytes, so the drive must be
+        # sized to the image (not the whole disk, which is usually larger
+        # and would never match). Derive the byte count from --image.
+        image = str(opts.get("image", ""))
+        if not image:
+            _print(
+                "RESULT fail: --sha256 requires --image <file> so the "
+                "byte range to verify is known"
+            )
+            return EXIT_USAGE
+        if not os.path.isfile(image):
+            _print("RESULT fail: --image file not found")
+            return EXIT_USAGE
+        size = os.path.getsize(image)
     else:
         # No digest: read-only bad-block scan of the whole drive.
         from core.verify import verify_device
