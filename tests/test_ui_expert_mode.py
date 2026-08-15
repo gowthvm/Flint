@@ -1,6 +1,6 @@
 """Expert-mode visibility and inline help (?) buttons for the write page."""
 
-from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -109,10 +109,28 @@ def test_help_buttons_open_reference_with_anchors(qapp, tmp_path, monkeypatch):
 
     import ui.window as wmod
 
-    opened = []
-    monkeypatch.setattr(
-        wmod.QDesktopServices, "openUrl", lambda url: opened.append(url)
-    )
+    anchors: list[str] = []
+
+    class StubDialog:
+        instances: ClassVar[list] = []
+
+        def __init__(self, parent=None) -> None:
+            StubDialog.instances.append(self)
+
+        def show_anchor(self, anchor: str) -> None:
+            anchors.append(anchor)
+
+        def show(self) -> None:
+            pass
+
+        def raise_(self) -> None:
+            pass
+
+        def activateWindow(self) -> None:
+            pass
+
+    StubDialog.instances = []
+    monkeypatch.setattr(wmod.dialogs, "HelpDialog", StubDialog)
     w = _make_window(qapp, tmp_path)
     try:
         buttons = [
@@ -128,8 +146,7 @@ def test_help_buttons_open_reference_with_anchors(qapp, tmp_path, monkeypatch):
         assert len(buttons) == 10
         for btn in buttons:
             btn.click()
-        fragments = sorted(url.fragment() for url in opened)
-        assert fragments == sorted(
+        assert sorted(anchors) == sorted(
             [
                 "partition-scheme",
                 "target-system",
@@ -143,6 +160,6 @@ def test_help_buttons_open_reference_with_anchors(qapp, tmp_path, monkeypatch):
                 "bad-block-scan",
             ]
         )
-        assert Path(opened[0].toLocalFile()).exists()
+        assert len(StubDialog.instances) == 1
     finally:
         w._shutdown()

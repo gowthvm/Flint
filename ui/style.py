@@ -782,6 +782,49 @@ QDialog#flintDialog QCheckBox::indicator:checked {
 QDialog#flintDialog QCheckBox::indicator:focus {
     border-color: @muted;
 }
+
+QDialog#helpDialog {
+    background: @card;
+    border: 1px solid @border;
+    border-radius: 12px;
+}
+
+QDialog#helpDialog QLabel#helpDialogTitle {
+    background: transparent;
+    color: @text;
+    font-size: $font_md;
+    font-weight: 600;
+}
+
+QTextBrowser#helpView {
+    background: @card;
+    border: 1px solid @border;
+    border-radius: $radius_md;
+    color: @text;
+    font-size: $font_sm;
+    padding: 10px;
+    selection-background-color: @primary;
+    selection-color: @onPrimary;
+}
+
+QPushButton#helpNavBtn {
+    background: transparent;
+    border: 1px solid @border;
+    border-radius: $radius_sm;
+    color: @muted;
+    font-size: $font_sm;
+    padding: 0;
+}
+
+QPushButton#helpNavBtn:hover {
+    border-color: @faded;
+    color: @text;
+}
+
+QPushButton#helpNavBtn:disabled {
+    color: @faded;
+    border-color: @border;
+}
 """
 
 
@@ -794,6 +837,11 @@ def build_style(theme: str = "dark") -> str:
     for key, val in DESIGN_TOKENS.items():
         qss = qss.replace(f"${key}", px(val))
     return qss
+
+
+def palette(theme: str = "dark") -> dict[str, str]:
+    """Return a copy of the color palette for the given theme."""
+    return dict(_PALETTES.get(theme, _PALETTES["dark"]))
 
 
 APP_STYLE: str = build_style("dark")

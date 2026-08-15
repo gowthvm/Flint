@@ -7,8 +7,10 @@ the app's design language. Callers never call exec() directly; use the
 module-level helpers below.
 """
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from pathlib import Path
+
+from PyQt6.QtCore import QPoint, Qt, QUrl
+from PyQt6.QtGui import QFont, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -16,9 +18,13 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
+
+from core import settings
+from ui.style import palette
 
 KIND_ICONS = {
     "success": "\u2713\ufe0e",
@@ -205,6 +211,123 @@ def inform(
     )
     dlg.run()
     return dlg
+
+
+class _DragBar(QWidget):
+    """Header strip that drags its parent frameless dialog."""
+
+    def __init__(self, dialog: QDialog) -> None:
+        super().__init__(dialog)
+        self._dlg = dialog
+        self._drag_pos: QPoint | None = None
+
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = (
+                event.globalPosition().toPoint()
+                - self._dlg.frameGeometry().topLeft()
+            )
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
+        assert event is not None
+        if (
+            self._drag_pos is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            self._dlg.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+
+
+class HelpDialog(QDialog):
+    """In-app viewer for the reference manual.
+
+    Renders ui/reference.html in a QTextBrowser so the manual never
+    leaves the app; external links are intentionally inert.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("helpDialog")
+        self.setWindowTitle("Flint reference")
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
+        )
+        self.setModal(False)
+        self.setMinimumSize(620, 400)
+        self.resize(820, 580)
+        self._loaded = False
+        self._path = Path(__file__).resolve().parent / "reference.html"
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 14)
+        root.setSpacing(10)
+
+        bar = _DragBar(self)
+        head = QHBoxLayout(bar)
+        head.setContentsMargins(2, 2, 2, 2)
+        head.setSpacing(8)
+        title = QLabel("Reference")
+        title.setObjectName("helpDialogTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+        self._back_btn = QPushButton("\u2190")
+        self._back_btn.setObjectName("helpNavBtn")
+        self._back_btn.setFixedSize(30, 24)
+        self._back_btn.setEnabled(False)
+        self._fwd_btn = QPushButton("\u2192")
+        self._fwd_btn.setObjectName("helpNavBtn")
+        self._fwd_btn.setFixedSize(30, 24)
+        self._fwd_btn.setEnabled(False)
+        close_btn = QPushButton("\u2715")
+        close_btn.setObjectName("ghost")
+        close_btn.setFixedSize(30, 24)
+        close_btn.clicked.connect(self.close)
+        head.addWidget(self._back_btn)
+        head.addWidget(self._fwd_btn)
+        head.addWidget(close_btn)
+        root.addWidget(bar)
+
+        self._view = QTextBrowser()
+        self._view.setObjectName("helpView")
+        self._view.setOpenExternalLinks(False)
+        self._view.setOpenLinks(True)
+        self._view.backwardAvailable.connect(self._back_btn.setEnabled)
+        self._view.forwardAvailable.connect(self._fwd_btn.setEnabled)
+        self._back_btn.clicked.connect(self._view.backward)
+        self._fwd_btn.clicked.connect(self._view.forward)
+
+        theme = str(settings.get("theme") or "dark")
+        doc = self._view.document()
+        if doc is not None:
+            doc.setDefaultStyleSheet(
+                f"a {{ color: {palette(theme)['primary']}; }}"
+            )
+        root.addWidget(self._view, 1)
+
+    def show_anchor(self, anchor: str) -> None:
+        if not self._loaded:
+            self._view.setSource(QUrl.fromLocalFile(str(self._path)))
+            self._loaded = True
+        if anchor:
+            self._view.setSource(QUrl(f"#{anchor}"))
+        self._view.setFocus()
+
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        assert event is not None
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
 
 
 def input_text(

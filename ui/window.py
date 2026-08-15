@@ -3078,11 +3078,14 @@ class MainWindow(QMainWindow):
         return btn
 
     def _open_reference(self, anchor: str) -> None:
-        url = QUrl.fromLocalFile(
-            str(Path(__file__).resolve().parent / "reference.html")
-        )
-        url.setFragment(anchor)
-        QDesktopServices.openUrl(url)
+        dlg = getattr(self, "_help_dialog", None)
+        if dlg is None:
+            dlg = dialogs.HelpDialog(self)
+            self._help_dialog = dlg
+        dlg.show_anchor(anchor)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _build_iso_zone(self) -> QFrame:
         return IsoDropZone()
