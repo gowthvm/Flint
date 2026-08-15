@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1078,6 +1079,7 @@ class MainWindow(QMainWindow):
         self._verifier: VerifyWorker | None = None
         self._page_verifier: VerifyWorker | None = None
         self._wipe_worker: WipeWorker | None = None
+        self._wipe_verify: tuple[bool, str] | None = None
         self._backup_worker: BackupWorker | None = None
         self._clone_worker: CloneWorker | None = None
         self._backup_digest = ""
@@ -1913,12 +1915,52 @@ class MainWindow(QMainWindow):
         import_btn.clicked.connect(self._on_history_import)
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self._on_history_clear)
+        diag_btn = QPushButton("Export diagnostics\u2026")
+        diag_btn.clicked.connect(self._on_export_diagnostics)
+        diag_btn.setToolTip(
+            "Bundle version info, drive list, history and logs into a "
+            "single text file to attach to a bug report."
+        )
         buttons.addWidget(export_btn)
         buttons.addWidget(import_btn)
         buttons.addWidget(clear_btn)
         buttons.addStretch()
+        buttons.addWidget(diag_btn)
         col.addLayout(buttons)
         return page
+
+    def _on_export_diagnostics(self) -> None:
+        from core.diagnostics import build_diagnostics
+
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export diagnostics",
+            os.path.join(
+                settings.get("last_iso_dir") or "",
+                f"flint-diagnostics-{datetime.now().astimezone().strftime('%Y%m%d-%H%M%S')}.txt",
+            ),
+            "Text (*.txt)",
+        )
+        if not target:
+            return
+        settings.set_many(last_iso_dir=os.path.dirname(target))
+        try:
+            drives = self._detector.list_removable_drives()
+            text = build_diagnostics(
+                drives,
+                elevated=self._is_elevated(),
+                entries=load_history(),
+            )
+            Path(target).write_text(text, encoding="utf-8")
+            self._show_tray_notify("Diagnostics", "Exported.")
+        except Exception:
+            logger.exception("export diagnostics failed")
+            dialogs.inform(
+                self,
+                kind="error",
+                title="Export diagnostics",
+                message="Could not write the diagnostics file.",
+            )
 
     def _on_history_export(self) -> None:
         target, _ = QFileDialog.getSaveFileName(
@@ -3821,14 +3863,25 @@ class MainWindow(QMainWindow):
         worker = WipeWorker(drive_path, letters, method=method)
         self._wipe_worker = worker
         self._wipe_method = method
+        self._wipe_verify = None
         worker.progress.connect(self._on_write_progress)
         worker.speed_mbps.connect(self._progress.set_speed)
         worker.written_bytes.connect(self._progress.set_written)
         worker.total_bytes.connect(self._progress.set_total)
         worker.eta_seconds.connect(self._progress.set_eta)
         worker.phase.connect(self._progress.set_phase)
+        worker.verified.connect(self._on_wipe_verified)
         worker.finished.connect(self._on_wipe_finished)
         worker.start()
+
+    def _on_wipe_verified(self, ok: bool, message: str) -> None:
+        self._wipe_verify = (ok, message)
+
+    def _format_wipe_verify(self) -> str:
+        if self._wipe_verify is None:
+            return "not run"
+        ok, message = self._wipe_verify
+        return f"{'verified' if ok else 'NOT verified'} ({message})"
 
     def _on_wipe_finished(self, ok: bool, message: str) -> None:
         worker = self._wipe_worker
@@ -3874,6 +3927,7 @@ class MainWindow(QMainWindow):
                 verified=False,
                 success=ok,
                 drive_serial=target.get("serial"),
+                wipe_verified=self._format_wipe_verify(),
             )
             append_history(report)
         # Copy-report must offer the wipe report (not a previous flash's).
@@ -4610,6 +4664,7 @@ class MainWindow(QMainWindow):
             f"Drive read-back: {entry.get('written_sha256') or '-'}"
             if entry.get("written_sha256")
             else "Drive read-back: -",
+            f"Wipe verified: {entry.get('wipe_verified') or 'not run'}",
         ]
         return "\n".join(lines)
 

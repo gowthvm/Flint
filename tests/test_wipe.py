@@ -17,6 +17,10 @@ class _FakeKernel:
         self.size = size
         self.chunks: list[bytes] = []
         self.fail_after: int | None = None
+        # Models the physical disk being rewritten in place.
+        self.data = bytearray(size)
+        self.pos = 0
+        self.fail_read = False
 
     def _open_drive(self):
         return ctypes.c_void_p(1234)
@@ -34,16 +38,35 @@ class _FakeKernel:
         if self.fail_after is not None and len(self.chunks) >= self.fail_after:
             raise OSError("simulated write failure")
         self.chunks.append(data)
+        # The OS auto-advances the file pointer on real disk writes.
+        end = min(self.pos + len(data), len(self.data))
+        self.data[self.pos:end] = data[: end - self.pos]
+        self.pos += len(data)
+
+    def _seek_start(self, handle) -> None:
+        self.pos = 0
+
+    def _read_chunk(self, handle, size: int) -> bytes:
+        if self.fail_read:
+            raise OSError("simulated read failure")
+        chunk = bytes(self.data[self.pos : self.pos + size])
+        self.pos += size
+        return chunk
 
 
 def _make_worker(
-    fake: _FakeKernel, cancel_after: int | None = None, method: str = "zero"
+    fake: _FakeKernel,
+    cancel_after: int | None = None,
+    method: str = "zero",
+    verify: bool = False,
 ) -> WipeWorker:
-    worker = WipeWorker(r"\\.\PHYSICALDRIVE9", method=method)
+    worker = WipeWorker(r"\\.\PHYSICALDRIVE9", method=method, verify=verify)
     worker._open_drive = fake._open_drive  # type: ignore[method-assign]
     worker._drive_size = fake._drive_size  # type: ignore[method-assign]
     worker._lock_volumes = fake._lock_volumes  # type: ignore[method-assign]
     worker._unlock_volumes = fake._unlock_volumes  # type: ignore[method-assign]
+    worker._seek_start = fake._seek_start  # type: ignore[method-assign]
+    worker._read_chunk = fake._read_chunk  # type: ignore[method-assign]
     if cancel_after is not None:
         real_write = fake._write_chunk
 
@@ -67,6 +90,7 @@ def _run(worker: WipeWorker) -> dict[str, list]:
         "total_bytes",
         "eta_seconds",
         "phase",
+        "verified",
         "finished",
     ):
         events[name] = []
@@ -234,3 +258,81 @@ def test_wipe_unknown_method_rejected_eagerly():
         assert "unknown wipe method" in str(exc)
     else:
         raise AssertionError("unknown method must raise at construction")
+
+
+class _StubbornKernel(_FakeKernel):
+    """A drive that always reads back zeros, whatever is written to it."""
+
+    def _read_chunk(self, handle, size: int) -> bytes:
+        return b"\x00" * size
+
+
+def test_wipe_skips_verification_when_disabled(monkeypatch):
+    fake = _FakeKernel(3 * 1024 * 1024)
+    worker = _make_worker(fake, verify=False)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    assert events["verified"] == [(True, "skipped")]
+    # A single pass, no extra read-back total.
+    assert events["total_bytes"][-1] == (fake.size,)
+
+
+def test_wipe_verifies_zero_fill(monkeypatch):
+    size = 5 * 1024 * 1024 + 99
+    fake = _FakeKernel(size)
+    worker = _make_worker(fake, verify=True)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    assert events["verified"] == [(True, "zeros confirmed")]
+    # Written pass plus a verification read of the whole drive.
+    assert events["total_bytes"][-1] == (size + size,)
+    assert events["progress"][-1][0] == 100.0
+    assert fake.data == bytes(size)
+
+
+def test_wipe_verifies_random_pass_round_trip(monkeypatch):
+    size = 6 * 1024 * 1024
+    fake = _FakeKernel(size)
+    worker = _make_worker(fake, method="random", verify=True)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    assert events["verified"] == [(True, "random pattern confirmed")]
+    assert events["total_bytes"][-1] == (2 * size,)
+    assert any("Verifying" in p[0] for p in events["phase"])
+
+
+def test_wipe_verification_reports_mismatch(monkeypatch):
+    size = 4 * 1024 * 1024
+    fake = _StubbornKernel(size)
+    worker = _make_worker(fake, method="random", verify=True)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["verified"] == [
+        (False, "data mismatch at offset 0")
+    ]
+    assert events["finished"] == [
+        (False, "verification failed: data mismatch at offset 0")
+    ]
+
+
+def test_wipe_verification_reports_read_failure(monkeypatch):
+    fake = _FakeKernel(4 * 1024 * 1024)
+    fake.fail_read = True
+    worker = _make_worker(fake, method="random", verify=True)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["verified"] == [(False, "read error: simulated read failure")]
+    assert events["finished"] == [(False, "simulated read failure")]

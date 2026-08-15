@@ -95,6 +95,7 @@ def flash_report(
     drive_serial: str | None = None,
     bootable: str | None = None,
     avg_mbps: float | None = None,
+    wipe_verified: str | None = None,
 ) -> dict[str, Any]:
     return {
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -108,4 +109,5 @@ def flash_report(
         "bootable": bootable,
         "iso_sha256": iso_sha256,
         "written_sha256": written_sha256,
+        "wipe_verified": wipe_verified,
     }

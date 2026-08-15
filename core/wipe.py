@@ -1,4 +1,5 @@
 import ctypes
+import hashlib
 import logging
 import os
 import time
@@ -37,6 +38,7 @@ class WipeWorker(QThread):
     total_bytes = pyqtSignal(int)
     eta_seconds = pyqtSignal(int)
     phase = pyqtSignal(str)
+    verified = pyqtSignal(bool, str)
     finished = pyqtSignal(bool, str)
 
     CHUNK_SIZE = 4 * 1024 * 1024
@@ -61,11 +63,17 @@ class WipeWorker(QThread):
         drive_path: str,
         letters: list[str] | None = None,
         method: str = "zero",
+        verify: bool = True,
     ) -> None:
         super().__init__()
         self.drive_path = drive_path
         self.letters = letters or []
         self.method = method
+        self.verify = verify
+        # Per-run seed so the random pass is unrecoverable without it, yet
+        # reproducible so the verification pass can read the drive back and
+        # confirm the exact pattern that was written.
+        self._seed = os.urandom(16)
         # Validate eagerly so a typo never silently defaults to zero-fill.
         _wipe_patterns(method)
         self._canceled = False
@@ -118,6 +126,19 @@ class WipeWorker(QThread):
             ctypes.c_ulong,
             ctypes.POINTER(ctypes.c_ulong),
             ctypes.c_void_p,
+        ]
+        kernel32.ReadFile.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_void_p,
+        ]
+        kernel32.SetFilePointer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
         ]
         kernel32.FlushFileBuffers.argtypes = [ctypes.c_void_p]
         kernel32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
@@ -216,13 +237,46 @@ class WipeWorker(QThread):
         if written.value != len(data):
             raise OSError("short write on drive")
 
-    @staticmethod
-    def _pass_chunk(pattern: str, size: int) -> bytes:
+    def _seek_start(self, handle: ctypes.c_void_p) -> None:
+        self._kernel32().SetFilePointer(handle, 0, None, 0)
+
+    def _read_chunk(self, handle: ctypes.c_void_p, size: int) -> bytes:
+        kernel32 = self._kernel32()
+        buffer = ctypes.create_string_buffer(size)
+        read = ctypes.c_ulong()
+        ok = kernel32.ReadFile(
+            handle,
+            buffer,
+            size,
+            ctypes.byref(read),
+            None,
+        )
+        if not ok:
+            raise OSError(f"read failed: {ctypes.windll.kernel32.GetLastError()}")
+        return buffer.raw[: read.value]
+
+    def _pass_chunk(self, pattern: str, size: int, offset: int) -> bytes:
         if pattern == "zero":
             return b"\x00" * size
         if pattern == "ones":
             return b"\xff" * size
-        return os.urandom(size)
+        return self._derive(offset, size)
+
+    def _derive(self, offset: int, size: int) -> bytes:
+        """Reproducible pseudo-random bytes for [offset, offset+size).
+
+        A counter-mode stream over SHA-256 keyed by the per-run seed, so
+        exactly the same bytes can be regenerated during verification.
+        """
+        out = bytearray()
+        block = 32
+        counter = offset // block
+        over = offset % block
+        while len(out) < over + size:
+            key = self._seed + counter.to_bytes(8, "big")
+            counter += 1
+            out.extend(hashlib.sha256(key).digest())
+        return bytes(out[over : over + size])
 
     def run(self) -> None:
         kernel32 = self._kernel32()
@@ -246,6 +300,7 @@ class WipeWorker(QThread):
 
     def _run_inner(self) -> None:
         handle = self._open_drive()
+        self._verify_passed = True
         try:
             total = self._drive_size(handle)
             if total <= 0:
@@ -257,10 +312,10 @@ class WipeWorker(QThread):
             return
 
         passes = len(patterns)
-        # Every pass writes the whole drive: report honest totals so the
-        # written/expected ratio and progress stay truthful across passes.
-        self.total_bytes.emit(total * passes)
-        written = 0
+        verify_total = total if self.verify else 0
+        grand_total = total * passes + verify_total
+        self.total_bytes.emit(grand_total)
+        processed = 0
         durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
         sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
         try:
@@ -277,35 +332,35 @@ class WipeWorker(QThread):
                     if self._canceled:
                         break
                     chunk = self._pass_chunk(
-                        pattern, min(self.CHUNK_SIZE, total - done)
+                        pattern, min(self.CHUNK_SIZE, total - done), done
                     )
                     chunk_start = time.perf_counter()
                     self._write_chunk(handle, chunk)
                     durations.append(time.perf_counter() - chunk_start)
                     sizes.append(len(chunk))
                     done += len(chunk)
-                    written += len(chunk)
-
-                    window_bytes = sum(sizes)
-                    window_time = sum(durations)
-                    if window_time > 0 and window_bytes > 0:
-                        bytes_per_sec = window_bytes / window_time
-                        speed = bytes_per_sec / 1_000_000
-                        remaining = (total * passes - written) / bytes_per_sec
-                    else:
-                        speed = 0.0
-                        remaining = 0.0
-
-                    self.progress.emit(written / (total * passes) * 100.0)
-                    self.speed_mbps.emit(speed)
-                    self.written_bytes.emit(written)
-                    self.eta_seconds.emit(int(remaining))
+                    processed += len(chunk)
+                    self._emit_metrics(
+                        processed, grand_total, durations, sizes
+                    )
             if not self._canceled:
                 self.phase.emit("Flushing")
                 if not ctypes.windll.kernel32.FlushFileBuffers(handle):
                     raise OSError(
                         "flush failed: data may not have reached the drive"
                     )
+            if not self._canceled and self.verify:
+                self._verify_pass(
+                    handle,
+                    total,
+                    patterns[-1],
+                    processed,
+                    grand_total,
+                    durations,
+                    sizes,
+                )
+            elif not self._canceled:
+                self.verified.emit(True, "skipped")
         except OSError as exc:
             self.finished.emit(False, str(exc))
             return
@@ -315,4 +370,84 @@ class WipeWorker(QThread):
         if self._canceled:
             self.finished.emit(False, "cancelled")
             return
+        if not self._verify_passed:
+            return  # _verify_pass already emitted the failure
         self.finished.emit(True, "")
+
+    def _verify_pass(
+        self,
+        handle: ctypes.c_void_p,
+        total: int,
+        final_pattern: str,
+        base_processed: int,
+        grand_total: int,
+        durations: deque[float],
+        sizes: deque[int],
+    ) -> None:
+        """Read the drive back and confirm the final pass's pattern."""
+        durations.clear()
+        sizes.clear()
+        self._seek_start(handle)
+        self.phase.emit("Verifying wipe")
+        done = 0
+        try:
+            while done < total:
+                if self._canceled:
+                    return
+                size = min(self.CHUNK_SIZE, total - done)
+                chunk_start = time.perf_counter()
+                data = self._read_chunk(handle, size)
+                durations.append(time.perf_counter() - chunk_start)
+                sizes.append(size)
+                if data != self._pass_chunk(final_pattern, size, done):
+                    self._verify_passed = False
+                    self.verified.emit(
+                        False, f"data mismatch at offset {done}"
+                    )
+                    self.finished.emit(
+                        False,
+                        "verification failed: "
+                        f"data mismatch at offset {done}",
+                    )
+                    return
+                done += size
+                self._emit_metrics(
+                    base_processed + done, grand_total, durations, sizes
+                )
+        except OSError as exc:
+            self._verify_passed = False
+            self.verified.emit(False, "read error: " + str(exc))
+            self.finished.emit(False, str(exc))
+            return
+        self.verified.emit(
+            True,
+            {
+                "zero": "zeros confirmed",
+                "ones": "ones confirmed",
+                "random": "random pattern confirmed",
+            }[final_pattern],
+        )
+
+    def _emit_metrics(
+        self,
+        processed: int,
+        grand_total: int,
+        durations: deque[float],
+        sizes: deque[int],
+    ) -> None:
+        window_bytes = sum(sizes)
+        window_time = sum(durations)
+        if window_time > 0 and window_bytes > 0:
+            bytes_per_sec = window_bytes / window_time
+            speed = bytes_per_sec / 1_000_000
+            remaining = (grand_total - processed) / bytes_per_sec
+        else:
+            speed = 0.0
+            remaining = 0.0
+
+        self.progress.emit(
+            processed / grand_total * 100.0 if grand_total else 0.0
+        )
+        self.speed_mbps.emit(speed)
+        self.written_bytes.emit(processed)
+        self.eta_seconds.emit(int(remaining))
