@@ -61,3 +61,6 @@ temp/
 
 # Local CI / artifacts folder (do not commit built EXEs)
 flint-dist/
+
+# Website (separate repo, deployed separately to Vercel)
+flint-web/
