@@ -97,6 +97,55 @@ from ui import dialogs, style
 
 logger = logging.getLogger("flint")
 
+_HELP_TIPS = {
+    "partition_scheme": (
+        "How the drive is partitioned in file-copy mode: GPT for modern "
+        "UEFI, MBR for legacy BIOS, Auto picks GPT for UEFI targets. "
+        "Raw (DD) writes ignore this."
+    ),
+    "target_system": (
+        "UEFI (EFI boot path) or Legacy (BIOS). Influences the partition "
+        "scheme and where boot files are placed in file-copy mode; "
+        "Windows To Go installs boot files for both."
+    ),
+    "filesystem": (
+        "FAT32 is the most bootable but cannot store files over 4 GB. "
+        "NTFS supports large files and is required for Windows To Go. "
+        "Only matters in file-copy mode."
+    ),
+    "write_mode": (
+        "Raw (DD): byte-for-byte copy, fastest and safest for bootable "
+        "images. File copy: repartitions and formats the drive, then "
+        "copies the ISO contents onto it. Hybrid ISOs are always raw."
+    ),
+    "chunk_size_mb": (
+        "Write buffer in MiB (4-64). The native writer uses low-level "
+        "CreateFile/WriteFile with unbuffered, sector-aligned I/O for "
+        "the highest throughput; writes fall back to the Python writer "
+        "when it is not built."
+    ),
+    "persistence": (
+        "Keeps changes across reboots on Linux live sticks (Ubuntu "
+        "casper-rw / Debian live persistence.conf); needs an ext4 "
+        "formatting tool such as wsl mke2fs."
+    ),
+    "windows_to_go": (
+        "Applies a Windows ISO with dism and installs boot files so the "
+        "stick boots as portable Windows. Requires NTFS + file-copy mode "
+        "and elevation; mutually exclusive with persistence."
+    ),
+    "verify_sha256": (
+        "Reads the drive back after writing and compares its SHA-256 "
+        "against the image, reporting mismatched offsets. Can take as "
+        "long as the write; skipped after file-copy writes."
+    ),
+    "bad_block_scan": (
+        "Re-reads the drive for unreadable sectors, retrying failed "
+        "reads (1-10 times); unreadable sectors are reported at "
+        "4 KiB-aligned offsets."
+    ),
+}
+
 
 def _restyle(widget: QWidget) -> None:
     """Repolish a widget so property-driven stylesheet selectors apply."""
@@ -2722,13 +2771,6 @@ class MainWindow(QMainWindow):
             "write_mode": "Write mode",
             "chunk_size_mb": "Buffer size",
         }
-        _help_anchor = {
-            "partition_scheme": "partition-scheme",
-            "target_system": "target-system",
-            "filesystem": "filesystem",
-            "write_mode": "write-mode",
-            "chunk_size_mb": "chunk-size-native-writer",
-        }
         for combo, key in (
             (self._partition_combo, "partition_scheme"),
             (self._target_combo, "target_system"),
@@ -2748,9 +2790,7 @@ class MainWindow(QMainWindow):
             label.setProperty("colorRole", "label")
             row.addWidget(label)
             row.addWidget(
-                self._help_button(
-                    _help_anchor[key], f"Help: {_help_text[key]}"
-                )
+                self._help_button(_HELP_TIPS[key])
             )
             row.addWidget(combo, 1)
             body_col.addLayout(row)
@@ -2772,9 +2812,7 @@ class MainWindow(QMainWindow):
         native_row.addWidget(self._native_toggle)
         native_row.addWidget(native_label)
         native_row.addWidget(
-            self._help_button(
-                "chunk-size-native-writer", "Help: chunk size & native writer"
-            )
+            self._help_button(_HELP_TIPS["chunk_size_mb"])
         )
         native_row.addStretch()
         body_col.addLayout(native_row)
@@ -2799,7 +2837,7 @@ class MainWindow(QMainWindow):
         persistence_row.addWidget(self._persistence_toggle)
         persistence_row.addWidget(p_label)
         persistence_row.addWidget(
-            self._help_button("persistence", "Help: persistence")
+            self._help_button(_HELP_TIPS["persistence"])
         )
         persistence_row.addStretch()
         persistence_row.addWidget(self._persistence_size)
@@ -2824,7 +2862,7 @@ class MainWindow(QMainWindow):
         wtg_row.addWidget(self._wtg_toggle)
         wtg_row.addWidget(wtg_label)
         wtg_row.addWidget(
-            self._help_button("windows-to-go", "Help: Windows To Go")
+            self._help_button(_HELP_TIPS["windows_to_go"])
         )
         wtg_row.addStretch()
         body_col.addLayout(wtg_row)
@@ -2868,7 +2906,7 @@ class MainWindow(QMainWindow):
         sha_row.addWidget(self._verify_sha_toggle)
         sha_row.addWidget(sha_label)
         sha_row.addWidget(
-            self._help_button("verify-sha256", "Help: verify with SHA256")
+            self._help_button(_HELP_TIPS["verify_sha256"])
         )
         sha_row.addStretch()
         col.addLayout(sha_row)
@@ -2895,7 +2933,7 @@ class MainWindow(QMainWindow):
         bad_row.addWidget(self._bad_block_toggle)
         bad_row.addWidget(bad_label)
         bad_row.addWidget(
-            self._help_button("bad-block-scan", "Help: bad-block scan")
+            self._help_button(_HELP_TIPS["bad_block_scan"])
         )
         bad_row.addStretch()
         bad_row.addWidget(self._bad_retries_input)
@@ -3066,26 +3104,13 @@ class MainWindow(QMainWindow):
         label.setObjectName("capLabel")
         return label
 
-    def _help_button(self, anchor: str, tooltip: str) -> QPushButton:
+    def _help_button(self, tooltip: str) -> QPushButton:
         btn = QPushButton("?")
         btn.setObjectName("helpBtn")
         btn.setFixedSize(18, 18)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip(tooltip)
-        btn.clicked.connect(
-            lambda _checked=False, a=anchor: self._open_reference(a)
-        )
         return btn
-
-    def _open_reference(self, anchor: str) -> None:
-        dlg = getattr(self, "_help_dialog", None)
-        if dlg is None:
-            dlg = dialogs.HelpDialog(self)
-            self._help_dialog = dlg
-        dlg.show_anchor(anchor)
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
 
     def _build_iso_zone(self) -> QFrame:
         return IsoDropZone()

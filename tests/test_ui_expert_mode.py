@@ -1,7 +1,5 @@
 """Expert-mode visibility and inline help (?) buttons for the write page."""
 
-from typing import ClassVar
-
 import pytest
 
 
@@ -104,33 +102,9 @@ def test_expert_choices_persist_to_settings(qapp, tmp_path):
         w._shutdown()
 
 
-def test_help_buttons_open_reference_with_anchors(qapp, tmp_path, monkeypatch):
+def test_help_buttons_have_specific_tooltips(qapp, tmp_path):
     from PyQt6.QtWidgets import QPushButton
 
-    import ui.window as wmod
-
-    anchors: list[str] = []
-
-    class StubDialog:
-        instances: ClassVar[list] = []
-
-        def __init__(self, parent=None) -> None:
-            StubDialog.instances.append(self)
-
-        def show_anchor(self, anchor: str) -> None:
-            anchors.append(anchor)
-
-        def show(self) -> None:
-            pass
-
-        def raise_(self) -> None:
-            pass
-
-        def activateWindow(self) -> None:
-            pass
-
-    StubDialog.instances = []
-    monkeypatch.setattr(wmod.dialogs, "HelpDialog", StubDialog)
     w = _make_window(qapp, tmp_path)
     try:
         buttons = [
@@ -144,22 +118,22 @@ def test_help_buttons_open_reference_with_anchors(qapp, tmp_path, monkeypatch):
             if b.objectName() == "helpBtn"
         ]
         assert len(buttons) == 10
-        for btn in buttons:
-            btn.click()
-        assert sorted(anchors) == sorted(
-            [
-                "partition-scheme",
-                "target-system",
-                "filesystem",
-                "write-mode",
-                "chunk-size-native-writer",
-                "chunk-size-native-writer",
-                "persistence",
-                "windows-to-go",
-                "verify-sha256",
-                "bad-block-scan",
-            ]
-        )
-        assert len(StubDialog.instances) == 1
+        tips = [b.toolTip() for b in buttons]
+        assert all(tips), "every help button must carry a tip"
+        assert len(set(tips)) == 9, "exactly one tip is shared (buffer size)"
+        joined = " ".join(tips)
+        for keyword in (
+            "GPT",
+            "UEFI",
+            "FAT32",
+            "Raw (DD)",
+            "CreateFile",
+            "casper-rw",
+            "dism",
+            "SHA-256",
+            "4 KiB",
+            "MiB",
+        ):
+            assert keyword in joined, f"missing keyword: {keyword}"
     finally:
         w._shutdown()
