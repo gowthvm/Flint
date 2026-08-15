@@ -3945,7 +3945,8 @@ class MainWindow(QMainWindow):
     def _mark_queue_item(self, index: int, state: str) -> None:
         item = self._queue_list.item(index)
         if item is not None:
-            item.setText(f"{state} \u00b7 {item.text().rsplit(' \u00b7 ', 1)[-1]}")
+            sep = " \u00b7 "
+            item.setText(f"{state}{sep}{item.text().rsplit(sep, 1)[-1]}")
 
     def _on_flash_queue_clicked(self) -> None:
         if self._busy():
