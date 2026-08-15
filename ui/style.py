@@ -117,6 +117,19 @@ QLabel[colorRole="label"] {
     font-size: $font_sm;
 }
 
+QFrame#helpTip {
+    background: @card;
+    border: 1px solid @border;
+    border-radius: $radius_lg;
+}
+
+QLabel#helpTipLabel {
+    background: transparent;
+    border: none;
+    color: @text;
+    font-size: $font_sm;
+}
+
 QProgressBar {
     background: @track;
     border: none;

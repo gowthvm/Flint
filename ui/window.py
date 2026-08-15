@@ -30,11 +30,14 @@ from PyQt6.QtGui import (
     QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
+    QEnterEvent,
     QGuiApplication,
+    QHideEvent,
     QIcon,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
+    QMoveEvent,
     QPainter,
     QPixmap,
     QPolygonF,
@@ -153,6 +156,112 @@ def _restyle(widget: QWidget) -> None:
     if style is not None:
         style.unpolish(widget)
         style.polish(widget)
+
+
+class TipBubble(QFrame):
+    """Small always-on-top bubble for the (?) help buttons.
+
+    Text wraps into a boxed card; the bubble fades in and out in a few
+    tens of milliseconds. It never takes focus or mouse events, so
+    hovering through it cannot swallow input.
+    """
+
+    FADE_MS = 70
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowType.ToolTip)
+        self.setObjectName("helpTip")
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        self._label = QLabel("")
+        self._label.setObjectName("helpTipLabel")
+        self._label.setWordWrap(True)
+        self._label.setMaximumWidth(300)
+        lay.addWidget(self._label)
+        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._anim.setDuration(self.FADE_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.finished.connect(self._on_fade_finished)
+
+    def _on_fade_finished(self) -> None:
+        if float(self._anim.endValue()) == 0.0:
+            self.hide()
+
+    def show_at(self, anchor: QWidget, text: str) -> None:
+        self._label.setText(text)
+        self.adjustSize()
+        self.move(self._position_for(anchor))
+        if not self.isVisible():
+            self.setWindowOpacity(0.0)
+            self.show()
+        self._fade_to(1.0)
+
+    def hide_fast(self) -> None:
+        self._fade_to(0.0)
+
+    def _fade_to(self, goal: float) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self.windowOpacity())
+        self._anim.setEndValue(goal)
+        self._anim.start()
+
+    def _position_for(self, anchor: QWidget) -> QPoint:
+        top_left = anchor.mapToGlobal(QPoint(0, 0))
+        size = self.sizeHint()
+        screen = QApplication.screenAt(top_left)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        x = top_left.x() + (anchor.width() - size.width()) // 2
+        above = top_left.y() - size.height() - 6
+        if available is not None and above < available.top():
+            y = top_left.y() + anchor.height() + 6
+        else:
+            y = above
+        if available is not None:
+            x = min(max(x, available.left()), available.right() - size.width())
+            y = max(y, available.top())
+        return QPoint(x, y)
+
+
+class HelpButton(QPushButton):
+    """(?) button whose tip fades in instantly as a bubble on hover."""
+
+    def __init__(
+        self, tip: str, shared_bubble: TipBubble | None = None
+    ) -> None:
+        super().__init__("?")
+        self._tip = tip
+        self._bubble = shared_bubble
+        self.setObjectName("helpBtn")
+        self.setFixedSize(18, 18)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("Help")
+        self.setAccessibleDescription(tip)
+
+    def tip_text(self) -> str:
+        return self._tip
+
+    def enterEvent(self, event: QEnterEvent | None) -> None:
+        assert event is not None
+        if self._bubble is None:
+            self._bubble = TipBubble()
+        self._bubble.show_at(self, self._tip)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent | None) -> None:
+        assert event is not None
+        if self._bubble is not None:
+            self._bubble.hide_fast()
+        super().leaveEvent(event)
+
+    def hideEvent(self, event: QHideEvent | None) -> None:
+        assert event is not None
+        if self._bubble is not None:
+            self._bubble.hide_fast()
+        super().hideEvent(event)
 
 
 class IsoWorker(QThread):
@@ -3104,13 +3213,26 @@ class MainWindow(QMainWindow):
         label.setObjectName("capLabel")
         return label
 
-    def _help_button(self, tooltip: str) -> QPushButton:
-        btn = QPushButton("?")
-        btn.setObjectName("helpBtn")
-        btn.setFixedSize(18, 18)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(tooltip)
-        return btn
+    def _help_button(self, tip: str) -> HelpButton:
+        bubble = getattr(self, "_help_bubble", None)
+        if bubble is None:
+            bubble = TipBubble()
+            self._help_bubble = bubble
+        return HelpButton(tip, bubble)
+
+    def moveEvent(self, event: QMoveEvent | None) -> None:
+        assert event is not None
+        bubble = getattr(self, "_help_bubble", None)
+        if bubble is not None:
+            bubble.hide_fast()
+        super().moveEvent(event)
+
+    def hideEvent(self, event: QHideEvent | None) -> None:
+        assert event is not None
+        bubble = getattr(self, "_help_bubble", None)
+        if bubble is not None:
+            bubble.hide_fast()
+        super().hideEvent(event)
 
     def _build_iso_zone(self) -> QFrame:
         return IsoDropZone()

@@ -118,7 +118,7 @@ def test_help_buttons_have_specific_tooltips(qapp, tmp_path):
             if b.objectName() == "helpBtn"
         ]
         assert len(buttons) == 10
-        tips = [b.toolTip() for b in buttons]
+        tips = [b.tip_text() for b in buttons]
         assert all(tips), "every help button must carry a tip"
         assert len(set(tips)) == 9, "exactly one tip is shared (buffer size)"
         joined = " ".join(tips)
@@ -135,5 +135,39 @@ def test_help_buttons_have_specific_tooltips(qapp, tmp_path):
             "MiB",
         ):
             assert keyword in joined, f"missing keyword: {keyword}"
+    finally:
+        w._shutdown()
+
+
+def test_help_button_hover_shows_instant_fading_bubble(qapp, tmp_path):
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QEnterEvent
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QPushButton
+
+    from ui.window import TipBubble
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        btn = next(
+            b
+            for b in w._expert_options_body.findChildren(QPushButton)
+            if b.objectName() == "helpBtn"
+        )
+        bubble = w._help_bubble
+        assert isinstance(bubble, TipBubble)
+        assert not bubble.isVisible()
+
+        enter = QEnterEvent(QPointF(1, 1), QPointF(1, 1), QPointF(1, 1))
+        btn.enterEvent(enter)
+        QTest.qWait(10)
+        assert bubble.isVisible(), "bubble must appear on first hover"
+        assert bubble._label.text() == btn.tip_text()
+        QTest.qWait(100)
+        assert bubble.windowOpacity() == 1.0, "bubble must reach full opacity"
+
+        btn.leaveEvent(QEvent(QEvent.Type.Leave))
+        QTest.qWait(100)
+        assert not bubble.isVisible(), "bubble must fade out and hide"
     finally:
         w._shutdown()
