@@ -3,14 +3,19 @@
 Usage (all commands require elevation, which the packaged executable has
 via its manifest; in development a UAC relaunch is attempted):
 
+    flint --cli list
     flint --cli flash  --image <file> --drive <serial|letter|path> --confirm <serial> [--verify]
     flint --cli verify --drive <serial|letter|path> [--sha256 <hex> --image <file>]
-    flint --cli wipe   --drive <serial|letter|path> --confirm <serial> [--method zero|random|dod]
+    flint --cli wipe   --drive <serial|letter|path> --confirm <serial> [--method zero|random|nist|dod]
     flint --cli backup --drive <serial|letter|path> --out <file> [--confirm <serial>]
     flint --cli clone  --from <serial|letter|path> --to <serial|letter|path> --confirm <serial of --to>
     flint --cli queue  --file <list.txt> --drive <serial|letter|path> --confirm <serial>
 
     flint --cli help
+
+``list`` prints every detected drive with its serial, volume letter(s)
+and size, and needs no privileges; the serial it prints is exactly what
+subsequent ``--confirm`` values must match.
 
 ``--confirm`` must equal the *full* serial number of the drive being
 destroyed; this is the headless equivalent of the GUI's typed
@@ -89,12 +94,13 @@ def _opts(argv: list[str]) -> tuple[dict[str, str | bool], str | None]:
 def _usage() -> str:
     return (
         "Usage: flint --cli <command> [options]\n"
+        "  list   [no options] — print detected drives and their serials\n"
         "  flash  --image <file> --drive <serial|letter|path>"
         " --confirm <serial> [--verify]\n"
         "  verify --drive <serial|letter|path>"
         " [--sha256 <hex> --image <file>]\n"
         "  wipe   --drive <serial|letter|path> --confirm <serial>"
-        " [--method zero|random|dod]\n"
+        " [--method zero|random|nist|dod]\n"
         "  backup --drive <serial|letter|path> --out <file>"
         " [--confirm <serial>]\n"
         "  clone  --from <serial|letter|path> --to <serial|letter|path>"
@@ -189,20 +195,51 @@ def _require_confirm(
 
 
 def _run_worker(worker: Any, label: str) -> tuple[bool, str]:
-    """Run a QThread worker to completion, streaming progress lines."""
+    """Run a QThread worker to completion, streaming progress lines.
+
+    Emits ``FLINT <pct> <speed>MB/s ETA <s>s`` on every worker signal and
+    at 100%; speed/ETA come from the worker's own signals when it provides
+    them (writer/wipe/backup/clone), or are derived from reported bytes,
+    or are reported as 0 / remaining-seconds when unavailable (verify).
+    """
     loop = QEventLoop()
     outcome: dict[str, object] = {}
-
+    state: dict[str, float] = {
+        "pct": 0.0,
+        "speed": 0.0,
+        "written": 0.0,
+        "total": 0.0,
+    }
+    stated_at = time.monotonic()
     last_print = {"t": 0.0}
 
+    def _emit() -> None:
+        elapsed = max(time.monotonic() - stated_at, 1e-6)
+        speed = state["speed"]
+        eta = 0
+        if speed <= 0 and state["total"] > 0 and state["written"] > 0:
+            speed = state["written"] / 1_000_000 / elapsed
+            remaining = state["total"] - state["written"]
+            eta = int(remaining / 1_000_000 / speed) if speed > 0 else 0
+        _print(f"FLINT {state['pct']:.1f} {speed:.1f}MB/s ETA {eta}s")
+        last_print["t"] = time.monotonic()
+
     def on_progress(pct: float) -> None:
-        now = time.monotonic()
-        if now - last_print["t"] >= 0.25 or pct >= 100.0:
-            last_print["t"] = now
-            _print(f"{label} {pct:.1f}%")
+        if pct >= 100.0 or (
+            pct > state["pct"]
+            and time.monotonic() - last_print["t"] >= 0.25
+        ):
+            state["pct"] = pct
+            _emit()
 
     def on_speed(mbps: float) -> None:
-        pass
+        state["speed"] = mbps
+
+    def on_written(n: int) -> None:
+        state["written"] = float(n)
+
+    def on_total(n: int) -> None:
+        state["total"] = float(n)
 
     def on_finished(ok: bool, message: str) -> None:
         outcome["ok"] = ok
@@ -210,7 +247,15 @@ def _run_worker(worker: Any, label: str) -> tuple[bool, str]:
         loop.quit()
 
     worker.progress.connect(on_progress)
-    worker.speed_mbps.connect(on_speed)
+    speed_signal = getattr(worker, "speed_mbps", None)
+    if speed_signal is not None:
+        speed_signal.connect(on_speed)
+    written_signal = getattr(worker, "written_bytes", None)
+    if written_signal is not None:
+        written_signal.connect(on_written)
+    total_signal = getattr(worker, "total_bytes", None)
+    if total_signal is not None:
+        total_signal.connect(on_total)
     worker.finished.connect(on_finished)
     worker.start()
     loop.exec()
@@ -227,6 +272,32 @@ def _iso_digest(image: str) -> str | None:
         return None
     _print(f"SHA256 {result}")
     return result
+
+
+def _cmd_list(opts: dict[str, str | bool]) -> int:
+    """Print every detected drive with the serial that --confirm expects.
+
+    Needs no privileges, so scripts can discover serials first and then
+    run destructive commands with the exact value."""
+    drives = _detect_drives()
+    if not drives:
+        _print("RESULT ok: no removable drives detected")
+        return EXIT_OK
+    for index, drive in enumerate(drives, 1):
+        model = drive.get("name") or drive.get("model") or "unknown device"
+        letters = drive.get("letters") or (
+            [drive["letter"]] if drive.get("letter") else []
+        )
+        serial = _serial_of(drive)
+        _print(
+            f"DRIVE {index} {model} "
+            f"serial={serial!r} "
+            f"size={drive.get('size_gb', 0)}GB "
+            f"letters={','.join(letters)} "
+            f"path={drive.get('physical_path')}"
+        )
+    _print(f"RESULT ok: {len(drives)} drive(s) listed")
+    return EXIT_OK
 
 
 def _cmd_flash(opts: dict[str, str | bool]) -> int:
@@ -486,6 +557,7 @@ def _cmd_queue(opts: dict[str, str | bool]) -> int:
 
 
 _COMMANDS = {
+    "list": _cmd_list,
     "flash": _cmd_flash,
     "verify": _cmd_verify,
     "wipe": _cmd_wipe,
@@ -515,6 +587,10 @@ def main(argv: list[str] | None = None) -> int:
     if error:
         _print(f"RESULT fail: {error}\n{_usage()}")
         return EXIT_USAGE
+
+    if command == "list":
+        # Drive discovery needs no privileges; skip the UAC relaunch.
+        return _cmd_list(opts)
 
     elevated = ensure_elevated([sys.executable, *sys.argv])
     if elevated is not None:

@@ -232,7 +232,10 @@ def test_main_dispatches_flash_command(tmp_path, monkeypatch, capsys):
 
 def test_help_prints_usage(capsys):
     assert cli.main(["--cli", "--help"]) == cli.EXIT_OK
-    assert "Usage: flint --cli" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Usage: flint --cli" in out
+    assert "list" in out
+    assert "nist" in out
 
 
 def test_help_command_exits_ok(capsys):
@@ -245,6 +248,71 @@ def test_version_flag(capsys):
 
     assert cli.main(["--cli", "--version"]) == cli.EXIT_OK
     assert f"Flint {APP_VERSION}" in capsys.readouterr().out
+
+
+def test_list_prints_drives_with_serials(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    rc = cli.main(["--cli", "list"])
+    assert rc == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "DRIVE 1" in out
+    assert "ABC1234" in out
+    assert "letters=E" in out
+    assert r"\\.\PHYSICALDRIVE3" in out
+    assert "RESULT ok: 1 drive(s) listed" in out
+
+
+def test_list_no_drives(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", list)
+    assert cli.main(["--cli", "list"]) == cli.EXIT_OK
+    assert "no removable drives" in capsys.readouterr().out
+
+
+def test_list_does_not_relaunch_elevated(monkeypatch, capsys):
+    """list needs no privileges, so it must skip the UAC relaunch."""
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    called = []
+
+    def _ensure_elevated(argv):
+        called.append(argv)
+        raise AssertionError("list must not relaunch elevated")
+
+    monkeypatch.setattr(cli, "ensure_elevated", _ensure_elevated)
+    rc = cli.main(["--cli", "list"])
+    assert rc == cli.EXIT_OK
+    assert called == []
+    capsys.readouterr()
+
+
+def test_run_worker_emits_flint_progress_lines(monkeypatch, capsys):
+    """The documented machine format is FLINT <pct> <speed>MB/s ETA <s>s."""
+    from PyQt6.QtCore import QCoreApplication, QThread, pyqtSignal
+
+    class _FakeWorker(QThread):
+        progress = pyqtSignal(float)
+        speed_mbps = pyqtSignal(float)
+        written_bytes = pyqtSignal(int)
+        total_bytes = pyqtSignal(int)
+        finished = pyqtSignal(bool, str)
+
+        def run(self) -> None:
+            self.total_bytes.emit(1_000_000_000)
+            self.progress.emit(10.0)
+            self.progress.emit(50.0)
+            self.speed_mbps.emit(42.5)
+            self.written_bytes.emit(500_000_000)
+            self.progress.emit(100.0)
+            self.finished.emit(True, "ok")
+
+    app = QCoreApplication([])
+    try:
+        worker = _FakeWorker()
+        ok, message = cli._run_worker(worker, "test")
+    finally:
+        app = None
+    assert ok and message == "ok"
+    out = capsys.readouterr().out
+    assert "FLINT 100.0 42.5MB/s ETA 0s" in out
 
 
 def test_verify_sha256_requires_image(monkeypatch, capsys):
