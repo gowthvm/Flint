@@ -411,7 +411,13 @@ assert methods == [
     "Random data (NIST)",
     "DoD 5220.22-M (3 passes)",
 ], methods
-assert w6._wipe_menu_btn.menu() is w6._wipe_menu
+# The dropdown must be a QPushButton#iconBtn so the theme applies
+# (a QToolButton here matched no stylesheet rule and rendered unstyled).
+from PyQt6.QtWidgets import QPushButton
+
+assert isinstance(w6._wipe_menu_btn, QPushButton)
+assert w6._wipe_menu_btn.objectName() == "iconBtn"
+assert w6._wipe_menu_btn.toolTip() == "Wipe method"
 check("wipe method menu")
 
 image3 = os.path.join(d, "sidecar.iso")

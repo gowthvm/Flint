@@ -59,7 +59,6 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QSystemTrayIcon,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -2420,15 +2419,13 @@ class MainWindow(QMainWindow):
                 lambda _, m=method: self._on_wipe_clicked(m)
             )
         self._wipe_menu = wipe_menu
-        self._wipe_menu_btn = QToolButton()
+        self._wipe_menu_btn = QPushButton("\u25be")
         self._wipe_menu_btn.setObjectName("iconBtn")
-        self._wipe_menu_btn.setText("\u25be")
         self._wipe_menu_btn.setToolTip("Wipe method")
-        self._wipe_menu_btn.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup
-        )
-        self._wipe_menu_btn.setMenu(wipe_menu)
         self._wipe_menu_btn.setFixedSize(30, 30)
+        self._wipe_menu_btn.clicked.connect(
+            lambda: wipe_menu.exec(QCursor.pos())
+        )
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setObjectName("ghost")
