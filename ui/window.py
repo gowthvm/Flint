@@ -4281,9 +4281,10 @@ class MainWindow(QMainWindow):
             if is_backup:
                 digest = self._backup_digest
                 self._done_label.setText("Backup complete")
+                ellipsis_ = "\u2026"
                 self._done_summary.setText(
                     f"{self._backup_out} \u00b7 SHA256 "
-                    f"{(digest[:12] + '\u2026') if digest else 'n/a'}"
+                    f"{digest[:12] + ellipsis_ if digest else 'n/a'}"
                 )
             else:
                 src = self._clone_source or {}
