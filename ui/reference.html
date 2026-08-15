@@ -54,8 +54,71 @@
   .tog{width:28px;height:16px;background:#fff;border-radius:8px;position:relative;cursor:pointer;}
   .tog::after{content:'';position:absolute;width:12px;height:12px;border-radius:50%;background:#000;top:2px;right:2px;}
 </style>
+<style>
+  body{background:#0a0a0a;color:#bbb;font-family:Segoe UI,system-ui,sans-serif;margin:0;}
+  .ref{max-width:780px;margin:0 auto;padding:32px 24px 72px;}
+  .ref h1{font-size:22px;color:#fff;margin:0 0 4px;}
+  .ref .sub{color:#666;font-size:12px;margin:0 0 28px;}
+  .ref h2{font-size:16px;color:#fff;border-bottom:1px solid #1f1f1f;padding-bottom:8px;margin:30px 0 10px;}
+  .ref p{font-size:13px;line-height:1.6;color:#999;margin:8px 0;}
+  .ref b{color:#ddd;}
+  .ref code{background:#141414;border:1px solid #222;border-radius:4px;padding:1px 6px;font-size:12px;color:#eee;}
+  .ref .warn{background:#181206;border:1px solid #4d3a00;color:#d9b45a;border-radius:6px;padding:10px 14px;font-size:12px;line-height:1.5;margin:12px 0;}
+  .ref .warn b{color:#e8c87a;}
+  .ref a{color:#7fb2ff;}
+</style>
+<div class="ref">
+  <h1>Flint reference</h1>
+  <p class="sub">Help for the advanced and verification options. Flint writes images to physical drives — read the data-loss warning at the bottom.</p>
+
+  <a name="partition-scheme"></a>
+  <h2 id="partition-scheme">Partition scheme</h2>
+  <p>Controls how the drive is partitioned when image contents are copied onto it (file-copy mode): <b>GPT</b> for modern UEFI systems, <b>MBR</b> for older BIOS/legacy systems, <b>Auto</b> picks GPT for UEFI targets and MBR otherwise. Raw (DD) writes are byte-for-byte copies of the image and ignore this setting.</p>
+
+  <a name="target-system"></a>
+  <h2 id="target-system">Target system</h2>
+  <p>Select <b>UEFI</b> for firmware using the EFI boot path, <b>Legacy</b> for BIOS boot, or <b>Auto</b>. This influences the partition scheme and where boot files are placed in file-copy mode. Windows To Go always installs boot files for both (UEFI and BIOS).</p>
+
+  <a name="filesystem"></a>
+  <h2 id="filesystem">Filesystem choice</h2>
+  <p><b>FAT32</b> is the most widely bootable (required by many firmware ESPs) but cannot store files over 4 GB. <b>NTFS</b> supports large files and is required for Windows To Go. <b>exFAT</b> handles large files with fewer restrictions but is not bootable on all machines. The filesystem only matters in file-copy mode; raw writes keep the image's own layout.</p>
+
+  <a name="write-mode"></a>
+  <h2 id="write-mode">Write mode</h2>
+  <p><b>Raw (DD)</b> copies the image bytes to the drive exactly as-is — fastest and safest for bootable images. <b>File copy</b> repartitions and formats the drive, then copies the ISO contents onto it. Hybrid ISOs (ISO9660 + bootable MBR) are always written raw so their boot record survives.</p>
+
+  <a name="persistence"></a>
+  <h2 id="persistence">Persistence</h2>
+  <p>Keeps changes between reboots on Linux live sticks. Ubuntu-style images get a <code>casper-rw</code> ext4 image at the drive root and the boot config is patched with the <code>persistent</code> kernel option; Debian-live images get a <code>live/persistence.conf</code> overlay instead. Formatting the ext4 image needs <code>wsl mke2fs</code> or a system <code>mke2fs</code>/<code>makefs</code>; if none is available the image is created but left unformatted — an explicit warning is shown and you must format it as ext4 manually for persistence to work.</p>
+
+  <a name="windows-to-go"></a>
+  <h2 id="windows-to-go">Windows To Go</h2>
+  <p>Applies a Windows installation ISO to the drive with <code>dism /Apply-Image /Index:1</code> and installs boot files with <code>bcdboot ... /f ALL</code> so the stick boots as a portable Windows install. Requires NTFS (selected automatically), file-copy mode and elevation; the first edition in the image (index 1) is used. Windows To Go and Persistence are mutually exclusive.</p>
+
+  <a name="verify-sha256"></a>
+  <h2 id="verify-sha256">Verify SHA256</h2>
+  <p>After a raw write, Flint reads the drive back and compares its SHA-256 digest against the image, reporting the offsets of any mismatched regions (up to 20) and the read speed in MB/s. Verification can take as long as the write itself. It is skipped after file-copy writes because the drive is not byte-identical to the image.</p>
+
+  <a name="bad-block-scan"></a>
+  <h2 id="bad-block-scan">Bad-block scan</h2>
+  <p>Re-reads the drive looking for unreadable sectors. Failed reads are retried up to the configured number of times (1–10, default 3); sectors that never read back are reported at 4 KiB-aligned offsets. If mismatches or unreadable sectors are found, Flint offers to retry the write or abort.</p>
+
+  <a name="chunk-size-native-writer"></a>
+  <h2 id="chunk-size-native-writer">Chunk size &amp; native writer</h2>
+  <p>Raw writes are buffered in chunks — 8 MiB by default, configurable from 4–64 MiB in Expert mode. The <b>native writer</b> uses Windows <code>CreateFile</code>/<code>WriteFile</code> with <code>FILE_FLAG_NO_BUFFERING</code> and sector-aligned buffers for the highest throughput. Build it with <code>python setup.py build_ext --inplace</code> (the CI workflow does this before packaging); when it is not built, writes automatically fall back to the pure-Python writer. Toggle it on in Expert mode to use it.</p>
+
+  <a name="signing-releases"></a>
+  <h2 id="signing-releases">How to sign releases</h2>
+  <p>The CI workflow (`.github/workflows/build-windows.yml`) builds <code>flint.exe</code>, computes its SHA-256 checksum (<code>certutil -hashfile dist\flint.exe SHA256</code>) and uploads both as workflow artifacts and release assets on every run. Code signing is optional: set the <code>WINDOWS_SIGNING_PFX</code> (base64-encoded PFX) and <code>WINDOWS_SIGNING_PASSWORD</code> repository secrets and CI imports the certificate, signs with <code>signtool sign /fd SHA256 /a</code> and removes it again. Without the secrets, the build logs a clear "signing skipped" warning and still publishes the unsigned EXE with its checksum. Download signed builds from the <a href="https://github.com/gowthvm/Flint/releases/latest">releases page</a>.</p>
+
+  <div class="warn"><b>Data loss warning.</b> Flint writes raw images directly to physical disks. Everything on the target drive is irreversibly erased — always confirm the target and back up important data first. A wrong drive letter or a hybrid image written with the wrong mode can destroy data with no recovery.</div>
+</div>
 
 <div class="app">
+<div class="ref">
+<h1>App layout mockup (developer reference)</h1>
+<p class="sub">Static UI layout used during design; the help sections above are the in-app manual.</p>
+<hr class="ref">
   <div class="sidebar">
     <div class="logo">
       <div class="logo-mark">
@@ -160,64 +223,4 @@
     </div>
   </div>
 </div>
-
-<style>
-  body{background:#0a0a0a;color:#bbb;font-family:Segoe UI,system-ui,sans-serif;margin:0;}
-  .ref{max-width:780px;margin:0 auto;padding:32px 24px 72px;}
-  .ref h1{font-size:22px;color:#fff;margin:0 0 4px;}
-  .ref .sub{color:#666;font-size:12px;margin:0 0 28px;}
-  .ref h2{font-size:16px;color:#fff;border-bottom:1px solid #1f1f1f;padding-bottom:8px;margin:30px 0 10px;}
-  .ref p{font-size:13px;line-height:1.6;color:#999;margin:8px 0;}
-  .ref b{color:#ddd;}
-  .ref code{background:#141414;border:1px solid #222;border-radius:4px;padding:1px 6px;font-size:12px;color:#eee;}
-  .ref .warn{background:#181206;border:1px solid #4d3a00;color:#d9b45a;border-radius:6px;padding:10px 14px;font-size:12px;line-height:1.5;margin:12px 0;}
-  .ref .warn b{color:#e8c87a;}
-  .ref a{color:#7fb2ff;}
-</style>
-
-<div class="ref">
-  <h1>Flint reference</h1>
-  <p class="sub">Help for the advanced and verification options. Flint writes images to physical drives — read the data-loss warning at the bottom.</p>
-
-  <a name="partition-scheme"></a>
-  <h2 id="partition-scheme">Partition scheme</h2>
-  <p>Controls how the drive is partitioned when image contents are copied onto it (file-copy mode): <b>GPT</b> for modern UEFI systems, <b>MBR</b> for older BIOS/legacy systems, <b>Auto</b> picks GPT for UEFI targets and MBR otherwise. Raw (DD) writes are byte-for-byte copies of the image and ignore this setting.</p>
-
-  <a name="target-system"></a>
-  <h2 id="target-system">Target system</h2>
-  <p>Select <b>UEFI</b> for firmware using the EFI boot path, <b>Legacy</b> for BIOS boot, or <b>Auto</b>. This influences the partition scheme and where boot files are placed in file-copy mode. Windows To Go always installs boot files for both (UEFI and BIOS).</p>
-
-  <a name="filesystem"></a>
-  <h2 id="filesystem">Filesystem choice</h2>
-  <p><b>FAT32</b> is the most widely bootable (required by many firmware ESPs) but cannot store files over 4 GB. <b>NTFS</b> supports large files and is required for Windows To Go. <b>exFAT</b> handles large files with fewer restrictions but is not bootable on all machines. The filesystem only matters in file-copy mode; raw writes keep the image's own layout.</p>
-
-  <a name="write-mode"></a>
-  <h2 id="write-mode">Write mode</h2>
-  <p><b>Raw (DD)</b> copies the image bytes to the drive exactly as-is — fastest and safest for bootable images. <b>File copy</b> repartitions and formats the drive, then copies the ISO contents onto it. Hybrid ISOs (ISO9660 + bootable MBR) are always written raw so their boot record survives.</p>
-
-  <a name="persistence"></a>
-  <h2 id="persistence">Persistence</h2>
-  <p>Keeps changes between reboots on Linux live sticks. Ubuntu-style images get a <code>casper-rw</code> ext4 image at the drive root and the boot config is patched with the <code>persistent</code> kernel option; Debian-live images get a <code>live/persistence.conf</code> overlay instead. Formatting the ext4 image needs <code>wsl mke2fs</code> or a system <code>mke2fs</code>/<code>makefs</code>; if none is available the image is created but left unformatted — an explicit warning is shown and you must format it as ext4 manually for persistence to work.</p>
-
-  <a name="windows-to-go"></a>
-  <h2 id="windows-to-go">Windows To Go</h2>
-  <p>Applies a Windows installation ISO to the drive with <code>dism /Apply-Image /Index:1</code> and installs boot files with <code>bcdboot ... /f ALL</code> so the stick boots as a portable Windows install. Requires NTFS (selected automatically), file-copy mode and elevation; the first edition in the image (index 1) is used. Windows To Go and Persistence are mutually exclusive.</p>
-
-  <a name="verify-sha256"></a>
-  <h2 id="verify-sha256">Verify SHA256</h2>
-  <p>After a raw write, Flint reads the drive back and compares its SHA-256 digest against the image, reporting the offsets of any mismatched regions (up to 20) and the read speed in MB/s. Verification can take as long as the write itself. It is skipped after file-copy writes because the drive is not byte-identical to the image.</p>
-
-  <a name="bad-block-scan"></a>
-  <h2 id="bad-block-scan">Bad-block scan</h2>
-  <p>Re-reads the drive looking for unreadable sectors. Failed reads are retried up to the configured number of times (1–10, default 3); sectors that never read back are reported at 4 KiB-aligned offsets. If mismatches or unreadable sectors are found, Flint offers to retry the write or abort.</p>
-
-  <a name="chunk-size-native-writer"></a>
-  <h2 id="chunk-size-native-writer">Chunk size &amp; native writer</h2>
-  <p>Raw writes are buffered in chunks — 8 MiB by default, configurable from 4–64 MiB in Expert mode. The <b>native writer</b> uses Windows <code>CreateFile</code>/<code>WriteFile</code> with <code>FILE_FLAG_NO_BUFFERING</code> and sector-aligned buffers for the highest throughput. Build it with <code>python setup.py build_ext --inplace</code> (the CI workflow does this before packaging); when it is not built, writes automatically fall back to the pure-Python writer. Toggle it on in Expert mode to use it.</p>
-
-  <a name="signing-releases"></a>
-  <h2 id="signing-releases">How to sign releases</h2>
-  <p>The CI workflow (`.github/workflows/build-windows.yml`) builds <code>flint.exe</code>, computes its SHA-256 checksum (<code>certutil -hashfile dist\flint.exe SHA256</code>) and uploads both as workflow artifacts and release assets on every run. Code signing is optional: set the <code>WINDOWS_SIGNING_PFX</code> (base64-encoded PFX) and <code>WINDOWS_SIGNING_PASSWORD</code> repository secrets and CI imports the certificate, signs with <code>signtool sign /fd SHA256 /a</code> and removes it again. Without the secrets, the build logs a clear "signing skipped" warning and still publishes the unsigned EXE with its checksum. Download signed builds from the <a href="https://github.com/gowthvm/Flint/releases/latest">releases page</a>.</p>
-
-  <div class="warn"><b>Data loss warning.</b> Flint writes raw images directly to physical disks. Everything on the target drive is irreversibly erased — always confirm the target and back up important data first. A wrong drive letter or a hybrid image written with the wrong mode can destroy data with no recovery.</div>
 </div>
