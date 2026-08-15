@@ -75,7 +75,7 @@ def test_dots_menu_has_only_settings(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
         texts = [a.text() for a in w._build_dots_menu().actions()]
-        assert texts == ["Settings"]
+        assert texts == ["Settings", "", "Check for updates\u2026"]
     finally:
         w._shutdown()
 
@@ -130,6 +130,9 @@ def test_close_blocked_while_busy(qapp, tmp_path, monkeypatch):
         d, "inform", lambda parent, **kw: warned.append(kw)
     )
     w = _make_window(qapp, tmp_path)
+    # Deterministic: force the no-tray branch regardless of whether the
+    # test session has a real system tray available.
+    w._tray = None
     w.show()
     try:
         w._writing = True

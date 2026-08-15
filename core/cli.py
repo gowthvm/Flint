@@ -479,6 +479,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--cli" in argv:
         argv.remove("--cli")
+    if "--version" in argv:
+        from core.version import APP_VERSION
+
+        _print(f"Flint {APP_VERSION}")
+        return EXIT_OK
     if not argv or argv[0] in ("help", "--help", "-h"):
         _print(_usage())
         return EXIT_OK

@@ -250,6 +250,11 @@ def main() -> int:
     QTimer.singleShot(300, _ensure_visible)
     QTimer.singleShot(1200, _ensure_visible)
     QTimer.singleShot(3000, _ensure_visible)
+    # Quiet 7-day update check; never blocks and only surfaces a new release.
+    try:
+        QTimer.singleShot(6000, window._maybe_auto_check_updates)
+    except Exception:
+        logger.exception("failed to schedule update check")
 
     rc = app.exec()
     _log(f"app exited rc={rc}")

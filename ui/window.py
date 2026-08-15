@@ -73,7 +73,18 @@ from core.history import (
     import_history,
     load_history,
 )
+from core.updates import (
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+    compare_version,
+    default_download_path,
+    fetch_sidecar_digest,
+    release_executable,
+    sidecar_digest_url,
+    version_from_tag,
+)
 from core.verify import VerifyWorker
+from core.version import APP_VERSION
 from core.wipe import WipeWorker
 from core.writer import UsbWriter
 from ui import dialogs, style
@@ -875,6 +886,9 @@ class MainWindow(QMainWindow):
         self._queue_active = False
         self._queue_ok = 0
         self._queue_last_succeeded = False
+        self._update_checker: UpdateCheckWorker | None = None
+        self._update_downloader: UpdateDownloadWorker | None = None
+        self._pending_update_path = ""
         self._sidecar_status = "missing"
         self._sidecar_detail = ""
         self._retired_workers: list[QThread] = []
@@ -1540,6 +1554,10 @@ class MainWindow(QMainWindow):
         menu.addAction("Settings").triggered.connect(
             lambda: self._on_nav_clicked(3)
         )
+        menu.addSeparator()
+        update_action = menu.addAction("Check for updates\u2026")
+        update_action.setEnabled(self._update_checker is None)
+        update_action.triggered.connect(self._on_check_updates_clicked)
         return menu
 
     def _show_dots_menu(self) -> None:
@@ -3726,6 +3744,155 @@ class MainWindow(QMainWindow):
         if self._busy():
             return
         self._queue_list.clear()
+
+    def _on_check_updates_clicked(self) -> None:
+        if self._update_checker is not None:
+            return
+        worker = UpdateCheckWorker()
+        self._update_checker = worker
+        worker.finished_check.connect(self._on_update_check_done)
+        worker.start()
+
+    def _on_update_check_done(
+        self, ok: bool, message: str, release: object
+    ) -> None:
+        self._update_checker = None
+        if not ok:
+            dialogs.inform(
+                self,
+                kind="warning",
+                title="Update check failed",
+                message=message or "Could not check for updates.",
+            )
+            return
+        data = release if isinstance(release, dict) else {}
+        tag = str(data.get("tag_name") or "")
+        latest = version_from_tag(tag)
+        if compare_version(APP_VERSION, latest) != -1:
+            dialogs.inform(
+                self,
+                kind="success",
+                title="Flint is up to date",
+                message=(
+                    f"You're running the latest version ({APP_VERSION})."
+                ),
+            )
+            return
+        asset = release_executable(data)
+        if asset is None:
+            dialogs.inform(
+                self,
+                kind="warning",
+                title="Update available",
+                message=(
+                    f"Flint {latest} is available (you have {APP_VERSION}), "
+                    "but no flint.exe asset was found on the release page."
+                ),
+            )
+            return
+        downloadable = asset.get("browser_download_url") or ""
+        result = dialogs.completion(
+            self,
+            kind="warning",
+            title="Update available",
+            message=(
+                f"Flint {latest} is available (you have {APP_VERSION}).\n\n"
+                "The new version will be downloaded and its SHA-256 "
+                f"verified before you can run it."
+            ),
+            buttons=[
+                ("Download", "primary", "download"),
+                ("Later", "ghost", "close"),
+            ],
+        )
+        if result == "download" and downloadable:
+            self._start_update_download(
+                downloadable, default_download_path(latest), data
+            )
+
+    def _start_update_download(
+        self, url: str, dest: str, release: dict
+    ) -> None:
+        if self._update_downloader is not None:
+            return
+        digest = fetch_sidecar_digest(sidecar_digest_url(release))
+        worker = UpdateDownloadWorker(url, dest, digest)
+        self._update_downloader = worker
+        self._pending_update_path = dest
+        worker.progress.connect(self._on_update_download_progress)
+        worker.finished_download.connect(self._on_update_download_done)
+        worker.start()
+        self._progress.reset()
+        self._progress.set_phase("Downloading update\u2026")
+
+    def _on_update_download_progress(self, done: int, total: int) -> None:
+        pct = done / total * 100.0 if total > 0 else 0.0
+        self._progress.set_progress(pct)
+        self._set_taskbar_progress(pct)
+
+    def _on_update_download_done(self, ok: bool, result: str) -> None:
+        self._update_downloader = None
+        self._set_taskbar_progress(None)
+        if not ok:
+            self._progress.set_error(
+                self._friendly_error(result or "Update download failed")
+            )
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Update download failed",
+                message=result or "The update could not be downloaded.",
+                buttons=[("Close", "primary", "close")],
+            )
+            return
+        self._progress.set_done()
+        self._progress._title.setText("Update ready")
+        choice = dialogs.completion(
+            self,
+            kind="success",
+            title="Update downloaded",
+            message=(
+                "The new Flint was downloaded and its SHA-256 verified.\n\n"
+                "Close Flint and run the new executable to update."
+            ),
+            buttons=[
+                ("Show file", "primary", "reveal"),
+                ("Close", "ghost", "close"),
+            ],
+        )
+        if choice == "reveal":
+            parent = Path(self._pending_update_path).parent
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(parent)))
+
+    def _maybe_auto_check_updates(self) -> None:
+        """Quiet 7-day update check: never blocks, only surfaces an update."""
+        from core.updates import should_auto_check
+
+        if self._update_checker is not None or self._busy():
+            return
+        last = settings.get("last_update_check")
+        try:
+            last_f = float(last) if last is not None else None
+        except (TypeError, ValueError):
+            last_f = None
+        if not should_auto_check(last_f):
+            return
+        settings.set_many(last_update_check=time.time())
+        worker = UpdateCheckWorker()
+        self._update_checker = worker
+        worker.finished_check.connect(self._on_auto_update_check_done)
+        worker.start()
+
+    def _on_auto_update_check_done(
+        self, ok: bool, message: str, release: object
+    ) -> None:
+        self._update_checker = None
+        if not ok:
+            return
+        data = release if isinstance(release, dict) else {}
+        tag = str(data.get("tag_name") or "")
+        if compare_version(APP_VERSION, version_from_tag(tag)) == -1:
+            self._on_update_check_done(True, "", release)
 
     def _mark_queue_item(self, index: int, state: str) -> None:
         item = self._queue_list.item(index)

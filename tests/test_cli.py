@@ -236,3 +236,10 @@ def test_help_prints_usage(capsys):
 def test_help_command_exits_ok(capsys):
     assert cli.main(["--cli", "help"]) == cli.EXIT_OK
     assert "Usage: flint --cli" in capsys.readouterr().out
+
+
+def test_version_flag(capsys):
+    from core.version import APP_VERSION
+
+    assert cli.main(["--cli", "--version"]) == cli.EXIT_OK
+    assert f"Flint {APP_VERSION}" in capsys.readouterr().out

@@ -138,7 +138,7 @@ def test_dots_menu_opens_settings_page(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
         texts = [a.text() for a in w._build_dots_menu().actions()]
-        assert texts == ["Settings"]
+        assert texts == ["Settings", "", "Check for updates\u2026"]
         w._build_dots_menu().actions()[0].trigger()
         assert w._pages.currentIndex() == 3
         assert w._bottombar.isHidden()
