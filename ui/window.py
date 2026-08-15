@@ -98,6 +98,7 @@ from core.version import APP_VERSION
 from core.wipe import WipeWorker
 from core.writer import UsbWriter
 from ui import dialogs, style
+from ui.chamfer import ChamferPanel
 
 logger = logging.getLogger("flint")
 
@@ -794,7 +795,7 @@ class ToggleSwitch(QWidget):
             super().keyPressEvent(event)
 
 
-class ProgressArea(QFrame):
+class ProgressArea(ChamferPanel):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("progressArea")
@@ -962,7 +963,7 @@ class ProgressArea(QFrame):
         return f"{num_bytes / 1_000_000_000:.1f} GB"
 
 
-class DriveChip(QFrame):
+class DriveChip(ChamferPanel):
     clicked = pyqtSignal()
 
     def __init__(self) -> None:

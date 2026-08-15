@@ -7,8 +7,8 @@ _PALETTES = {
         "card": "#0e0e0e",
         "border": "#1f1f1f",
         "text": "#ffffff",
-        "muted": "#707070",
-        "faded": "#525252",
+        "muted": "#a8a8a8",  # matches flint-web --muted (AA on all surfaces)
+        "faded": "#6f6f6f",  # matches flint-web --faded
         "track": "#1a1a1a",
         "primary": "#ffffff",
         "onPrimary": "#000000",
@@ -77,7 +77,11 @@ DESIGN_TOKENS = {
     "font_lg": 16,
     "font_xl": 22,
     "button_height": 36,
+    "chamfer": 8,  # signature cut-corner motif size (px)
 }
+
+# Machine-voice font stack used by readout widgets ($font_mono in QSS)
+FONT_MONO = '"Cascadia Mono", "Cascadia Code", "Consolas", "Courier New"'
 
 def px(n: int) -> str:
     return f"{n}px"
@@ -324,6 +328,7 @@ QLabel#logoName {
 
 QLabel#capLabel {
     color: @faded;
+    font-family: $font_mono;
     font-size: 10px;
     font-weight: 600;
     padding-bottom: 2px;
@@ -593,6 +598,7 @@ QLabel#progTitle {
 
 QLabel#progPct {
     color: @text;
+    font-family: $font_mono;
     font-size: $font_xl;
     font-weight: 500;
 }
@@ -604,6 +610,7 @@ QLabel#statCap {
 
 QLabel#statVal {
     color: @faded;
+    font-family: $font_mono;
     font-size: $font_sm;
 }
 
@@ -723,7 +730,7 @@ QLineEdit {
 }
 
 QLineEdit#shaInput {
-    font-family: "Cascadia Mono", "Consolas", "Courier New";
+    font-family: $font_mono;
     font-size: $font_sm;
 }
 
@@ -798,7 +805,17 @@ QDialog#flintDialog QCheckBox::indicator:focus {
 """
 
 
+_CURRENT_THEME = "dark"
+
+
+def palette_for(theme: str | None = None) -> dict[str, str]:
+    """Return the palette for a theme; defaults to the currently active one."""
+    return _PALETTES.get(theme or _CURRENT_THEME, _PALETTES["dark"])
+
+
 def build_style(theme: str = "dark") -> str:
+    global _CURRENT_THEME
+    _CURRENT_THEME = theme
     palette = _PALETTES.get(theme, _PALETTES["dark"])
     qss = _QSS_TEMPLATE
     for key, value in palette.items():
@@ -806,6 +823,7 @@ def build_style(theme: str = "dark") -> str:
     # replace design token placeholders like $space_md with px values
     for key, val in DESIGN_TOKENS.items():
         qss = qss.replace(f"${key}", px(val))
+    qss = qss.replace("$font_mono", FONT_MONO)
     return qss
 
 
