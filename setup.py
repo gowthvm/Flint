@@ -12,7 +12,7 @@ from setuptools import Extension, setup
 
 setup(
     name="flint-native",
-    version="1.0.1",
+    version="1.0.2",
     description="Optional native writer extension for Flint",
     ext_modules=[
         Extension(
