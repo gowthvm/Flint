@@ -179,3 +179,57 @@ def test_flash_without_drive_errors_when_none_detected(qapp, tmp_path):
         assert "plug one in first" in w._progress._error.text()
     finally:
         w._shutdown()
+
+
+def _screen_area():
+    from PyQt6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else None
+
+
+def test_restored_geometry_clamped_inside_screen(qapp, tmp_path):
+    """A window whose saved position hangs off the right edge must be
+    pulled back so nothing is cut off at the border."""
+    available = _screen_area()
+    if available is None:
+        pytest.skip("no screen in this environment")
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        w.resize(
+            min(900, available.width() - 20),
+            min(580, available.height() - 20),
+        )
+        w.move(available.right() - w.width() // 2 + 150, available.top() + 40)
+        w._clamp_to_screen()
+        frame = w.frameGeometry()
+        assert frame.left() >= available.left()
+        assert frame.right() <= available.right()
+        assert frame.top() >= available.top()
+        assert frame.bottom() <= available.bottom()
+    finally:
+        w._shutdown()
+
+
+def test_fully_offscreen_geometry_centered_on_screen(qapp, tmp_path):
+    """A saved position outside every screen must fall back to a centered
+    placement instead of opening unreachable."""
+    available = _screen_area()
+    if available is None:
+        pytest.skip("no screen in this environment")
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        w.resize(
+            min(900, available.width() - 20),
+            min(580, available.height() - 20),
+        )
+        w.move(available.right() + 500, available.top() + 100)
+        w._clamp_to_screen()
+        frame = w.frameGeometry()
+        assert frame.intersects(available)
+        assert abs(frame.center().x() - available.center().x()) <= 3
+        assert abs(frame.center().y() - available.center().y()) <= 3
+    finally:
+        w._shutdown()

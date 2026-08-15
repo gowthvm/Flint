@@ -1169,6 +1169,7 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(
                 QByteArray.fromBase64(geometry.encode("ascii"))
             )
+            self._clamp_to_screen()
 
         self._poller = DrivePoller(self._detector, 2000)
         self._poller.drives_ready.connect(self._on_drives_ready)
@@ -1215,6 +1216,50 @@ class MainWindow(QMainWindow):
                 settings.set_many(onboarding_seen=True)
         except Exception:
             pass
+
+    def _clamp_to_screen(self) -> None:
+        """Keep the window inside the current screen's visible area.
+
+        The saved window geometry can put the window partially or fully
+        off-screen after a monitor change or resolution switch, which
+        leaves the right side unreachable. Shrink to fit when possible,
+        clamp the position to the edges, and center the window when it
+        does not intersect any screen at all.
+        """
+        frame = self.frameGeometry()
+        screen = QGuiApplication.screenAt(frame.center())
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        if not frame.intersects(available):
+            self.move(
+                available.center().x() - self.width() // 2,
+                available.center().y() - self.height() // 2,
+            )
+            return
+        if (
+            frame.width() > available.width()
+            and available.width() >= self.minimumWidth()
+        ):
+            self.resize(available.width(), self.height())
+            frame = self.frameGeometry()
+        if (
+            frame.height() > available.height()
+            and available.height() >= self.minimumHeight()
+        ):
+            self.resize(self.width(), available.height())
+            frame = self.frameGeometry()
+        x = min(
+            max(frame.x(), available.left()),
+            available.right() - frame.width(),
+        )
+        y = min(
+            max(frame.y(), available.top()),
+            available.bottom() - frame.height(),
+        )
+        self.move(x, y)
 
     def _busy(self) -> bool:
         return bool(
