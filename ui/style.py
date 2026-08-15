@@ -69,7 +69,7 @@ DESIGN_TOKENS = {
     "btn_pad_v": 9,
     "btn_pad_h": 16,
     "btn_primary_pad": 10,
-    "progress_h": 2,
+    "progress_h": 6,
     "font_xs": 10,
     "font_sm": 11,
     "font_base": 13,
@@ -120,7 +120,7 @@ QLabel[colorRole="label"] {
 QProgressBar {
     background: @track;
     border: none;
-    border-radius: 1px;
+    border-radius: 3px;
     min-height: $progress_h;
     max-height: $progress_h;
     font-size: 1px;
@@ -129,7 +129,7 @@ QProgressBar {
 
 QProgressBar::chunk {
     background: @primary;
-    border-radius: 1px;
+    border-radius: 3px;
 }
 
 QPushButton {

@@ -740,7 +740,7 @@ class ProgressArea(QFrame):
         )
 
     def set_eta(self, seconds: int) -> None:
-        self._stat_values["Remaining"].setText(f"~{seconds} s")
+        self._stat_values["Remaining"].setText(self._fmt_eta(seconds))
 
     def set_values(self, written: int, mbps: float, seconds: int) -> None:
         self.set_written(written)
@@ -783,6 +783,20 @@ class ProgressArea(QFrame):
         self._error.setProperty("level", "warning")
         _restyle(self._error)
         self._error.setVisible(True)
+
+    @staticmethod
+    def _fmt_eta(seconds: int) -> str:
+        if seconds <= 0:
+            return "\u2014"
+        if seconds < 60:
+            return f"~{seconds} s"
+        minutes, _ = divmod(seconds, 60)
+        if minutes < 60:
+            return f"~{minutes} min"
+        hours, minutes = divmod(minutes, 60)
+        if minutes == 0:
+            return f"~{hours} h"
+        return f"~{hours} h {minutes} min"
 
     @staticmethod
     def _fmt_gb(num_bytes: int) -> str:
@@ -1174,12 +1188,12 @@ class MainWindow(QMainWindow):
                 )
                 label = (
                     f"{drive['model'] or drive['name']} \u00b7 "
-                    f"{size} \u00b7 {letter_label}"
+                    f"{size} ({letter_label})"
                 )
-                if serial:
-                    label += f" \u00b7 S/N \u2026{serial}"
                 action = menu.addAction(label)
                 assert action is not None
+                if serial:
+                    action.setToolTip(f"S/N {serial}")
                 action.setCheckable(True)
                 action.setChecked(
                     drive.get("physical_path") == selected_path
@@ -1284,16 +1298,17 @@ class MainWindow(QMainWindow):
                 if letters
                 else "no drive letter"
             )
-            self._drive_sub.setText(
-                f"{size} \u00b7 {drive['bus_type']} \u00b7 {letter_label}"
-            )
+            sub = f"{size} \u00b7 {letter_label}"
+            if serial:
+                sub += f" \u00b7 S/N \u2026{serial}"
+            self._drive_sub.setText(sub)
             detail = f"{name} \u00b7 {size} \u00b7 {letter_label}"
             if serial:
                 detail += f" \u00b7 S/N \u2026{serial}"
             self._target_detail.setText(detail)
             self._target_change.setVisible(True)
             self._target_admin_btn.setVisible(False)
-            self._subtitle.setText(f"{name} \u00b7 {size} selected")
+            self._subtitle.setText(f"{name} \u00b7 {size}")
             if hasattr(self, "_verify_target"):
                 self._verify_target.setText(
                     f"Target: {name} \u00b7 {letter_label}"
@@ -2012,9 +2027,10 @@ class MainWindow(QMainWindow):
                 "\u2713\ufe0e complete" if entry.get("success") else "\u2715 failed"
             )
             item.setToolTip(
-                f"{entry.get('timestamp', '')} \u00b7 "
-                f"{round(duration)} s \u00b7 "
-                f"Verification: {verified} \u00b7 {outcome}"
+                f"{entry.get('timestamp', '')}\n"
+                f"Duration: {round(duration)} s\n"
+                f"Verification: {verified}\n"
+                f"Outcome: {outcome}"
             )
             self._history_list.addItem(item)
 
@@ -4204,11 +4220,19 @@ class MainWindow(QMainWindow):
                 drive["size_gb"] * 1_000_000_000
             )
             serial = self._serial_tail(drive)
-            text = f"{drive['model'] or drive['name']} \u00b7 {size}"
-            if serial:
-                text += f" \u00b7 S/N \u2026{serial}"
+            letters = drive.get("letters") or (
+                [drive["letter"]] if drive.get("letter") else []
+            )
+            letter_label = (
+                ", ".join(f"{l}:" for l in letters)
+                if letters
+                else "no drive letter"
+            )
+            text = f"{drive['model'] or drive['name']} \u00b7 {size} ({letter_label})"
             act = menu.addAction(text)
             assert act is not None
+            if serial:
+                act.setToolTip(f"S/N {serial}")
             act.setData(drive)
         target_action = menu.exec(QCursor.pos())
         if target_action is None:
