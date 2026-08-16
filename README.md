@@ -1,14 +1,16 @@
-# Flint — Bootable USB Writer
+# Flint — Windows-native Bootable USB & Disk Image Writer
 
 Write ISO/DD disk images to USB drives on Windows, then verify the result.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%2064--bit-0078d6)
 [![Website](https://img.shields.io/badge/website-flintweb.vercel.app-0078d6)](https://flintweb.vercel.app)
 
-Flint is a lightweight, Windows-native utility for writing ISO and DD disk
+Flint is a lightweight, **Windows-native** utility for writing ISO and DD disk
 images to USB drives. It writes raw images directly to the physical disk,
 optionally re-reads the drive afterwards to confirm the write, and requires
 explicit typed confirmation before any destructive action.
+
+![Flint flashing an ISO to a USB drive](https://flintweb.vercel.app/assets/screenshot.png)
 
 The full manual — user guide, CLI reference, troubleshooting and FAQ — lives
 on the [Flint website](https://flintweb.vercel.app).
