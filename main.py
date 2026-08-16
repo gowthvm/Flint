@@ -197,17 +197,12 @@ def main() -> int:
     _log(f"start: pid={os.getpid()} argv={sys.argv}")
     _install_crash_logging()
     args = sys.argv[1:]
-    if "--cli" in args or (
-        args
-        and (
-            args[0] in cli.TOP_LEVEL_COMMANDS
-            or args[0] in ("--version", "--help", "-h")
-        )
-    ):
-        # Headless mode: no elevation prompt loop, no single-instance lock,
-        # no window. Exit codes and machine-readable output come from the
-        # cli module (modern top-level commands, the --cli compat alias and
-        # the global --version/--help flags all detour here).
+    if args:
+        # Any argument detours to headless mode: no elevation prompt loop,
+        # no single-instance lock, no window. Exit codes and machine-readable
+        # output come from the cli module (which also explains unknown args,
+        # so 'flint frobnicate' can never silently open a window). A bare
+        # launch with no arguments starts the GUI.
         return cli.main()
     _ensure_admin()
     app = QApplication(sys.argv)
