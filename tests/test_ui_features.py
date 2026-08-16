@@ -233,3 +233,40 @@ def test_fully_offscreen_geometry_centered_on_screen(qapp, tmp_path):
         assert abs(frame.center().y() - available.center().y()) <= 3
     finally:
         w._shutdown()
+
+
+def test_minimum_size_keeps_all_content_inside_borders(qapp, tmp_path):
+    """At the enforced minimum window size nothing may extend past the
+    right border: the scroll areas disable horizontal scrolling, so any
+    content wider than the main column would be cut off unreachably."""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtWidgets import QWidget
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        w.show()
+        qapp.processEvents()
+        floor = w._content_minimum_width()
+        available = _screen_area()
+        if (
+            available is not None
+            and w.minimumWidth() < floor
+            and w.width() < floor
+        ):
+            pytest.skip("screen is narrower than the content floor")
+        w.resize(w.minimumWidth(), w.minimumHeight())
+        qapp.processEvents()
+        qapp.processEvents()
+        central = w.centralWidget()
+        cw = central.width()
+        clipped = []
+        for wid in central.findChildren(QWidget):
+            if not wid.isVisible() or wid.isWindow():
+                continue
+            pos = wid.mapTo(central, QPoint(0, 0))
+            right = pos.x() + wid.width()
+            if right > cw + 1:
+                clipped.append((wid.__class__.__name__, wid.objectName(), right))
+        assert not clipped, clipped[:5]
+    finally:
+        w._shutdown()

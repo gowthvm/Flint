@@ -377,6 +377,7 @@ class IsoDropZone(QFrame):
         text = QLabel("Drop an ISO or click to browse")
         text.setObjectName("emptyIsoText")
         text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text.setWordWrap(True)
         col.addStretch()
         col.addWidget(icon)
         col.addWidget(text)
@@ -401,8 +402,10 @@ class IsoDropZone(QFrame):
         info.setSpacing(3)
         self._iso_name = QLabel("")
         self._iso_name.setObjectName("isoName")
+        self._iso_name.setWordWrap(True)
         self._iso_meta = QLabel("")
         self._iso_meta.setObjectName("isoMeta")
+        self._iso_meta.setWordWrap(True)
         info.addWidget(self._iso_name)
         info.addWidget(self._iso_meta)
 
@@ -1064,13 +1067,10 @@ class MainWindow(QMainWindow):
                 min(900, max(640, geo.width() - 80)),
                 min(580, max(440, geo.height() - 100)),
             )
-            self.setMinimumSize(
-                min(860, max(640, geo.width() - 80)),
-                min(540, max(420, geo.height() - 100)),
-            )
+            height_min = min(540, max(420, geo.height() - 100))
         else:
             self.resize(900, 580)
-            self.setMinimumSize(860, 540)
+            height_min = 540
 
         self._detector = DriveDetector()
         self._current_drive: dict[str, Any] | None = None
@@ -1135,6 +1135,15 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_main())
 
         self.setCentralWidget(central)
+        self._soften_minimum_widths()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            width_min = min(
+                self._content_minimum_width(), max(640, geo.width() - 80)
+            )
+        else:
+            width_min = self._content_minimum_width()
+        self.setMinimumSize(width_min, height_min)
 
         self._controls = [
             self._iso_zone,
@@ -1216,6 +1225,63 @@ class MainWindow(QMainWindow):
                 settings.set_many(onboarding_seen=True)
         except Exception:
             pass
+
+    def _content_minimum_width(self) -> int:
+        """Smallest window width that fits every page without clipping.
+
+        QScrollArea excludes its widget's minimum when widgetResizable is
+        set, so the window's natural minimum ignores scroll-area content
+        and the right edge gets cut off at the resizing floor. Compute
+        the floor from the actual page layouts and the bottom bar."""
+        needed = 0
+        scrollbar = 18
+        frame = 2
+        for i in range(self._pages.count()):
+            page = self._pages.widget(i)
+            if page is None:
+                continue
+            lay = page.layout()
+            if lay is not None:
+                needed = max(needed, lay.minimumSize().width())
+            for sa in page.findChildren(QScrollArea):
+                inner = sa.widget()
+                if inner is None:
+                    continue
+                inner_layout = inner.layout()
+                if inner_layout is None:
+                    continue
+                needed = max(
+                    needed,
+                    inner_layout.minimumSize().width() + frame + scrollbar,
+                )
+        bar_layout = self._bottombar.layout()
+        if bar_layout is not None:
+            needed = max(needed, bar_layout.minimumSize().width())
+        return needed + 201 + 26
+
+    def _soften_minimum_widths(self) -> None:
+        """Relax min-width contributions that clip in narrow windows.
+
+        The main column narrows with the window, and the scroll areas
+        disable horizontal scrolling, so long mono labels push the
+        content's minimum width past the viewport and get cut off at the
+        right border. Word-wrapping keeps the text intact while letting
+        the minimum width collapse to the longest word.
+        """
+        wrap_labels = {
+            "capLabel",
+            "statCap",
+            "progTitle",
+            "doneSummary",
+            "verifyHint",
+            "dropError",
+            "driveName",
+            "driveSub",
+            "verifyLabel",
+        }
+        for w in self.findChildren(QLabel):
+            if w.objectName() in wrap_labels:
+                w.setWordWrap(True)
 
     def _clamp_to_screen(self) -> None:
         """Keep the window inside the current screen's visible area.
@@ -1357,8 +1423,14 @@ class MainWindow(QMainWindow):
         info.setSpacing(1)
         self._drive_name = QLabel("No drive detected")
         self._drive_name.setObjectName("driveName")
+        self._drive_name.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        )
         self._drive_sub = QLabel("")
         self._drive_sub.setObjectName("driveSub")
+        self._drive_sub.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        )
         info.addWidget(self._drive_name)
         info.addWidget(self._drive_sub)
 
@@ -1887,6 +1959,7 @@ class MainWindow(QMainWindow):
         )
         tray_label.setObjectName("capLabel")
         tray_label.setProperty("colorRole", "label")
+        tray_label.setWordWrap(True)
         tray_row.addWidget(self._close_to_tray_toggle)
         tray_row.addWidget(tray_label)
         tray_row.addStretch()
@@ -1947,6 +2020,7 @@ class MainWindow(QMainWindow):
             "No flashes yet \u2014 write your first USB drive"
         )
         self._history_empty.setProperty("colorRole", "muted")
+        self._history_empty.setWordWrap(True)
         self._history_empty.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
@@ -2093,6 +2167,7 @@ class MainWindow(QMainWindow):
             "image on disk."
         )
         hint.setProperty("colorRole", "muted")
+        hint.setWordWrap(True)
         col.addWidget(hint)
 
         self._verify_zone = IsoDropZone()
@@ -2772,6 +2847,7 @@ class MainWindow(QMainWindow):
         )
         hint.setObjectName("capLabel")
         hint.setProperty("colorRole", "muted")
+        hint.setWordWrap(True)
         self._raw_hint = hint
         col.addWidget(hint)
 
@@ -2825,6 +2901,7 @@ class MainWindow(QMainWindow):
         )
         queue_hint.setObjectName("capLabel")
         queue_hint.setProperty("colorRole", "muted")
+        queue_hint.setWordWrap(True)
         queue_header.addWidget(queue_title)
         queue_header.addStretch()
         queue_header.addWidget(queue_hint)
@@ -2875,6 +2952,7 @@ class MainWindow(QMainWindow):
         )
         steps.setObjectName("capLabel")
         steps.setProperty("colorRole", "muted")
+        steps.setWordWrap(True)
         col.addWidget(steps)
 
         self._done_bar = QFrame()
@@ -2975,6 +3053,12 @@ class MainWindow(QMainWindow):
             (self._mode_combo, "write_mode"),
             (self._buffer_combo, "chunk_size_mb"),
         ):
+            # Long items (e.g. "Auto (GPT for UEFI, MBR for legacy)")
+            # must not pin the window's minimum width; the combo still
+            # expands to fill its row when space allows.
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
             value = settings.get(key)
             index = combo.findData(value)
             if index >= 0:

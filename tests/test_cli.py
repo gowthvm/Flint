@@ -305,11 +305,9 @@ def test_run_worker_emits_flint_progress_lines(monkeypatch, capsys):
             self.finished.emit(True, "ok")
 
     app = QCoreApplication([])
-    try:
-        worker = _FakeWorker()
-        ok, message = cli._run_worker(worker, "test")
-    finally:
-        app = None
+    worker = _FakeWorker()
+    ok, message = cli._run_worker(worker, "test")
+    assert QCoreApplication.instance() is app
     assert ok and message == "ok"
     out = capsys.readouterr().out
     assert "FLINT 100.0 42.5MB/s ETA 0s" in out
