@@ -68,13 +68,14 @@ from PyQt6.QtWidgets import (
 )
 
 from core import checksum as checksum_mod
+from core import fleet, settings
 from core import iso as iso_mod
-from core import settings
 from core.backup import BackupWorker
 from core.bootcheck import probe_bootability
 from core.clone import CloneWorker
 from core.drives import DriveDetector, DrivePoller
 from core.eject import eject_drive
+from core.fleet import FleetSession
 from core.history import (
     append_history,
     clear_history,
@@ -1090,6 +1091,10 @@ class MainWindow(QMainWindow):
         self._queue_active = False
         self._queue_ok = 0
         self._queue_last_succeeded = False
+        self._fleet: FleetSession | None = None
+        self._fleet_busy = False
+        self._fleet_image_index = 0
+        self._fleet_drive: dict[str, Any] | None = None
         self._update_checker: UpdateCheckWorker | None = None
         self._update_downloader: UpdateDownloadWorker | None = None
         self._pending_update_path = ""
@@ -1165,6 +1170,8 @@ class MainWindow(QMainWindow):
             self._queue_remove_btn,
             self._queue_clear_btn,
             self._flash_queue_btn,
+            self._fleet_toggle,
+            self._fleet_stop_btn,
         ]
 
         # Keep primary action states in sync with selections and busy state
@@ -1769,6 +1776,7 @@ class MainWindow(QMainWindow):
         if self._busy():
             return
         self._drives = drives
+        self._fleet_tick()
         if self._current_drive is not None:
             selected = next(
                 (
@@ -2931,6 +2939,43 @@ class MainWindow(QMainWindow):
         queue_buttons.addStretch()
         queue_buttons.addWidget(self._flash_queue_btn)
         queue_col.addLayout(queue_buttons)
+
+        fleet_row = QHBoxLayout()
+        fleet_row.setSpacing(8)
+        self._fleet_toggle = ToggleSwitch(False)
+        self._fleet_toggle.setObjectName("fleetToggle")
+        self._fleet_toggle.toggled.connect(self._on_fleet_toggled)
+        fleet_label = QLabel("Fleet mode")
+        fleet_label.setObjectName("capLabel")
+        fleet_label.setProperty("colorRole", "muted")
+        fleet_hint = QLabel(
+            "write the queue to every drive you plug in, one after another"
+        )
+        fleet_hint.setObjectName("capLabel")
+        fleet_hint.setProperty("colorRole", "muted")
+        fleet_hint.setWordWrap(True)
+        fleet_row.addWidget(self._fleet_toggle)
+        fleet_row.addWidget(fleet_label)
+        fleet_row.addWidget(fleet_hint, 1)
+        queue_col.addLayout(fleet_row)
+
+        self._fleet_banner = QFrame()
+        self._fleet_banner.setObjectName("block")
+        self._fleet_banner.setVisible(False)
+        fleet_banner_row = QHBoxLayout(self._fleet_banner)
+        fleet_banner_row.setContentsMargins(12, 8, 12, 8)
+        fleet_banner_row.setSpacing(6)
+        self._fleet_label = QLabel("")
+        self._fleet_label.setObjectName("fleetLabel")
+        self._fleet_label.setProperty("colorRole", "label")
+        self._fleet_label.setWordWrap(True)
+        self._fleet_stop_btn = QPushButton("Stop")
+        self._fleet_stop_btn.setObjectName("ghost")
+        self._fleet_stop_btn.clicked.connect(self._on_fleet_stop_clicked)
+        fleet_banner_row.addWidget(self._fleet_label, 1)
+        fleet_banner_row.addWidget(self._fleet_stop_btn)
+        queue_col.addWidget(self._fleet_banner)
+
         self._queue_block = queue_block
         col.addWidget(queue_block)
 
@@ -4341,24 +4386,40 @@ class MainWindow(QMainWindow):
             self._mark_queue_item(index, "pending")
         self._start_queue_item(0)
 
-    def _start_queue_item(self, index: int) -> None:
-        if index >= len(self._queue_items):
+    def _start_queue_item(
+        self, index: int, drive: dict[str, Any] | None = None
+    ) -> None:
+        images = (
+            self._fleet.images
+            if self._fleet is not None and self._fleet_busy
+            else self._queue_items
+        )
+        if index >= len(images):
             return
-        image = self._queue_items[index]
-        drive = self._current_drive
-        if drive is None:
-            self._fail_queue("no drive selected")
+        image = images[index]
+        selected: dict[str, Any] | None = (
+            drive if drive is not None else self._current_drive
+        )
+        if selected is None:
+            if self._fleet_busy:
+                self._disarm_fleet("no drive available")
+            else:
+                self._fail_queue("no drive selected")
             return
-        self._mark_queue_item(index, "flashing")
+        if not (self._fleet is not None and self._fleet_busy):
+            self._mark_queue_item(index, "flashing")
         # Per-item safety: an unreadable or mismatching sidecar blocks the
         # item cheaply (digest unknown here; the writer hashes the image
         # itself during verification).
         status, _detail = checksum_mod.check_sidecar(image, None)
         if status in ("error", "mismatch"):
-            self._fail_queue(f"checksum problem on {image}")
+            if self._fleet_busy:
+                self._disarm_fleet(f"checksum problem on {image}")
+            else:
+                self._fail_queue(f"checksum problem on {image}")
             return
-        letters = drive.get("letters") or (
-            [drive["letter"]] if drive.get("letter") else []
+        letters = selected.get("letters") or (
+            [selected["letter"]] if selected.get("letter") else []
         )
         expert = bool(settings.get("expert_mode"))
         writer_kwargs = {
@@ -4381,7 +4442,11 @@ class MainWindow(QMainWindow):
                 }
             )
         self._begin_write(
-            image, self._drive_path_for(drive) or "", letters, writer_kwargs, drive
+            image,
+            self._drive_path_for(selected) or "",
+            letters,
+            writer_kwargs,
+            selected,
         )
 
     def _fail_queue(self, reason: str) -> None:
@@ -4447,6 +4512,145 @@ class MainWindow(QMainWindow):
                 ),
                 buttons=[("Close", "primary", "close")],
             )
+
+    def _on_fleet_toggled(self, checked: bool) -> None:
+        if checked:
+            self._arm_fleet()
+        else:
+            self._disarm_fleet()
+
+    def _on_fleet_stop_clicked(self) -> None:
+        if self._fleet_busy:
+            self._on_cancel_clicked()
+        else:
+            self._disarm_fleet("Fleet mode stopped")
+
+    def _arm_fleet(self) -> None:
+        if self._fleet is not None:
+            return
+        images = self._queue_images()
+        if not images:
+            self._fleet_toggle.setChecked(False)
+            dialogs.inform(
+                self,
+                kind="warning",
+                title="Fleet mode",
+                message="Add images to the queue first.",
+            )
+            return
+        if self._busy():
+            self._fleet_toggle.setChecked(False)
+            return
+        typed, accepted = dialogs.input_text(
+            self,
+            title="Arm fleet mode?",
+            message=(
+                "Fleet mode writes every image in the queue to EVERY "
+                "removable drive you plug in, automatically, erasing all "
+                "existing data on each one.\n\n"
+                f"{len(images)} image"
+                f"{'s' if len(images) != 1 else ''} queued.\n\n"
+                "Type ARM to arm fleet mode."
+            ),
+            placeholder="ARM",
+        )
+        if not accepted or typed.strip().upper() != "ARM":
+            self._fleet_toggle.setChecked(False)
+            return
+        self._fleet = FleetSession(images=images)
+        self._fleet_busy = False
+        self._fleet_image_index = 0
+        self._fleet_drive = None
+        self._fleet_banner.setVisible(True)
+        self._fleet_update_banner(
+            "Armed \u2014 waiting for a drive that fits the queue\u2026"
+        )
+        self._fleet_tick()
+
+    def _disarm_fleet(self, reason: str | None = None) -> None:
+        if self._fleet is None and not self._fleet_busy:
+            return
+        was_busy = self._fleet_busy
+        self._fleet = None
+        self._fleet_busy = False
+        self._fleet_image_index = 0
+        self._fleet_drive = None
+        self._fleet_banner.setVisible(False)
+        if self._fleet_toggle.isChecked():
+            self._fleet_toggle.setChecked(False)
+        if reason and not was_busy:
+            self._progress.set_error(reason)
+
+    def _fleet_tick(self) -> None:
+        session = self._fleet
+        if session is None:
+            return
+        if self._fleet_busy or self._writing:
+            return
+        if session.expired():
+            self._disarm_fleet()
+            dialogs.inform(
+                self,
+                kind="info",
+                title="Fleet mode",
+                message=(
+                    "Fleet mode expired after an hour without activity. "
+                    "Re-arm to continue flashing drives."
+                ),
+            )
+            return
+        drive = fleet.pick_candidate(self._drives, session)
+        if drive is not None:
+            self._fleet_start_drive(drive)
+
+    def _fleet_start_drive(self, drive: dict[str, Any]) -> None:
+        self._fleet_drive = drive
+        self._fleet_image_index = 0
+        self._fleet_busy = True
+        name = drive.get("model") or drive.get("name") or "the drive"
+        self._fleet_update_banner(f"Writing to {name}\u2026")
+        self._start_queue_item(0, drive)
+
+    def _fleet_finish_image(self, succeeded: bool) -> None:
+        session = self._fleet
+        if session is None or not self._fleet_busy:
+            return
+        self._fleet_busy = False
+        drive = self._fleet_drive
+        if not succeeded:
+            self._fleet_drive = None
+            self._disarm_fleet()
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Fleet stopped",
+                message=(
+                    "A flash failed, so fleet mode stopped. Fix the problem "
+                    "and re-arm to continue with the remaining drives."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+            return
+        if drive is None:
+            self._disarm_fleet()
+            return
+        self._fleet_image_index += 1
+        if self._fleet_image_index < len(session.images):
+            self._fleet_busy = True
+            name = drive.get("model") or drive.get("name") or "the drive"
+            self._fleet_update_banner(f"Writing to {name}\u2026")
+            self._start_queue_item(self._fleet_image_index, drive)
+            return
+        session.mark_flashed(drive)
+        self._fleet_drive = None
+        self._fleet_image_index = 0
+        self._fleet_update_banner(
+            f"{session.done_count} done \u2014 waiting for the next drive\u2026"
+        )
+        self._fleet_tick()
+
+    def _fleet_update_banner(self, text: str) -> None:
+        self._fleet_label.setText(text)
 
     def _start_drive_operation(self, worker: Any) -> None:
         """Common busy-state setup for backup/clone operations."""
@@ -4961,9 +5165,10 @@ class MainWindow(QMainWindow):
             title = "Flash failed"
             detail = self._friendly_error(error_text or "Failed")
 
-        # Per-item popups are suppressed while a queue is running; the
-        # queue logic shows a single summary at the end instead.
-        if not self._queue_active:
+        # Per-item popups are suppressed while a queue or fleet write is
+        # running; the queue logic shows a single summary at the end and
+        # fleet reports progress in its banner instead.
+        if not self._queue_active and not self._fleet_busy:
             if succeeded:
                 result = dialogs.completion(
                     self, kind=kind, title=title, message=detail
@@ -4992,3 +5197,9 @@ class MainWindow(QMainWindow):
         if self._queue_active:
             self._queue_last_succeeded = succeeded
             self._maybe_start_next_queue_item()
+        if self._fleet_busy:
+            self._fleet_finish_image(succeeded)
+        elif self._fleet is not None and succeeded and target is not None:
+            # A manual flash finished while fleet is armed: stamp the
+            # drive so the session does not flash it again.
+            self._fleet.mark_flashed(target)
