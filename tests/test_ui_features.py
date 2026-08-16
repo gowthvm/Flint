@@ -170,6 +170,23 @@ def test_app_icon_loaded_from_flint_ico(qapp, tmp_path):
         w._shutdown()
 
 
+def test_drive_chip_labels_keep_readable_width(qapp, tmp_path):
+    """The chip must never collapse: its labels need a real minimum width
+    and a growth-friendly policy inside the fixed-width sidebar."""
+    from PyQt6.QtWidgets import QSizePolicy
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        for label in (w._drive_name, w._drive_sub):
+            assert label.minimumSizeHint().width() > 0
+            assert (
+                label.sizePolicy().horizontalPolicy()
+                != QSizePolicy.Policy.Ignored
+            )
+    finally:
+        w._shutdown()
+
+
 def test_flash_without_drive_errors_when_none_detected(qapp, tmp_path):
     w = _make_window(qapp, tmp_path, seed={"expert_mode": False})
     try:

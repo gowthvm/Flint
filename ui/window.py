@@ -1430,20 +1430,13 @@ class MainWindow(QMainWindow):
         info.setSpacing(1)
         self._drive_name = QLabel("No drive detected")
         self._drive_name.setObjectName("driveName")
-        self._drive_name.setSizePolicy(
-            QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        )
         self._drive_sub = QLabel("")
         self._drive_sub.setObjectName("driveSub")
-        self._drive_sub.setSizePolicy(
-            QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        )
         info.addWidget(self._drive_name)
         info.addWidget(self._drive_sub)
 
         row.addWidget(self._chip_dot, 0, Qt.AlignmentFlag.AlignTop)
-        row.addLayout(info)
-        row.addStretch()
+        row.addLayout(info, 1)
         return chip
 
     def _show_drive_picker(self) -> None:
