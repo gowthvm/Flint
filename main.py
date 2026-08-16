@@ -12,7 +12,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication
 
-from core import settings
+from core import cli, settings
 from core.log import setup_logging
 from ui import dialogs
 from ui.style import build_style
@@ -196,12 +196,18 @@ def _maybe_show_crash_report(window: MainWindow) -> None:
 def main() -> int:
     _log(f"start: pid={os.getpid()} argv={sys.argv}")
     _install_crash_logging()
-    if "--cli" in sys.argv:
+    args = sys.argv[1:]
+    if "--cli" in args or (
+        args
+        and (
+            args[0] in cli.TOP_LEVEL_COMMANDS
+            or args[0] in ("--version", "--help", "-h")
+        )
+    ):
         # Headless mode: no elevation prompt loop, no single-instance lock,
         # no window. Exit codes and machine-readable output come from the
-        # cli module.
-        from core import cli
-
+        # cli module (modern top-level commands, the --cli compat alias and
+        # the global --version/--help flags all detour here).
         return cli.main()
     _ensure_admin()
     app = QApplication(sys.argv)
