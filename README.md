@@ -22,8 +22,8 @@ explicit typed confirmation before any destructive action.
 - SHA-256 sidecar files (`image.iso.sha256`) validate the image before flashing
 - Wipe with selectable standards: zero fill, single random pass (NIST), or
   DoD 5220.22-M (three passes: zeros, ones, random)
-- Headless/scriptable mode via `--cli` (flash, verify, wipe, backup, clone,
-  and multi-image queue) for automation and IT imaging workflows
+- Headless/scriptable mode (`flint flash`, `verify`, `wipe`, `backup`,
+  `clone`, `queue`, `flash-all`) for automation and IT imaging workflows
 
 ## Download
 
@@ -130,26 +130,50 @@ corrupt or wrong image can never erase a drive by accident.
 
 ## Headless mode
 
-The packaged executable runs scripts without a window:
+Every feature is available headless for imaging labs, scripts and CI.
+`flint` below is the `flint.exe` you downloaded. Commands that need it
+relaunch elevated automatically (one UAC prompt); `list`, `doctor` and
+`completions` need no privileges at all. The older `--cli` prefix is still
+accepted as a compatibility alias:
 
 ```text
-flint.exe --cli flash --image image.iso --drive E: --confirm <serial> [--verify]
-flint.exe --cli verify --drive <serial> [--sha256 <hex> --image image.iso]
-flint.exe --cli wipe --drive <serial> --confirm <serial> [--method zero|random|dod]
-flint.exe --cli backup --drive <serial> --out backup.img
-flint.exe --cli clone --from <serial> --to <serial> --confirm <serial of --to>
-flint.exe --cli queue --file list.txt --drive <serial> --confirm <serial>
+flint list
+flint flash  --image image.iso --drive E: --confirm <serial> [--verify]
+flint verify --drive E: [--sha256 <hex> --image image.iso]
+flint wipe   --drive E: --confirm <serial> [--method zero|random|nist|dod]
+flint backup --drive E: --out backup.img [--confirm <serial>]
+flint clone  --from E: --to F: --confirm <serial of --to>
+flint queue  --file list.txt --drive E: --confirm <serial>
+flint flash-all --image image.iso [--image image2.iso ...] --confirm ARM [--timeout <seconds>]
+flint doctor
+flint completions | Out-File -Append $PROFILE
+flint help [<command>]
 ```
 
-- `--confirm` must match the target drive's full serial number — the headless
-  equivalent of the GUI's typed confirmation.
+- `--drive` accepts a serial number, volume letter (`E:`) or physical path
+  (`\\.\PHYSICALDRIVE1`); it only selects the drive. `--confirm` is the
+  safety check: it must match the full serial of the drive being destroyed,
+  validated against the live drive list — a wrong serial can never match
+  another drive. `flint list` prints every detected drive with the exact
+  serial `--confirm` expects.
+- `flash-all` is fleet mode: it writes every `--image` to every drive that
+  is — or becomes — plugged in, until the time budget expires (default
+  3600 s). Arming requires the literal word `ARM`.
+- When `--confirm` is omitted on an interactive terminal, the serial is
+  prompted for; a piped command without `--confirm` is refused, never
+  guessed.
 - `verify` without a digest runs a read-only bad-block scan; with `--sha256`
   it compares only the image's byte range against the drive, so `--image` is
   required to know how many bytes to check.
 - The queue file holds one image path per line (`#` comments allowed); images
   are flashed to the same drive in order, stopping on the first failure.
-- Output is line-oriented with a final `RESULT ok|fail|canceled: …` line.
-  Exit codes: `0` ok, `1` failure, `2` cancelled, `3` usage/validation,
+- `--json` switches all output to NDJSON (progress, results, drive lists);
+  `FLINT_PROGRESS=json` is equivalent and `FLINT_VERIFY=1` makes `flash`
+  verify by default.
+- **Streams are split**: data and the final `RESULT ok|fail|canceled: …`
+  line go to stdout; `FLINT <pct> <speed>MB/s ETA <s>s` progress and notes
+  go to stderr, so scripts capture stdout as pure data without `2>&1` noise.
+- Exit codes: `0` ok, `1` failure, `2` cancelled, `3` usage/validation,
   `4` elevation denied.
 
 ## Signing
