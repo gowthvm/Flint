@@ -66,7 +66,55 @@ _METHODS = ("zero", "random", "nist", "dod")
 
 
 def _print(line: str) -> None:
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except OSError:
+        pass
+
+
+def _ensure_cli_stdio() -> None:
+    """Give the packaged (windowed) build real stdio for CLI mode.
+
+    PyInstaller builds flint with ``console=False``, so the GUI never
+    flashes a console. CLI invocations launched from PowerShell or
+    Explorer then have no stdout handle at all and ``print`` raises
+    OSError under Python 3.14's stricter stdio handling. When the std
+    handles are not real files or pipes (cmd-style redirection), attach
+    to the parent console instead so CLI output is visible. In dev there
+    is a real console and nothing happens.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import msvcrt
+
+        for stream in (sys.stdout, sys.stderr):
+            fd = stream.fileno()
+            handle = msvcrt.get_osfhandle(fd)
+            if handle != -1 and ctypes.windll.kernel32.GetFileType(handle) in (
+                1,
+                3,
+            ):
+                return
+    except Exception:
+        pass
+    try:
+        # ATTACH_PARENT_PROCESS: reuse the console of the process that
+        # launched us, then reopen the standard streams onto it.
+        if ctypes.windll.kernel32.AttachConsole(0xFFFFFFFF):
+            # These streams must outlive the function; they become
+            # sys.stdout/stderr/stdin for the rest of the process.
+            sys.stdout = open(  # noqa: SIM115
+                "CONOUT$", "w", encoding="utf-8", errors="replace"
+            )
+            sys.stderr = open(  # noqa: SIM115
+                "CONOUT$", "w", encoding="utf-8", errors="replace"
+            )
+            sys.stdin = open(  # noqa: SIM115
+                "CONIN$", "r", encoding="utf-8", errors="replace"
+            )
+    except Exception:
+        pass
 
 
 def _opts(argv: list[str]) -> tuple[dict[str, str | bool], str | None]:
@@ -568,6 +616,7 @@ _COMMANDS = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_cli_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--cli" in argv:
         argv.remove("--cli")

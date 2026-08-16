@@ -4,4 +4,4 @@ Keep in sync with ``version_info.txt`` (PyInstaller metadata) and
 ``setup.py`` when bumping.
 """
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
