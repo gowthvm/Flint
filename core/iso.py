@@ -1,6 +1,7 @@
 """ISO image inspection helpers (hybrid detection, content scanning)."""
 
 import os
+from collections.abc import Iterator
 from typing import BinaryIO, TypedDict
 
 _SECTOR = 512
@@ -125,16 +126,29 @@ def _parse_dir_record(buf: bytes, off: int) -> _DirRecord | None:
     }
 
 
-def _walk_directory(
+_DIR_FRAGMENT_LIMIT = 64
+
+
+def _walk_entries(
     f: BinaryIO,
     extent: int,
     size: int,
     depth: int,
-    out: set[str],
     parent: str,
     parent_extent: int,
     budget: list[int],
-) -> None:
+) -> Iterator[tuple[str, _DirRecord]]:
+    """Yield ``(path, record)`` for every entry in a directory extent.
+
+    Reads every logical sector of the extent — directories routinely span
+    several 2048-byte sectors, and the extent size in the directory record
+    is not always reliable (some builders hardcode 2048), so reading
+    continues while a sector still yields records, with one tolerant extra
+    sector. Multi-extent continuation fragments (a ``..`` record whose
+    extent differs from the parent's) are followed, bounded both in
+    fragments and total entries so hostile images cannot cause unbounded
+    work.
+    """
     if (
         depth > _MAX_DEPTH
         or size <= 0
@@ -142,11 +156,16 @@ def _walk_directory(
         or budget[0] <= 0
     ):
         return
-    current = extent
     sectors = (size + _LOGICAL_SECTOR - 1) // _LOGICAL_SECTOR
-    # +1 tolerance for a trailing continuation fragment
-    for _ in range(sectors + 1):
+    current = extent
+    in_fragment = 0
+    fragments = 0
+    while True:
+        if budget[0] <= 0:
+            return
         data = _read_logical(f, current)
+        if not data:
+            return
         off = 0
         parent_rec: _DirRecord | None = None
         while off + 33 <= len(data):
@@ -161,26 +180,37 @@ def _walk_directory(
                 if budget[0] <= 0:
                     return
                 path = f"{parent}/{name.split(';')[0]}".lstrip("/").lower()
-                out.add(path)
+                yield path, rec
                 if rec["is_dir"] and rec["extent"] > 0:
-                    _walk_directory(
+                    yield from _walk_entries(
                         f,
                         rec["extent"],
                         rec["size"],
                         depth + 1,
-                        out,
                         path,
                         current,
                         budget,
                     )
             off += rec["length"]
-        # A '..' record whose extent is not the parent means the directory
-        # continues into the next fragment at that extent (multi-extent).
-        if parent_rec is None or parent_rec["extent"] <= 0:
-            return
-        if parent_rec["extent"] == parent_extent:
-            return
-        current = parent_rec["extent"]
+        in_fragment += 1
+        if (
+            parent_rec is not None
+            and parent_rec["extent"] > 0
+            and parent_rec["extent"] != parent_extent
+        ):
+            # Multi-extent continuation: '..' points at the next fragment.
+            fragments += 1
+            if fragments > _DIR_FRAGMENT_LIMIT:
+                return
+            current = parent_rec["extent"]
+            in_fragment = 0
+            continue
+        # Normal contiguous extent: keep reading the next sector while it
+        # still contains records.
+        if off > 0 and in_fragment < sectors + 1:
+            current += 1
+            continue
+        return
 
 
 def list_iso_paths(path: str) -> set[str]:
@@ -198,16 +228,16 @@ def list_iso_paths(path: str) -> set[str]:
             root = _parse_dir_record(pvd, _PVD_ROOT_RECORD_OFFSET)
             if root is None:
                 return out
-            _walk_directory(
+            for entry_path, _rec in _walk_entries(
                 f,
                 root["extent"],
                 root["size"],
                 0,
-                out,
                 "",
                 root["extent"],
                 [_MAX_RECORDS],
-            )
+            ):
+                out.add(entry_path)
     except OSError:
         return out
     return out
@@ -229,51 +259,17 @@ def largest_iso_file_size(path: str) -> int:
             root = _parse_dir_record(pvd, _PVD_ROOT_RECORD_OFFSET)
             if root is None:
                 return -1
-            budget = [_MAX_RECORDS]
-
-            def walk(
-                extent: int, size: int, depth: int, parent_extent: int
-            ) -> None:
-                nonlocal largest
-                if (
-                    depth > _MAX_DEPTH
-                    or size <= 0
-                    or size > _MAX_DIR_BYTES
-                    or budget[0] <= 0
-                ):
-                    return
-                sectors = (size + _LOGICAL_SECTOR - 1) // _LOGICAL_SECTOR
-                for _ in range(sectors + 1):
-                    data = _read_logical(f, extent)
-                    off = 0
-                    up: int | None = None
-                    while off + 33 <= len(data):
-                        rec = _parse_dir_record(data, off)
-                        if rec is None:
-                            break
-                        if rec["name"] == "..":
-                            up = rec["extent"]
-                        elif rec["name"] not in ("", ".", "\x00"):
-                            budget[0] -= 1
-                            if budget[0] <= 0:
-                                return
-                            if rec["is_dir"] and rec["extent"] > 0:
-                                walk(
-                                    rec["extent"],
-                                    rec["size"],
-                                    depth + 1,
-                                    extent,
-                                )
-                            else:
-                                largest = max(largest, rec["size"])
-                        off += rec["length"]
-                    if up is None or up <= 0:
-                        return
-                    if up == parent_extent:
-                        return
-                    extent = up
-
-            walk(root["extent"], root["size"], 0, root["extent"])
+            for _entry_path, rec in _walk_entries(
+                f,
+                root["extent"],
+                root["size"],
+                0,
+                "",
+                root["extent"],
+                [_MAX_RECORDS],
+            ):
+                if not rec["is_dir"]:
+                    largest = max(largest, rec["size"])
     except OSError:
         return -1
     return largest

@@ -39,8 +39,10 @@ elevation denied.
 import ctypes
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -318,7 +320,13 @@ def _command_help(name: str) -> str:
 
 def ensure_elevated(argv: list[str]) -> int | None:
     """Return None when already elevated (or elevation is unavailable),
-    otherwise relaunch elevated and return the child's exit code."""
+    otherwise relaunch elevated and return the child's exit code.
+
+    The child's own exit codes pass through unchanged (1 fail, 2 cancelled,
+    3 usage) and its stdout/stderr are relayed verbatim, so scripts keep
+    the documented contract and always receive a RESULT line. Only a
+    declined or denied UAC prompt itself maps to EXIT_NO_ADMIN.
+    """
     try:
         if ctypes.windll.shell32.IsUserAnAdmin():
             return None
@@ -326,16 +334,24 @@ def ensure_elevated(argv: list[str]) -> int | None:
         return None
     _eprint("administrator privileges required - relaunching elevated...")
     args = subprocess.list2cmdline(argv)
-    command = (
-        "$p = Start-Process -FilePath '"
-        + sys.executable.replace("'", "''")
-        + "' -ArgumentList '"
-        + args.replace("'", "''")
-        + "' -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
-    )
+    exe = sys.executable.replace("'", "''")
+    tmp = tempfile.mkdtemp(prefix="flint-elev-")
+    out_file = os.path.join(tmp, "stdout.txt")
+    err_file = os.path.join(tmp, "stderr.txt")
     try:
+        ps = (
+            "$ErrorActionPreference = 'Stop'; "
+            "try { "
+            f"$p = Start-Process -FilePath '{exe}' "
+            f"-ArgumentList '{args.replace(chr(39), chr(39) * 2)}' "
+            f"-Verb RunAs -Wait -PassThru "
+            f"-RedirectStandardOutput '{out_file}' "
+            f"-RedirectStandardError '{err_file}'; "
+            "exit $p.ExitCode "
+            "} catch { exit 255 }"
+        )
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True,
             text=True,
             check=False,
@@ -343,13 +359,33 @@ def ensure_elevated(argv: list[str]) -> int | None:
     except OSError as exc:
         _eprint(f"could not relaunch elevated: {exc}")
         return EXIT_NO_ADMIN
-    if proc.returncode != 0:
-        _eprint("elevation denied or failed (UAC prompt not accepted?)")
-        return EXIT_NO_ADMIN
+    stdout_text = ""
+    stderr_text = ""
     try:
-        return int((proc.stdout or "").strip() or EXIT_OK)
-    except ValueError:
-        return EXIT_OK
+        with open(out_file, encoding="utf-8", errors="replace") as fh:
+            stdout_text = fh.read()
+    except OSError:
+        pass
+    try:
+        with open(err_file, encoding="utf-8", errors="replace") as fh:
+            stderr_text = fh.read()
+    except OSError:
+        pass
+    try:
+        shutil.rmtree(tmp, ignore_errors=True)
+    except OSError:
+        pass
+    if stdout_text:
+        _print(stdout_text.rstrip("\r\n"))
+    if stderr_text:
+        _eprint(stderr_text.rstrip("\r\n"))
+    if proc.returncode == 255:
+        _eprint("elevation denied (UAC prompt not accepted)")
+        return EXIT_NO_ADMIN
+    if proc.returncode in (EXIT_OK, EXIT_FAIL, EXIT_CANCELLED, EXIT_USAGE):
+        return proc.returncode
+    _eprint(f"elevation relaunch failed (exit {proc.returncode})")
+    return EXIT_NO_ADMIN
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +571,9 @@ def _iso_digest(image: str) -> str | None:
     if not ok:
         _conclude_fail_now(result)
         return None
-    _print(f"SHA256 {result}")
+    # Informational only: stderr keeps stdout a pure data stream, which
+    # --json mode depends on.
+    _eprint(f"SHA256 {result}")
     return result
 
 
@@ -599,14 +637,19 @@ def _cmd_flash(opts: dict[str, object]) -> int:
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
-        _result("fail", "drive not found; detected drives:", EXIT_USAGE)
-        for d in drives:
-            _print(
-                f"  serial={_serial_of(d)!r} "
-                f"path={d.get('physical_path')} "
-                f"letters={d.get('letters')}"
-            )
-        return EXIT_USAGE
+        if _JSON:
+            # Keep the NDJSON contract intact: the drive list is emitted as
+            # one JSON object, never as raw text lines.
+            _emit_json(type="drives", drives=_drives_json(drives))
+        else:
+            _print("drive not found; detected drives:")
+            for d in drives:
+                _print(
+                    f"  serial={_serial_of(d)!r} "
+                    f"path={d.get('physical_path')} "
+                    f"letters={d.get('letters')}"
+                )
+        return _result("fail", "drive not found; detected drives:", EXIT_USAGE)
     issue = _confirm_drive(drive, str(opts.get("confirm", "")))
     if issue:
         return _result("fail", issue, EXIT_USAGE)
@@ -1035,16 +1078,19 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--cli" in argv:
         argv.remove("--cli")
-    if "--version" in argv:
-        from core.version import APP_VERSION
-
-        _print(f"Flint {APP_VERSION}")
-        return EXIT_OK
     if os.environ.get("FLINT_PROGRESS", "").strip().lower() == "json":
         _JSON = True
     if "--json" in argv:
         _JSON = True
         argv = [arg for arg in argv if arg != "--json"]
+    if argv == ["--version"]:
+        # Only a bare top-level --version prints the version. Anywhere else
+        # it is an unknown option, so `flint flash ... --version` can never
+        # silently turn a destructive command into an exit-0 no-op.
+        from core.version import APP_VERSION
+
+        _print(f"Flint {APP_VERSION}")
+        return EXIT_OK
     if not argv:
         _print(_usage())
         return EXIT_OK

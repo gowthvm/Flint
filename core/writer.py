@@ -577,7 +577,14 @@ class UsbWriter(QThread):
             self.verify_result.emit(False, "cancelled", result)
             self.finished.emit(False, "cancelled")
             return
-        self.verify_result.emit(result["ok"], self._verify_message(result), result)
+        message = self._verify_message(result)
+        self.verify_result.emit(result["ok"], message, result)
+        if not result["ok"]:
+            # A failed verification is a failed flash. Consumers that only
+            # listen to ``finished`` must never see a (True, "") success
+            # after the write-back check reported problems.
+            self._finished = True
+            self.finished.emit(False, message)
 
     def _verify_message(self, result: dict[str, Any]) -> str:
         mismatches = len(result["mismatches"])

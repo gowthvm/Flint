@@ -3816,6 +3816,12 @@ class MainWindow(QMainWindow):
             )
             self._finish_flash(True, "", None)
             return
+        if not ok and self._verification_in_writer and self._verify_handled:
+            # The writer's own verification already presented its outcome
+            # (mismatch/retry dialog); this finished signal is the tail of
+            # that flow, not an independent write failure. Never report it
+            # a second time.
+            return
         if not ok:
             self._finish_flash(False, message or "Write failed", None)
             return
