@@ -187,7 +187,49 @@ def test_queue_empty_file(tmp_path, capsys):
     queue_file.write_text("# nothing here\n\n")
     rc = cli._cmd_queue({"file": str(queue_file)})
     assert rc == cli.EXIT_USAGE
-    assert "no images" in capsys.readouterr().out
+    assert "no valid images" in capsys.readouterr().out
+
+
+def test_queue_happy_path_with_quoted_paths(tmp_path, monkeypatch, capsys):
+    first = tmp_path / "one.iso"
+    second = tmp_path / "two.iso"
+    first.write_bytes(b"1")
+    second.write_bytes(b"2")
+    queue_file = tmp_path / "queue.txt"
+    queue_file.write_text(f'"{first}"\n"{second}"\n')
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    started: list[str] = []
+
+    def _fake_run(worker, label):
+        started.append(worker.iso_path)
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _fake_run)
+    rc = cli._cmd_queue(
+        {"file": str(queue_file), "drive": "E", "confirm": "ABC1234"}
+    )
+    assert rc == cli.EXIT_OK
+    assert started == [str(first), str(second)]
+
+
+def test_queue_happy_path_with_relative_paths(tmp_path, monkeypatch, capsys):
+    img = tmp_path / "a.iso"
+    img.write_bytes(b"data")
+    queue_file = tmp_path / "queue.txt"
+    queue_file.write_text("a.iso\n")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    started: list[str] = []
+
+    def _fake_run(worker, label):
+        started.append(worker.iso_path)
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _fake_run)
+    rc = cli._cmd_queue(
+        {"file": str(queue_file), "drive": "E", "confirm": "ABC1234"}
+    )
+    assert rc == cli.EXIT_OK
+    assert started == [str(img)]
 
 
 def test_queue_flashes_every_image_then_reports_count(
@@ -693,3 +735,36 @@ def test_flash_progress_lines_never_pollute_stdout(tmp_path, monkeypatch, capsys
     assert "FLINT " not in captured.out
     for line in captured.out.splitlines():
         assert line.startswith("RESULT")
+
+
+def test_scan_happy_path(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    from core import verify as verify_mod
+    monkeypatch.setattr(
+        verify_mod,
+        "whole_drive_scan",
+        lambda *a, **kw: {"ok": True, "bad_sectors": [], "digest": "ab", "speed_mbps": 1.0, "drive_size": 1000, "error": ""},
+    )
+    rc = cli.main(["--cli", "scan", "--drive", "E"])
+    assert rc == cli.EXIT_OK
+    assert "scan ok" in capsys.readouterr().out
+
+
+def test_scan_reports_bad_sectors(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    from core import verify as verify_mod
+    monkeypatch.setattr(
+        verify_mod,
+        "whole_drive_scan",
+        lambda *a, **kw: {"ok": False, "bad_sectors": [{"offset": 0, "length": 4096}] * 3, "digest": "", "speed_mbps": 1.0, "drive_size": 1000, "error": ""},
+    )
+    rc = cli.main(["--cli", "scan", "--drive", "E"])
+    assert rc == cli.EXIT_FAIL
+    assert "scan fail" in capsys.readouterr().out
+
+
+def test_scan_drive_not_found(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", list)
+    rc = cli._cmd_scan({"drive": "NOPE"})
+    assert rc == cli.EXIT_USAGE
+    assert "drive not found" in capsys.readouterr().out

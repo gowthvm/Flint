@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 
 IDLE_EXPIRY_SECONDS = 60 * 60
@@ -78,10 +79,54 @@ def drive_fingerprint(drive: dict[str, Any]) -> str | None:
     return str(path) if path else None
 
 
+def was_recently_flashed(
+    drive: dict[str, Any],
+    image_path: str,
+    *,
+    window_hours: int = 24 * 365,
+) -> bool:
+    """Check if a drive was already successfully flashed with this image."""
+    from core.history import load_history
+
+    fp = drive_fingerprint(drive)
+    if not fp:
+        return False
+
+    serial = drive.get("serial") or ""
+    if not serial:
+        return False
+
+    image_name = os.path.basename(image_path)
+    cutoff = datetime.now().astimezone() - timedelta(hours=window_hours)
+
+    try:
+        for entry in load_history():
+            if not entry.get("success"):
+                continue
+            if (entry.get("drive_serial") or "") != serial:
+                continue
+            if entry.get("iso") != image_name:
+                continue
+            ts_str = entry.get("timestamp", "")
+            if not ts_str:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except (ValueError, TypeError):
+                continue
+            if ts >= cutoff:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
 def pick_candidate(
     drives: list[dict[str, Any]],
     session: FleetSession,
     now: float | None = None,
+    skip_flashed: bool = False,
 ) -> dict[str, Any] | None:
     """First drive that has not been flashed yet and fits every image."""
     if session.expired(now):
@@ -96,5 +141,10 @@ def pick_candidate(
         if all(
             session.fits_on_drive(image, drive) for image in session.images
         ):
+            if skip_flashed and any(
+                was_recently_flashed(drive, image)
+                for image in session.images
+            ):
+                continue
             return drive
     return None

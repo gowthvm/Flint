@@ -130,3 +130,69 @@ class TestExpiry:
         now = 1_000.0
         session.last_activity = now - 10
         assert fleet.pick_candidate([_drive()], session, now=now) is not None
+
+
+def test_skip_flashed_drive_skipped(tmp_path, monkeypatch):
+    """A drive with a successful flash record is skipped."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is None
+
+
+def test_flashed_drive_shown_when_skip_disabled(tmp_path, monkeypatch):
+    """Without skip_flashed, previously-flashed drives are still picked."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=False) is d
+
+
+def test_failed_history_does_not_skip(tmp_path, monkeypatch):
+    """A failed flash record does not cause skipping."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": False, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_wrong_image_does_not_skip(tmp_path, monkeypatch):
+    """History for a different image does not cause skipping."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "fedora.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_empty_history_does_not_skip(tmp_path, monkeypatch):
+    """Empty history means nothing to skip."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr("core.history.load_history", list)
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_corrupt_history_does_not_skip(tmp_path, monkeypatch):
+    """Corrupt/unreadable history does not block fleet."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr("core.history.load_history", lambda: (_ for _ in ()).throw(OSError("boom")))
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d

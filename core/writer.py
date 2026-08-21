@@ -568,6 +568,7 @@ class UsbWriter(QThread):
             retries=self.bad_block_retries,
             progress=on_progress,
             is_cancelled=lambda: self._canceled,
+            scan_full_drive=self.bad_block_scan,
         )
         if result["error"] == "cancelled" or self._canceled:
             # The write itself completed; only the verification was

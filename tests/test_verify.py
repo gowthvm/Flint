@@ -440,3 +440,54 @@ def test_verify_options_defaults_off_when_verify_unchecked(qapp, tmp_path):
         assert w._verify_sha_toggle.isChecked()  # default compare mode
     finally:
         w._shutdown()
+
+
+def test_whole_drive_scan_clean(tmp_path):
+    _, device, _ = _write_pair(tmp_path, 200_000, seed=50)
+    result = verify.whole_drive_scan(str(device), chunk_size=64 * 1024)
+    assert result["ok"] is True
+    assert result["bad_sectors"] == []
+    assert result["drive_size"] > 0
+    assert result["digest"] != ""
+
+
+def test_whole_drive_scan_reports_bad_sectors(tmp_path, monkeypatch):
+    _, device, _ = _write_pair(tmp_path, 200_000, seed=51)
+
+    def always_fail(handle, buffer, count, retries, is_cancelled):
+        return None
+
+    monkeypatch.setattr(verify, "_read_chunk", always_fail)
+    result = verify.whole_drive_scan(str(device), chunk_size=64 * 1024)
+    assert result["ok"] is False
+    assert len(result["bad_sectors"]) > 0
+    assert all("offset" in s and "length" in s for s in result["bad_sectors"])
+
+
+def test_verify_device_scan_full_drive(tmp_path):
+    _, device, payload = _write_pair(tmp_path, 300_000, seed=52)
+    result = verify.verify_device(
+        str(device),
+        chunk_size=64 * 1024,
+        scan_full_drive=True,
+    )
+    assert result["ok"] is True
+    assert result["drive_size"] > 0
+    assert result["digest"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_verify_device_scan_full_drive_with_source(tmp_path):
+    payload = _blob(300_000, seed=53)
+    iso = tmp_path / "iso.bin"
+    iso.write_bytes(payload[:200_000])
+    device = tmp_path / "device.bin"
+    device.write_bytes(payload)
+    result = verify.verify_device(
+        str(device),
+        source_iso=str(iso),
+        chunk_size=64 * 1024,
+        scan_full_drive=True,
+    )
+    assert result["ok"] is True
+    assert result["drive_size"] == len(payload)
+    assert result["digest"] == hashlib.sha256(payload).hexdigest()

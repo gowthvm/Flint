@@ -65,8 +65,9 @@ _VALUE_OPTS = {
     "to",
     "sha256",
     "timeout",
+    "retries",
 }
-_FLAG_OPTS = {"verify", "json", "help"}
+_FLAG_OPTS = {"verify", "json", "help", "skip-flashed"}
 
 _METHODS = ("zero", "random", "nist", "dod")
 
@@ -262,7 +263,7 @@ _COMMAND_HELP: dict[str, str] = {
     ),
     "flash-all": (
         "flint flash-all --image <file> [--image <file> ...]\n"
-        "                --confirm ARM [--timeout <seconds>]\n"
+        "                --confirm ARM [--timeout <seconds>] [--skip-flashed]\n"
         "  Fleet mode for scripts: flash every queued image to every drive\n"
         "  that is (or becomes) plugged in, one drive after another, until\n"
         "  the budget expires. A drive is skipped if any image does not fit;\n"
@@ -272,6 +273,7 @@ _COMMAND_HELP: dict[str, str] = {
         "                         (prompted for when run interactively)\n"
         "  --timeout <seconds>    total budget; stop watching after this\n"
         "                         (default 3600); interrupt earlier with Ctrl+C\n"
+        "  --skip-flashed         skip drives already flashed with the same image\n"
         "  Example: flint flash-all --image C:\\img\\agent.iso --confirm ARM\n"
     ),
     "doctor": (
@@ -287,6 +289,12 @@ _COMMAND_HELP: dict[str, str] = {
         "  for flint. Save it to your $PROFILE to get command, option and\n"
         "  live drive-serial completion.\n"
         "  Example: flint completions | Out-File -Append $PROFILE\n"
+    ),
+    "scan": (
+        "flint scan --drive <serial|letter|path> [--retries <1-10>]\n"
+        "  Read every sector on a drive to find unreadable media.\n"
+        "  Read-only; does not modify the drive. No image needed.\n"
+        "  --retries <1-10>   retries per failed read (default 3)\n"
     ),
 }
 
@@ -833,26 +841,51 @@ def _cmd_clone(opts: dict[str, object]) -> int:
     return _result("ok", "clone complete", EXIT_OK)
 
 
+def parse_queue_file(
+    queue_file: str,
+    *,
+    base_dir: str | None = None,
+) -> tuple[list[str], list[str]]:
+    images: list[str] = []
+    warnings: list[str] = []
+    try:
+        with open(queue_file, encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                line = line.lstrip("\ufeff")
+                if not line:
+                    continue
+                line = line.strip('"').strip("'")
+                if not line:
+                    continue
+                line = line.split(" #")[0].strip()
+                if not line:
+                    continue
+                if not os.path.isabs(line):
+                    line = os.path.normpath(os.path.join(base_dir or "", line))
+                if not os.path.isfile(line):
+                    warnings.append(f"queue item not found: {line}")
+                    continue
+                images.append(line)
+    except OSError as exc:
+        warnings.append(f"could not read queue: {exc}")
+    return images, warnings
+
+
 def _cmd_queue(opts: dict[str, object]) -> int:
     """Flash every image listed in a file (one per line, # comments
     allowed) to the same drive, stopping on the first failure."""
     queue_file = str(opts.get("file", ""))
     if not os.path.isfile(queue_file):
         return _result("fail", "--file not found", EXIT_USAGE)
-    images: list[str] = []
-    try:
-        with open(queue_file, encoding="utf-8", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if not os.path.isfile(line):
-                    return _result("fail", f"queue item not found: {line}", EXIT_USAGE)
-                images.append(line)
-    except OSError as exc:
-        return _result("fail", f"could not read queue: {exc}", EXIT_USAGE)
+    base_dir = os.path.dirname(os.path.abspath(queue_file))
+    images, warnings = parse_queue_file(queue_file, base_dir=base_dir)
+    for w in warnings:
+        _eprint(f"  warning: {w}")
     if not images:
-        return _result("fail", "queue file has no images", EXIT_USAGE)
+        return _result("fail", "queue file has no valid images", EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
@@ -915,6 +948,7 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
         return _result("fail", "--timeout must be positive", EXIT_USAGE)
 
     session = FleetSession(images=images)
+    skip = bool(opts.get("skip-flashed"))
     verify = _env_flag("FLINT_VERIFY")
     _eprint(
         f"fleet armed: {len(session.images)} image(s); flashing every "
@@ -924,7 +958,7 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
     try:
         while time.monotonic() < end:
             drives = _detect_drives()
-            drive = pick_candidate(drives, session, now=time.monotonic())
+            drive = pick_candidate(drives, session, now=time.monotonic(), skip_flashed=skip)
             if drive is None:
                 time.sleep(2)
                 continue
@@ -1016,8 +1050,8 @@ _POWERSHELL_COMPLETION = """# flint PowerShell completion
 # Save to $PROFILE:  flint completions | Out-File -Append $PROFILE
 Register-ArgumentCompleter -CommandName flint -Native -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','doctor','completions','help')
-    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--json','--help','--version')
+    $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','doctor','completions','help','scan')
+    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--json','--help','--version','--retries')
     try {
         $raw = & flint list --json 2>$null
         $drives = @()
@@ -1057,6 +1091,65 @@ Register-ArgumentCompleter -CommandName flint -Native -ScriptBlock {
 """
 
 
+def _cmd_scan(opts: dict[str, object]) -> int:
+    from core.verify import whole_drive_scan
+
+    drives = _detect_drives()
+    drive = _resolve_drive(str(opts.get("drive", "")), drives)
+    if drive is None:
+        if _JSON:
+            _emit_json(type="drives", drives=_drives_json(drives))
+        else:
+            _print("drive not found; detected drives:")
+            for d in drives:
+                _print(
+                    f"  serial={_serial_of(d)!r} "
+                    f"path={d.get('physical_path')} "
+                    f"letters={d.get('letters')}"
+                )
+        return _result("fail", "drive not found", EXIT_USAGE)
+    retries_raw = str(opts.get("retries", "3"))
+    try:
+        retries = max(1, min(10, int(retries_raw)))
+    except ValueError:
+        retries = 3
+    _eprint(f"scanning {drive.get('name') or drive.get('model') or drive['physical_path']}...")
+    progress_calls: list[tuple[int, int]] = []
+
+    def on_progress(done: int, total: int) -> None:
+        progress_calls.append((done, total))
+        if total > 0:
+            _eprint(f"FLINT {done / total * 100:.1f}% {done}/{total}")
+
+    result = whole_drive_scan(
+        drive["physical_path"],
+        retries=retries,
+        progress=on_progress,
+    )
+    if _JSON:
+        _emit_json(
+            type="scan",
+            ok=result["ok"],
+            bad_sectors=result["bad_sectors"],
+            drive_size=result["drive_size"],
+            speed_mbps=round(result["speed_mbps"], 1),
+            error=result["error"],
+        )
+    else:
+        if result["ok"]:
+            _print(
+                f"scan ok: no bad sectors "
+                f"({result['drive_size']} bytes, "
+                f"{result['speed_mbps']:.1f} MB/s)"
+            )
+        else:
+            _print(
+                f"scan fail: {len(result['bad_sectors'])} bad sector(s) "
+                f"({result['error']})"
+            )
+    return EXIT_OK if result["ok"] else EXIT_FAIL
+
+
 def _cmd_completions(opts: dict[str, object]) -> int:
     _print(_POWERSHELL_COMPLETION)
     return EXIT_OK
@@ -1073,6 +1166,7 @@ _COMMANDS = {
     "flash-all": _cmd_flash_all,
     "doctor": _cmd_doctor,
     "completions": _cmd_completions,
+    "scan": _cmd_scan,
 }
 
 TOP_LEVEL_COMMANDS = frozenset(_COMMANDS) | {"help"}
@@ -1123,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
         _eprint(_usage())
         return EXIT_USAGE
 
-    if command in ("list", "doctor", "completions"):
+    if command in ("list", "doctor", "completions", "scan"):
         # No privileges needed: skip the UAC relaunch.
         return _COMMANDS[command](opts)
 

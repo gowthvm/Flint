@@ -279,7 +279,8 @@ def test_writer_verify_cancel_reports_cancelled_not_success(tmp_path, monkeypatc
     w.verify_result.connect(lambda ok, msg, res: verify_results.append((ok, msg)))
 
     def fake_verify(device_path, source_iso=None, chunk_size=None,
-                    retries=None, progress=None, is_cancelled=None):
+                    retries=None, progress=None, is_cancelled=None,
+                    scan_full_drive=False):
         # Simulate the user cancelling while the read-back is running.
         w._canceled = True
         return {

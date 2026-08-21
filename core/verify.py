@@ -197,6 +197,7 @@ def verify_device(
     retries: int = 3,
     progress: Callable[[int, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    scan_full_drive: bool = False,
 ) -> dict[str, Any]:
     """Read a device back and verify it against a source image.
 
@@ -227,6 +228,7 @@ def verify_device(
         "bad_sectors": [],
         "digest": "",
         "speed_mbps": 0.0,
+        "drive_size": 0,
         "error": "",
     }
     handle = _open_reader(device_path)
@@ -244,6 +246,7 @@ def verify_device(
                 return result
         else:
             size = os.path.getsize(device_path)
+        result["drive_size"] = size
         iso_size = None
         if source_iso is not None:
             iso_size = os.path.getsize(source_iso)
@@ -253,7 +256,10 @@ def verify_device(
                     "not meaningful"
                 )
                 return result
-        verify_size = iso_size if iso_size is not None else size
+        if scan_full_drive and source_iso is not None:
+            verify_size = size
+        else:
+            verify_size = iso_size if iso_size is not None else size
         if verify_size <= 0:
             result["error"] = "nothing to verify"
             return result
@@ -296,10 +302,24 @@ def verify_device(
                     return result
                 data = buffer.raw[:nread]
                 digest.update(data)
-                if iso_file is not None:
-                    expected = iso_file.read(nread)
+                if iso_file is not None and (
+                    not scan_full_drive
+                    or (iso_size is not None and done < iso_size)
+                ):
                     if (
-                        expected != data
+                        scan_full_drive
+                        and iso_size is not None
+                        and done < iso_size
+                        and done + nread > iso_size
+                    ):
+                        compare_len = iso_size - done
+                        expected = iso_file.read(compare_len)
+                        cmp_data = data[:compare_len]
+                    else:
+                        expected = iso_file.read(nread)
+                        cmp_data = data
+                    if (
+                        expected != cmp_data
                         and len(result["mismatches"]) < MAX_MISMATCHES
                     ):
                         # Snapshot a bounded window starting at the FIRST
@@ -311,14 +331,14 @@ def verify_device(
                             (
                                 i
                                 for i, (a, b) in enumerate(
-                                    zip(expected, data)
+                                    zip(expected, cmp_data)
                                 )
                                 if a != b
                             ),
                             0,
                         )
                         win = min(
-                            nread - first_diff, MISMATCH_SAMPLE_SIZE
+                            len(cmp_data) - first_diff, MISMATCH_SAMPLE_SIZE
                         )
                         result["mismatches"].append(
                             (
@@ -326,7 +346,7 @@ def verify_device(
                                 nread,
                                 first_diff,
                                 expected[first_diff : first_diff + win],
-                                data[first_diff : first_diff + win],
+                                cmp_data[first_diff : first_diff + win],
                             )
                         )
                 done += nread
@@ -370,6 +390,31 @@ def scan_bad_sectors(
         progress=progress,
         is_cancelled=is_cancelled,
     )
+
+
+def whole_drive_scan(
+    device_path: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    retries: int = 3,
+    progress: Callable[[int, int], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    raw = verify_device(
+        device_path,
+        chunk_size=chunk_size,
+        retries=retries,
+        progress=progress,
+        is_cancelled=is_cancelled,
+    )
+    bad = [{"offset": off, "length": chunk_size} for off in raw["bad_sectors"]]
+    return {
+        "ok": raw["ok"],
+        "bad_sectors": bad,
+        "digest": raw["digest"],
+        "speed_mbps": raw["speed_mbps"],
+        "drive_size": raw["drive_size"],
+        "error": raw["error"],
+    }
 
 
 def hash_drive(
