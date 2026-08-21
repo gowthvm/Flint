@@ -261,6 +261,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist/
+          pattern: "{sdist,wheel-*}"
           merge-multiple: true
 
       - name: Publish to PyPI
