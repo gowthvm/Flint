@@ -345,10 +345,16 @@ def ensure_elevated(argv: list[str]) -> int | None:
     # it directly; otherwise wrap in python.exe (dev mode).
     if argv[0].lower().endswith(".exe") and os.path.isfile(argv[0]):
         exe = argv[0].replace("'", "''")
-        args = subprocess.list2cmdline(argv[1:])
+        args_list = argv[1:]
     else:
         exe = sys.executable.replace("'", "''")
-        args = subprocess.list2cmdline(argv)
+        args_list = argv
+    # Build PowerShell-compatible argument list: quote each arg individually
+    # instead of using cmd-style list2cmdline (which uses double-quotes
+    # incompatible with PowerShell -ArgumentList).
+    ps_args = " ".join(
+        "'" + a.replace("'", "''") + "'" for a in args_list
+    )
     tmp = tempfile.mkdtemp(prefix="flint-elev-")
     out_file = os.path.join(tmp, "stdout.txt")
     err_file = os.path.join(tmp, "stderr.txt")
@@ -357,7 +363,7 @@ def ensure_elevated(argv: list[str]) -> int | None:
             "$ErrorActionPreference = 'Stop'; "
             "try { "
             f"$p = Start-Process -FilePath '{exe}' "
-            f"-ArgumentList '{args.replace(chr(39), chr(39) * 2)}' "
+            f"-ArgumentList '{ps_args.replace(chr(39), chr(39) * 2)}' "
             f"-Verb RunAs -Wait -PassThru "
             f"-RedirectStandardOutput '{out_file}' "
             f"-RedirectStandardError '{err_file}'; "

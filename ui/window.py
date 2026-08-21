@@ -2952,6 +2952,18 @@ class MainWindow(QMainWindow):
         fleet_row.addWidget(fleet_hint, 1)
         queue_col.addLayout(fleet_row)
 
+        skip_row = QHBoxLayout()
+        skip_row.setSpacing(8)
+        self._fleet_skip_flashed = ToggleSwitch(False)
+        self._fleet_skip_flashed.setObjectName("fleetToggle")
+        skip_label = QLabel("Skip already-flashed drives")
+        skip_label.setObjectName("capLabel")
+        skip_label.setProperty("colorRole", "muted")
+        skip_row.addWidget(self._fleet_skip_flashed)
+        skip_row.addWidget(skip_label)
+        skip_row.addStretch(1)
+        queue_col.addLayout(skip_row)
+
         self._fleet_banner = QFrame()
         self._fleet_banner.setObjectName("block")
         self._fleet_banner.setVisible(False)
@@ -4598,7 +4610,10 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        drive = fleet.pick_candidate(self._drives, session)
+        drive = fleet.pick_candidate(
+            self._drives, session,
+            skip_flashed=self._fleet_skip_flashed.isChecked(),
+        )
         if drive is not None:
             self._fleet_start_drive(drive)
 

@@ -50,6 +50,8 @@ jobs:
     name: Build Windows exe
     needs: test
     runs-on: windows-latest
+    outputs:
+      sha256: ${{ steps.checksum.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -98,6 +100,7 @@ jobs:
           echo "::warning::Code signing skipped - set WINDOWS_SIGNING_PFX and WINDOWS_SIGNING_PASSWORD to sign the executable."
 
       - name: Compute SHA256 checksum
+        id: checksum
         shell: pwsh
         run: |
           certutil -hashfile dist\flint.exe SHA256 > dist\flint.exe.sha256.txt
@@ -105,6 +108,7 @@ jobs:
           Remove-Item dist\flint.exe.sha256.txt
           $hash | Set-Content -Encoding ascii dist\flint.exe.sha256
           Add-Content -Path $env:GITHUB_ENV -Value "FLINT_SHA256=$hash"
+          "sha256=$hash" >> "$env:GITHUB_OUTPUT"
           Get-Content dist\flint.exe.sha256
 
       - name: Smoke test built executable
@@ -204,7 +208,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-github:
     name: GitHub Release
-    needs: [build-exe]
+    needs: [build-exe, smoke-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

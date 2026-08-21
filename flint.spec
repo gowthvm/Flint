@@ -1,26 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 block_cipher = None
+
+hidden = [
+    "wmi",
+    "win32api",
+    "win32con",
+    "win32file",
+    "win32timezone",
+    "pythoncom",
+    "pywintypes",
+    "psutil",
+]
+# Include the native writer only if it was compiled.
+if os.path.exists(os.path.join("core", "_native_writer.pyd")) or os.path.exists(
+    os.path.join("core", "_native_writer.so")
+):
+    hidden.append("core._native_writer")
 
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
     datas=[("ui/reference.html", "ui"), ("flint.ico", ".")],
-    hiddenimports=[
-        "wmi",
-        "win32api",
-        "win32con",
-        "win32file",
-        "win32timezone",
-        "pythoncom",
-        "pywintypes",
-        "psutil",
-        # Loaded dynamically via importlib in core/writer.py; PyInstaller's
-        # static analysis does not see it. Without this the native writer
-        # silently falls back to buffered Python IO in the packaged app.
-        "core._native_writer",
-    ],
+    hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

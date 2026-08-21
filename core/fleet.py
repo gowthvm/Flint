@@ -114,9 +114,11 @@ def was_recently_flashed(
                 ts = datetime.fromisoformat(ts_str)
             except (ValueError, TypeError):
                 continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=cutoff.tzinfo)
             if ts >= cutoff:
                 return True
-    except Exception:
+    except (TypeError, ValueError, KeyError, OSError):
         pass
 
     return False
