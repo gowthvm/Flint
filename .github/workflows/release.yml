@@ -1,0 +1,264 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: lint, type check, tests
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test & lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Build native writer extension
+        run: python setup.py build_ext --inplace
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy core ui main.py --ignore-missing-imports
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  # ---------------------------------------------------------------------------
+  # Build: exe + sdist + wheels (parallel)
+  # ---------------------------------------------------------------------------
+  build-exe:
+    name: Build Windows exe
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.22.0
+
+      - name: Build native writer extension
+        run: python setup.py build_ext --inplace
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller --clean --noconfirm flint.spec
+
+      - name: Sign executable (when signing secrets are set)
+        if: ${{ secrets.WINDOWS_SIGNING_PFX != '' && secrets.WINDOWS_SIGNING_PASSWORD != '' }}
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'flint-signing.pfx'
+          [System.IO.File]::WriteAllBytes($pfx, [System.Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX))
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:WINDOWS_SIGNING_PASSWORD -AsPlainText -Force)
+          Write-Host "Imported signing certificate: $($cert.Thumbprint)"
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw 'signtool.exe not found in Windows SDK' }
+          & $signtool sign /fd SHA256 /a /f $pfx /p $env:WINDOWS_SIGNING_PASSWORD dist\flint.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+          Remove-Item $pfx -Force
+          Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force
+          Write-Host 'flint.exe signed successfully'
+
+      - name: Signing skipped (no signing secrets)
+        if: ${{ secrets.WINDOWS_SIGNING_PFX == '' || secrets.WINDOWS_SIGNING_PASSWORD == '' }}
+        run: |
+          echo "::warning::Code signing skipped - set WINDOWS_SIGNING_PFX and WINDOWS_SIGNING_PASSWORD to sign the executable."
+
+      - name: Compute SHA256 checksum
+        shell: pwsh
+        run: |
+          certutil -hashfile dist\flint.exe SHA256 > dist\flint.exe.sha256.txt
+          $hash = ((Get-Content dist\flint.exe.sha256.txt)[1]).Trim().ToLower()
+          Remove-Item dist\flint.exe.sha256.txt
+          $hash | Set-Content -Encoding ascii dist\flint.exe.sha256
+          Add-Content -Path $env:GITHUB_ENV -Value "FLINT_SHA256=$hash"
+          Get-Content dist\flint.exe.sha256
+
+      - name: Smoke test built executable
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath (Join-Path $pwd 'dist\flint.exe') -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) {
+            throw "flint.exe exited during smoke test (exit code $($p.ExitCode))"
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Host 'flint.exe started and stayed alive; smoke test passed'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flint-dist
+          path: dist/
+
+  build-sdist:
+    name: Build sdist
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build sdist
+        run: |
+          pip install build
+          python -m build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    name: Build wheel (CPython ${{ matrix.cpython }})
+    needs: test
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        cpython: ['cp310', 'cp311', 'cp312', 'cp313']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pypa/cibuildwheel@v2.22
+        env:
+          CIBW_BUILD: ${{ matrix.cpython }}-win_amd64
+          CIBW_ARCHS_WINDOWS: AMD64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.cpython }}
+          path: wheelhouse/*.whl
+
+  # ---------------------------------------------------------------------------
+  # Smoke test: pip install + flint --version
+  # ---------------------------------------------------------------------------
+  smoke-test:
+    name: Pip smoke test
+    needs: [build-sdist, build-wheels]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Install wheel in fresh venv and smoke test
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\Activate.ps1
+          pip install --find-links=dist flint-usb
+
+          $version = python -c "from core.version import APP_VERSION; print(APP_VERSION)"
+          Write-Host "Installed version: $version"
+          if ($LASTEXITCODE -ne 0) { throw "version check failed" }
+
+          flint --version
+          if ($LASTEXITCODE -ne 0) { throw "flint --version failed" }
+
+          Write-Host "Smoke test passed"
+
+  # ---------------------------------------------------------------------------
+  # Publish: GitHub Release + PyPI (parallel)
+  # ---------------------------------------------------------------------------
+  publish-github:
+    name: GitHub Release
+    needs: [build-exe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: flint-dist
+          path: dist/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2.2.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Flint ${{ steps.version.outputs.tag }}
+          body: |
+            ## Install
+
+            **exe** — download `flint.exe` from assets below. Portable, no installation required.
+
+            **pip** (Windows, Python 3.10+):
+            ```
+            pip install flint-usb
+            ```
+
+            No SmartScreen warning — pip generates the launcher locally.
+
+            ## SHA-256
+
+            ```
+            ${{ needs.build-exe.outputs.sha256 || 'see flint.exe.sha256 asset' }}
+            ```
+          files: |
+            dist/flint.exe
+            dist/flint.exe.sha256
+          draft: false
+          prerelease: false
+
+  publish-pypi:
+    name: PyPI
+    needs: [build-sdist, build-wheels, smoke-test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          verbose: true
+          print-hash: true
