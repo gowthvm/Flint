@@ -333,8 +333,14 @@ def ensure_elevated(argv: list[str]) -> int | None:
     except Exception:
         return None
     _eprint("administrator privileges required - relaunching elevated...")
-    args = subprocess.list2cmdline(argv)
-    exe = sys.executable.replace("'", "''")
+    # When argv[0] is a real .exe (pip launcher or frozen binary), launch
+    # it directly; otherwise wrap in python.exe (dev mode).
+    if argv[0].lower().endswith(".exe") and os.path.isfile(argv[0]):
+        exe = argv[0].replace("'", "''")
+        args = subprocess.list2cmdline(argv[1:])
+    else:
+        exe = sys.executable.replace("'", "''")
+        args = subprocess.list2cmdline(argv)
     tmp = tempfile.mkdtemp(prefix="flint-elev-")
     out_file = os.path.join(tmp, "stdout.txt")
     err_file = os.path.join(tmp, "stderr.txt")
