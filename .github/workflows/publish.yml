@@ -71,7 +71,7 @@ jobs:
         run: |
           python -m venv .venv
           .\.venv\Scripts\Activate.ps1
-          pip install --no-index --find-links=dist flint-usb
+          pip install --find-links=dist flint-usb
 
           $version = python -c "from core.version import APP_VERSION; print(APP_VERSION)"
           Write-Host "Installed version: $version"
