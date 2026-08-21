@@ -70,8 +70,8 @@ jobs:
       - name: Build with PyInstaller
         run: python -m PyInstaller --clean --noconfirm flint.spec
 
-      - name: Sign executable (when signing secrets are set)
-        if: ${{ secrets.WINDOWS_SIGNING_PFX != '' && secrets.WINDOWS_SIGNING_PASSWORD != '' }}
+      - name: Sign executable
+        if: ${{ env.WINDOWS_SIGNING_PFX != '' && env.WINDOWS_SIGNING_PASSWORD != '' }}
         shell: pwsh
         env:
           WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
@@ -90,7 +90,10 @@ jobs:
           Write-Host 'flint.exe signed successfully'
 
       - name: Signing skipped (no signing secrets)
-        if: ${{ secrets.WINDOWS_SIGNING_PFX == '' || secrets.WINDOWS_SIGNING_PASSWORD == '' }}
+        if: ${{ env.WINDOWS_SIGNING_PFX == '' || env.WINDOWS_SIGNING_PASSWORD == '' }}
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
         run: |
           echo "::warning::Code signing skipped - set WINDOWS_SIGNING_PFX and WINDOWS_SIGNING_PASSWORD to sign the executable."
 
