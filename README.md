@@ -47,6 +47,27 @@ on the [Flint website](https://flintweb.vercel.app).
 >
 > and compare the result with `flint.exe.sha256` on the release page.
 
+### Install via pip
+
+Windows users with Python 3.10+ can install Flint from PyPI:
+
+```powershell
+pip install flint-usb
+```
+
+This installs both a GUI and a CLI — no SmartScreen warning, no download
+verification needed (pip generates the launcher locally):
+
+```powershell
+flint          # open the GUI
+flintw         # GUI without console window
+flint --help   # CLI usage
+```
+
+The installer pulls in PyQt6, psutil, pywin32 and wmi. On first run Flint
+prompts for administrator privileges automatically. The native writer
+extension is compiled into the wheel for full write performance.
+
 ## Quick start
 
 1. **Pick an image** — drag & drop an ISO/IMG onto the drop zone, or click it

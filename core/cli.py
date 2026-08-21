@@ -1129,7 +1129,13 @@ def main(argv: list[str] | None = None) -> int:
         ]
         opts["images"] = images
 
-    elevated = ensure_elevated([sys.executable, *sys.argv])
+    # When running from a pip console-script launcher or frozen .exe,
+    # sys.argv[0] is the launcher exe itself — pass it directly.
+    if sys.argv[0].lower().endswith(".exe") and os.path.isfile(sys.argv[0]):
+        launch_argv = [sys.argv[0], *sys.argv[1:]]
+    else:
+        launch_argv = [sys.executable, *sys.argv]
+    elevated = ensure_elevated(launch_argv)
     if elevated is not None:
         return elevated
 

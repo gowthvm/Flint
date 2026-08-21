@@ -76,6 +76,11 @@ def _windowless_python() -> str:
     return exe
 
 
+def _is_launcher_exe(path: str) -> bool:
+    """Return True if path is a real .exe file (pip launcher or frozen)."""
+    return path.lower().endswith(".exe") and os.path.isfile(path)
+
+
 def _ensure_admin() -> None:
     if ctypes.windll.shell32.IsUserAnAdmin():
         _log("already elevated")
@@ -104,11 +109,19 @@ def _ensure_admin() -> None:
             # If the native dialog fails, fall back to auto-elevate.
             pass
 
-    python = _windowless_python()
-    _log(f"not elevated; spawning runas: {python} {sys.argv}")
-    params = subprocess.list2cmdline(sys.argv)
+    # If we're running from a real .exe (pip console/gui-script launcher or
+    # PyInstaller frozen), relaunch that exe directly with the remaining args.
+    # Otherwise fall back to pythonw + script (dev mode).
+    if _is_launcher_exe(sys.argv[0]):
+        exe = sys.argv[0]
+        args = sys.argv[1:]
+    else:
+        exe = _windowless_python()
+        args = sys.argv
+    _log(f"not elevated; spawning runas: {exe} {args}")
+    params = subprocess.list2cmdline(args)
     result = ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", python, params, None, 10  # SW_SHOWDEFAULT
+        None, "runas", exe, params, None, 10  # SW_SHOWDEFAULT
     )
     _log(f"ShellExecuteW returned {result}")
     sys.exit(0)

@@ -2,12 +2,62 @@
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "flint-usb"
+dynamic = ["version"]
+description = "Windows-native bootable USB & disk image writer with byte-level verification"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6",
+    "psutil>=5.9",
+    "pywin32>=306",
+    "wmi>=1.5",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Software Distribution",
+    "Topic :: System :: Recovery Tools",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://flintweb.vercel.app"
+Repository = "https://github.com/gowthvm/Flint"
+Issues = "https://github.com/gowthvm/Flint/issues"
+Documentation = "https://flintweb.vercel.app/docs.html"
+
+[project.scripts]
+flint = "main:main"
+
+[project.gui-scripts]
+flintw = "main:main"
+
+[tool.setuptools]
+packages = ["core", "ui"]
+package-data = {"ui" = ["reference.html"]}
+
+[tool.setuptools.dynamic]
+version = {attr = "core.version.APP_VERSION"}
+
+[tool.cibuildwheel]
+build = "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64"
+environment = {CIBW_BUILD_VERBOSITY = "1"}
+before-build = "python -m pip install --upgrade pip setuptools wheel"
+
 [tool.ruff]
 line-length = 88
 extend-exclude = ["_regression.py"]
 
 [tool.ruff.lint]
-# E203: whitespace before slice punctuation (PEP-8 conflict)
-# BLE001: deliberate catch-all fallback chains (worker threads, fallbacks)
-# S110:  deliberate try/except-pass swallow sites
 ignore = ["E203", "BLE001", "S110"]
