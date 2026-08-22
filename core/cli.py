@@ -30,7 +30,8 @@ run unelevated; ``list``, ``doctor`` and ``completions`` need none.
 Destructive commands validate against the live drive list and require
 typing the full serial of the destroyed drive (``--confirm``); when run
 interactively and no ``--confirm`` is passed, the serial is prompted for
-instead.
+instead. Pass ``--yes`` to bypass confirmation for non-interactive
+scripts.
 
 Exit codes: 0 ok, 1 failure, 2 cancelled, 3 usage/validation, 4
 elevation denied.
@@ -67,7 +68,7 @@ _VALUE_OPTS = {
     "timeout",
     "retries",
 }
-_FLAG_OPTS = {"verify", "json", "help", "skip-flashed"}
+_FLAG_OPTS = {"verify", "json", "help", "skip-flashed", "yes"}
 
 _METHODS = ("zero", "random", "nist", "dod")
 
@@ -212,7 +213,7 @@ _COMMAND_HELP: dict[str, str] = {
     ),
     "flash": (
         "flint flash --image <file> --drive <serial|letter|path>\n"
-        "           --confirm <serial> [--verify]\n"
+        "           [--confirm <serial> | --yes] [--verify]\n"
         "  Write an image to a drive, erasing everything on it. The image\n"
         "  is written raw (no filesystem) and verified by default when\n"
         "  FLINT_VERIFY=1 or --verify is given.\n"
@@ -222,6 +223,7 @@ _COMMAND_HELP: dict[str, str] = {
         "  --confirm <serial>     full serial of the target drive; when run\n"
         "                         interactively it can be omitted and is\n"
         "                         prompted for instead\n"
+        "  --yes                  bypass drive confirmation without prompting\n"
         "  --verify               read back the drive and compare digests\n"
         "  Example: flint flash --image C:\\img\\ubuntu.iso --drive E: --confirm 4C530001270509112345\n"
     ),
@@ -234,36 +236,41 @@ _COMMAND_HELP: dict[str, str] = {
         "  Example: flint verify --drive E: --sha256 0a4b8c… --image C:\\img\\ubuntu.iso\n"
     ),
     "wipe": (
-        "flint wipe --drive <serial|letter|path> --confirm <serial>\n"
-        "          [--method zero|random|nist|dod]\n"
+        "flint wipe --drive <serial|letter|path>\n"
+        "          [--confirm <serial> | --yes] [--method zero|random|nist|dod]\n"
         "  Erase a drive, destroy all data on it.\n"
         "  --method zero|random|nist|dod   erasure pattern (default zero)\n"
+        "  --yes                          bypass drive confirmation without prompting\n"
         "  Example: flint wipe --drive E: --confirm 4C530001270509112345 --method nist\n"
     ),
     "backup": (
         "flint backup --drive <serial|letter|path> --out <file>\n"
-        "             [--confirm <serial>]\n"
+        "             [--confirm <serial>] [--yes]\n"
         "  Copy a drive byte-for-byte into an image file. Read-only, so\n"
         "  confirmation is optional.\n"
+        "  --yes                  continue without optional serial validation\n"
         "  Example: flint backup --drive E: --out C:\\img\\backup.img\n"
     ),
     "clone": (
         "flint clone --from <serial|letter|path> --to <serial|letter|path>\n"
-        "            --confirm <serial of --to>\n"
+        "            [--confirm <serial of --to> | --yes]\n"
         "  Copy one drive to another byte-for-byte. Only the target needs\n"
         "  confirmation; it must be at least as large as the source.\n"
+        "  --yes                  bypass target confirmation without prompting\n"
         "  Example: flint clone --from E: --to F: --confirm 4C530001270509112346\n"
     ),
     "queue": (
         "flint queue --file <list.txt> --drive <serial|letter|path>\n"
-        "            --confirm <serial>\n"
+        "            [--confirm <serial> | --yes]\n"
         "  Flash every image listed in a file (one per line; # comments\n"
         "  allowed) to the same drive, stopping on the first failure.\n"
+        "  --yes                  bypass drive confirmation without prompting\n"
         "  Example: flint queue --file queue.txt --drive E: --confirm 4C530001270509112345\n"
     ),
     "flash-all": (
         "flint flash-all --image <file> [--image <file> ...]\n"
-        "                --confirm ARM [--timeout <seconds>] [--skip-flashed]\n"
+        "                [--confirm ARM | --yes] [--timeout <seconds>]\n"
+        "                [--skip-flashed]\n"
         "  Fleet mode for scripts: flash every queued image to every drive\n"
         "  that is (or becomes) plugged in, one drive after another, until\n"
         "  the budget expires. A drive is skipped if any image does not fit;\n"
@@ -271,6 +278,7 @@ _COMMAND_HELP: dict[str, str] = {
         "  fleet immediately.\n"
         "  --confirm ARM          arm the fleet; must be the literal word ARM\n"
         "                         (prompted for when run interactively)\n"
+        "  --yes                  arm fleet mode without prompting\n"
         "  --timeout <seconds>    total budget; stop watching after this\n"
         "                         (default 3600); interrupt earlier with Ctrl+C\n"
         "  --skip-flashed         skip drives already flashed with the same image\n"
@@ -278,8 +286,9 @@ _COMMAND_HELP: dict[str, str] = {
     ),
     "doctor": (
         "flint doctor\n"
-        "  Print a diagnostic report: version, runtime, Python, elevation,\n"
-        "  native-writer availability and the live drive list.\n"
+        "  Print a diagnostic report: version, runtime, Python, OS,\n"
+        "  architecture, elevation, native-writer availability and the live\n"
+        "  drive list.\n"
         "  Options: --json\n"
         "  Example: flint doctor\n"
     ),
@@ -436,7 +445,7 @@ def _resolve_drive(
         letters = drive.get("letters") or (
             [drive["letter"]] if drive.get("letter") else []
         )
-        if any(l.casefold() == lowered.strip(":") for l in letters):
+        if any(letter.casefold() == lowered.strip(":") for letter in letters):
             return drive
     return None
 
@@ -462,10 +471,18 @@ def _require_confirm(
 
 
 def _confirm_drive(
-    drive: dict[str, Any], confirmed: str | None
+    drive: dict[str, Any],
+    confirmed: str | None,
+    *,
+    assume_yes: bool = False,
 ) -> str | None:
-    """Resolve destruction confirmation: --confirm wins; when missing and
-    the terminal is interactive, prompt for the full serial instead."""
+    """Resolve destruction confirmation.
+
+    ``--yes`` bypasses confirmation entirely. Otherwise ``--confirm`` wins;
+    when missing and the terminal is interactive, prompt for the full serial.
+    """
+    if assume_yes:
+        return None
     if confirmed:
         return _require_confirm(drive, confirmed)
     if _interactive():
@@ -482,15 +499,22 @@ def _confirm_drive(
     return "this command destroys a drive: pass --confirm <full serial>"
 
 
-def _arm_fleet_confirmation(confirmed: str | None) -> str | None:
-    """Fleet arming: requires the literal word ARM, prompted when TTY."""
+def _arm_fleet_confirmation(
+    confirmed: str | None,
+    *,
+    assume_yes: bool = False,
+) -> str | None:
+    """Fleet arming: --yes bypasses confirmation; otherwise ARM is required."""
+    if assume_yes:
+        return None
     if confirmed:
         if confirmed.strip().casefold() != "arm":
             return "--confirm must be the literal word ARM"
         return None
     if _interactive():
-        typed = _prompt("Type ARM to arm fleet mode (every fitting drive "
-                        "will be erased):")
+        typed = _prompt(
+            "Type ARM to arm fleet mode (every fitting drive will be erased):"
+        )
         if typed is None:
             return "cancelled (no input)"
         if typed.strip().casefold() != "arm":
@@ -583,22 +607,17 @@ def _run_worker(worker: Any, label: str) -> tuple[bool, str]:
     return bool(outcome["ok"]), str(outcome.get("message", ""))
 
 
-def _iso_digest(image: str) -> str | None:
+def _iso_digest(image: str) -> tuple[str | None, str | None]:
     from core.verify import compute_sha256
 
     _eprint(f"hashing {image}...")
     ok, result = compute_sha256(image)
     if not ok:
-        _conclude_fail_now(result)
-        return None
+        return None, result
     # Informational only: stderr keeps stdout a pure data stream, which
     # --json mode depends on.
     _eprint(f"SHA256 {result}")
-    return result
-
-
-def _conclude_fail_now(message: str) -> None:
-    _result("fail", message, EXIT_FAIL)
+    return result, None
 
 
 # ---------------------------------------------------------------------------
@@ -669,8 +688,16 @@ def _cmd_flash(opts: dict[str, object]) -> int:
                     f"path={d.get('physical_path')} "
                     f"letters={d.get('letters')}"
                 )
-        return _result("fail", "drive not found; detected drives:", EXIT_USAGE)
-    issue = _confirm_drive(drive, str(opts.get("confirm", "")))
+        return _result(
+            "fail",
+            "drive not found — run 'flint list' to see available drives",
+            EXIT_USAGE,
+        )
+    issue = _confirm_drive(
+        drive,
+        str(opts.get("confirm", "")),
+        assume_yes=bool(opts.get("yes")),
+    )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
     image_size = os.path.getsize(image)
@@ -694,9 +721,13 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         )
     if not (bool(opts.get("verify")) or _env_flag("FLINT_VERIFY")):
         return _result("ok", "flashed", EXIT_OK)
-    digest = _iso_digest(image)
+    digest, hash_error = _iso_digest(image)
     if digest is None:
-        return EXIT_FAIL
+        return _result(
+            "fail",
+            hash_error or "image hashing failed",
+            EXIT_FAIL,
+        )
     return _cmd_verify_raw(drive["physical_path"], image_size, digest, letters)
 
 
@@ -716,7 +747,11 @@ def _cmd_verify(opts: dict[str, object]) -> int:
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
-        return _result("fail", "drive not found", EXIT_USAGE)
+        return _result(
+            "fail",
+            "drive not found — run 'flint list' to see available drives",
+            EXIT_USAGE,
+        )
     expected = str(opts.get("sha256", ""))
     if expected:
         if len(expected) != 64 or any(
@@ -762,8 +797,16 @@ def _cmd_wipe(opts: dict[str, object]) -> int:
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
-        return _result("fail", "drive not found", EXIT_USAGE)
-    issue = _confirm_drive(drive, str(opts.get("confirm", "")))
+        return _result(
+            "fail",
+            "drive not found — run 'flint list' to see available drives",
+            EXIT_USAGE,
+        )
+    issue = _confirm_drive(
+        drive,
+        str(opts.get("confirm", "")),
+        assume_yes=bool(opts.get("yes")),
+    )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
     method = str(opts.get("method", "zero")).lower()
@@ -791,12 +834,16 @@ def _cmd_backup(opts: dict[str, object]) -> int:
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
-        return _result("fail", "drive not found", EXIT_USAGE)
+        return _result(
+            "fail",
+            "drive not found — run 'flint list' to see available drives",
+            EXIT_USAGE,
+        )
     out = str(opts.get("out", ""))
     if not out:
         return _result("fail", "--out <file> is required", EXIT_USAGE)
     confirm = str(opts.get("confirm", "")) if opts.get("confirm") else None
-    if confirm:
+    if confirm and not bool(opts.get("yes")):
         issue = _require_confirm(drive, confirm)
         if issue:
             return _result("fail", issue, EXIT_USAGE)
@@ -821,10 +868,19 @@ def _cmd_clone(opts: dict[str, object]) -> int:
     source = _resolve_drive(str(opts.get("from", "")), drives)
     target = _resolve_drive(str(opts.get("to", "")), drives)
     if source is None or target is None:
-        return _result("fail", "source or target drive not found", EXIT_USAGE)
+        return _result(
+            "fail",
+            "source or target drive not found — run 'flint list' to see "
+            "available drives",
+            EXIT_USAGE,
+        )
     if source.get("physical_path") == target.get("physical_path"):
         return _result("fail", "source and target are the same drive", EXIT_USAGE)
-    issue = _confirm_drive(target, str(opts.get("confirm", "")))
+    issue = _confirm_drive(
+        target,
+        str(opts.get("confirm", "")),
+        assume_yes=bool(opts.get("yes")),
+    )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
     if (target.get("size_gb", 0) * 1_000_000_000) < (
@@ -895,8 +951,16 @@ def _cmd_queue(opts: dict[str, object]) -> int:
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
-        return _result("fail", "drive not found", EXIT_USAGE)
-    issue = _confirm_drive(drive, str(opts.get("confirm", "")))
+        return _result(
+            "fail",
+            "drive not found — run 'flint list' to see available drives",
+            EXIT_USAGE,
+        )
+    issue = _confirm_drive(
+        drive,
+        str(opts.get("confirm", "")),
+        assume_yes=bool(opts.get("yes")),
+    )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
     letters = drive.get("letters") or (
@@ -943,7 +1007,10 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
     for image in images:
         if not os.path.isfile(image):
             return _result("fail", f"--image file not found: {image}", EXIT_USAGE)
-    issue = _arm_fleet_confirmation(str(opts.get("confirm", "")) if opts.get("confirm") else None)
+    issue = _arm_fleet_confirmation(
+        str(opts.get("confirm", "")) if opts.get("confirm") else None,
+        assume_yes=bool(opts.get("yes")),
+    )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
     try:
@@ -964,7 +1031,12 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
     try:
         while time.monotonic() < end:
             drives = _detect_drives()
-            drive = pick_candidate(drives, session, now=time.monotonic(), skip_flashed=skip)
+            drive = pick_candidate(
+                drives,
+                session,
+                now=time.monotonic(),
+                skip_flashed=skip,
+            )
             if drive is None:
                 time.sleep(2)
                 continue
@@ -1020,6 +1092,8 @@ def _cmd_doctor(opts: dict[str, object]) -> int:
         "version": APP_VERSION,
         "runtime": "frozen exe" if getattr(sys, "frozen", False) else "python",
         "python": platform.python_version(),
+        "os": platform.platform(),
+        "arch": platform.machine(),
         "admin": admin,
         "native_writer": native,
         "drives": len(drives),
@@ -1030,6 +1104,8 @@ def _cmd_doctor(opts: dict[str, object]) -> int:
             version=info["version"],
             runtime=info["runtime"],
             python=info["python"],
+            os=info["os"],
+            arch=info["arch"],
             admin=info["admin"],
             native_writer=info["native_writer"],
             drives=_drives_json(drives),
@@ -1056,8 +1132,8 @@ _POWERSHELL_COMPLETION = """# flint PowerShell completion
 # Save to $PROFILE:  flint completions | Out-File -Append $PROFILE
 Register-ArgumentCompleter -CommandName flint -Native -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','doctor','completions','help','scan')
-    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--json','--help','--version','--retries')
+    $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','doctor','completions','help','scan','--version')
+    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--json','--help','--version','--retries','--yes')
     try {
         $raw = & flint list --json 2>$null
         $drives = @()
@@ -1113,17 +1189,22 @@ def _cmd_scan(opts: dict[str, object]) -> int:
                     f"path={d.get('physical_path')} "
                     f"letters={d.get('letters')}"
                 )
-        return _result("fail", "drive not found", EXIT_USAGE)
+        return _result(
+            "fail",
+            "drive not found — run 'flint list' to see available drives",
+            EXIT_USAGE,
+        )
     retries_raw = str(opts.get("retries", "3"))
     try:
         retries = max(1, min(10, int(retries_raw)))
     except ValueError:
         retries = 3
-    _eprint(f"scanning {drive.get('name') or drive.get('model') or drive['physical_path']}...")
-    progress_calls: list[tuple[int, int]] = []
+    _eprint(
+        f"scanning "
+        f"{drive.get('name') or drive.get('model') or drive['physical_path']}..."
+    )
 
     def on_progress(done: int, total: int) -> None:
-        progress_calls.append((done, total))
         if total > 0:
             _eprint(f"FLINT {done / total * 100:.1f}% {done}/{total}")
 
@@ -1141,19 +1222,24 @@ def _cmd_scan(opts: dict[str, object]) -> int:
             speed_mbps=round(result["speed_mbps"], 1),
             error=result["error"],
         )
-    else:
-        if result["ok"]:
-            _print(
-                f"scan ok: no bad sectors "
+    if result["ok"]:
+        return _result(
+            "ok",
+            (
+                "no bad sectors "
                 f"({result['drive_size']} bytes, "
                 f"{result['speed_mbps']:.1f} MB/s)"
-            )
-        else:
-            _print(
-                f"scan fail: {len(result['bad_sectors'])} bad sector(s) "
-                f"({result['error']})"
-            )
-    return EXIT_OK if result["ok"] else EXIT_FAIL
+            ),
+            EXIT_OK,
+        )
+    return _result(
+        "fail",
+        (
+            f"{len(result['bad_sectors'])} bad sector(s) "
+            f"({result['error']})"
+        ),
+        EXIT_FAIL,
+    )
 
 
 def _cmd_completions(opts: dict[str, object]) -> int:
@@ -1223,7 +1309,7 @@ def main(argv: list[str] | None = None) -> int:
         _eprint(_usage())
         return EXIT_USAGE
 
-    if command in ("list", "doctor", "completions", "scan"):
+    if command in ("list", "doctor", "completions"):
         # No privileges needed: skip the UAC relaunch.
         return _COMMANDS[command](opts)
 
