@@ -197,7 +197,10 @@ class WipeWorker(QThread):
                 None,
             )
             if not handle or handle == self._INVALID_HANDLE_VALUE:
-                continue
+                self._unlock_volumes(held)
+                raise OSError(
+                    f"Volume {letter}: could not be opened for locking."
+                )
             self._device_control(handle, self._FSCTL_DISMOUNT_VOLUME)
             locked = False
             for _ in range(5):
@@ -322,6 +325,8 @@ class WipeWorker(QThread):
             for pass_index, pattern in enumerate(patterns, 1):
                 if self._canceled:
                     break
+                if pass_index > 1:
+                    self._seek_start(handle)
                 self.phase.emit(
                     f"Wiping pass {pass_index}/{passes}"
                     if passes > 1

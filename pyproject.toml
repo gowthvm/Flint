@@ -45,7 +45,7 @@ flintw = "main:main"
 
 [tool.setuptools]
 packages = ["core", "ui"]
-py-modules = ["main"]
+py-modules = ["main", "__main__"]
 package-data = {"ui" = ["reference.html"]}
 
 [tool.setuptools.dynamic]

@@ -295,7 +295,10 @@ class UsbWriter(QThread):
                 None,
             )
             if not handle or handle == self._INVALID_HANDLE_VALUE:
-                continue
+                self._unlock_volumes(held)
+                raise OSError(
+                    f"Volume {letter}: could not be opened for locking."
+                )
             self._device_control(int(handle), self._FSCTL_DISMOUNT_VOLUME)
             locked = False
             for _ in range(5):
@@ -335,6 +338,15 @@ class UsbWriter(QThread):
             self.mode.emit(mode)
             if mode == "filecopy":
                 self._run_filecopy()
+                if self._finished:
+                    return
+                if self.verify_after_write and (
+                    self.verify_sha256 or self.bad_block_scan
+                ):
+                    self._verify_after_write()
+                if self._finished:
+                    return
+                self.finished.emit(True, "")
                 return
             self.phase.emit("Locking drive")
             volumes = self._lock_volumes()
@@ -396,7 +408,6 @@ class UsbWriter(QThread):
                 logger.warning("persistence partial: %s", message)
             self.note.emit(message)
         self.progress.emit(100.0)
-        self.finished.emit(True, "")
 
     def _finish_cancelled(self) -> None:
         self._finished = True

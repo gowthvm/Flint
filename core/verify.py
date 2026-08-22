@@ -430,6 +430,27 @@ def hash_drive(
     Returns (ok, hexdigest) on success or (False, message) on failure."""
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.DeviceIoControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.DeviceIoControl.restype = ctypes.c_ulong
+    kernel32.ReadFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    kernel32.ReadFile.restype = ctypes.c_ulong
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_ulong
     GENERIC_READ = 0x80000000
     FILE_SHARE_READ = 0x1
     FILE_SHARE_WRITE = 0x2

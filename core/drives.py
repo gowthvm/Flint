@@ -4,6 +4,7 @@ import shutil
 from typing import Any
 
 import psutil
+import pythoncom
 import wmi
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -39,20 +40,24 @@ class DrivePoller(QThread):
         self._suspended = False
 
     def run(self) -> None:
-        while not self.isInterruptionRequested():
-            if self._suspended:
+        pythoncom.CoInitialize()
+        try:
+            while not self.isInterruptionRequested():
+                if self._suspended:
+                    self.msleep(self._interval_ms)
+                    continue
+                try:
+                    drives = self._detector.list_removable_drives()
+                except Exception:
+                    logger.exception("DrivePoller failed to list drives")
+                    drives = []
+                self.drives_ready.emit(drives)
+                if self._scan_requested:
+                    self._scan_requested = False
+                    continue
                 self.msleep(self._interval_ms)
-                continue
-            try:
-                drives = self._detector.list_removable_drives()
-            except Exception:
-                logger.exception("DrivePoller failed to list drives")
-                drives = []
-            self.drives_ready.emit(drives)
-            if self._scan_requested:
-                self._scan_requested = False
-                continue
-            self.msleep(self._interval_ms)
+        finally:
+            pythoncom.CoUninitialize()
 
 
 class DriveDetector:
@@ -176,6 +181,17 @@ class DriveDetector:
             ctypes.c_void_p,
         ]
         kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.DeviceIoControl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_void_p,
+        ]
+        kernel32.DeviceIoControl.restype = ctypes.c_ulong
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle.restype = ctypes.c_ulong
 

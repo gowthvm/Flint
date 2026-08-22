@@ -64,3 +64,4 @@ flint-dist/
 
 # Website (separate repo, deployed separately to Vercel)
 flint-web/
+.aider*

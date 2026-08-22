@@ -732,9 +732,9 @@ import main as mn
 
 pipe_name = f"FlintRegression_{os.getpid()}"
 QLocalServer.removeServer(pipe_name)
-srv = mn._acquire_single_instance(pipe_name)
+srv = mn._acquire_single_instance(QLocalServer, QLocalSocket, pipe_name)
 assert srv is not None and srv.isListening()
-assert mn._acquire_single_instance(pipe_name) is None
+assert mn._acquire_single_instance(QLocalServer, QLocalSocket, pipe_name) is None
 probe = QLocalSocket()
 probe.connectToServer(pipe_name)
 assert probe.waitForConnected(1000)

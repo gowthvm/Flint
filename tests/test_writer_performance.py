@@ -15,6 +15,7 @@ import time
 import pytest
 
 from core import writer
+from core.wipe import WipeWorker
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +365,116 @@ def test_filecopy_cancel_midway_reports_cancelled(tmp_path, monkeypatch):
     w.run()
 
     assert results == [(False, "cancelled")]
+
+
+# ----------------------------------------------- volume-lock regressions ----
+
+
+class _FailingVolumeKernel:
+    """Minimal kernel32 fake whose volume open always fails."""
+
+    def __init__(self, invalid_handle: int) -> None:
+        self.invalid_handle = invalid_handle
+        self.execution_states: list[int] = []
+        self.opened_paths: list[str] = []
+
+    def SetThreadExecutionState(self, state: int) -> int:
+        self.execution_states.append(state)
+        return state
+
+    def CreateFileW(
+        self,
+        path,
+        access,
+        share_mode,
+        security,
+        creation,
+        flags,
+        template,
+    ) -> int:
+        self.opened_paths.append(path)
+        return self.invalid_handle
+
+
+def test_writer_volume_open_failure_aborts(tmp_path, monkeypatch, capsys):
+    """A volume that cannot be opened for locking must abort the write."""
+    w, _ = _monkeypatched_writer(monkeypatch, tmp_path)
+    w.letters = ["X"]
+    kernel = _FailingVolumeKernel(w._INVALID_HANDLE_VALUE)
+    results: list[tuple[bool, str]] = []
+    inner_calls: list[bool] = []
+    w.finished.connect(lambda ok, msg: results.append((ok, msg)))
+
+    monkeypatch.setattr(
+        writer.diskpart, "resolve_write_mode", lambda mode, iso: "raw"
+    )
+    monkeypatch.setattr(writer, "_kernel32", lambda: kernel)
+    monkeypatch.setattr(w, "_run_inner", lambda: inner_calls.append(True))
+
+    w.run()
+
+    captured = capsys.readouterr()
+    assert kernel.opened_paths == [r"\\.\X:"]
+    assert inner_calls == []
+    assert results == [
+        (False, "Volume X: could not be opened for locking.")
+    ]
+    assert "success" not in captured.out.lower()
+
+
+def test_wipe_volume_open_failure_aborts(monkeypatch, capsys):
+    """WipeWorker must abort when a target volume cannot be locked."""
+    worker = WipeWorker(
+        r"\\.\PHYSICALDRIVE9",
+        letters=["X"],
+        verify=False,
+    )
+    kernel = _FailingVolumeKernel(worker._INVALID_HANDLE_VALUE)
+    results: list[tuple[bool, str]] = []
+    inner_calls: list[bool] = []
+    worker.finished.connect(lambda ok, msg: results.append((ok, msg)))
+
+    monkeypatch.setattr(worker, "_kernel32", lambda: kernel)
+    monkeypatch.setattr(worker, "_run_inner", lambda: inner_calls.append(True))
+
+    worker.run()
+
+    captured = capsys.readouterr()
+    assert kernel.opened_paths == [r"\\.\X:"]
+    assert inner_calls == []
+    assert results == [
+        (False, "Volume X: could not be opened for locking.")
+    ]
+    assert "success" not in captured.out.lower()
+
+
+# -------------------------------------------- file-copy verification fix ----
+
+
+def test_filecopy_mode_runs_verification_after_copy(tmp_path, monkeypatch):
+    """A successful file-copy write must run requested verification."""
+    w, _ = _monkeypatched_writer(
+        monkeypatch,
+        tmp_path,
+        verify_after_write=True,
+        verify_sha256=True,
+    )
+    calls: list[str] = []
+    results: list[tuple[bool, str]] = []
+    w.finished.connect(lambda ok, msg: results.append((ok, msg)))
+
+    monkeypatch.setattr(
+        writer.diskpart, "resolve_write_mode", lambda mode, iso: "filecopy"
+    )
+    monkeypatch.setattr(w, "_run_filecopy", lambda: calls.append("filecopy"))
+    monkeypatch.setattr(
+        w, "_verify_after_write", lambda: calls.append("verify")
+    )
+
+    w.run()
+
+    assert calls == ["filecopy", "verify"]
+    assert results == [(True, "")]
 
 
 # ------------------------------------------------------------ benchmark -----

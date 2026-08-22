@@ -229,7 +229,11 @@ def test_wipe_dod_three_passes_zero_ones_random(monkeypatch):
     assert events["finished"] == [(True, "")]
     zero_chunks = [c for c in fake.chunks if c == b"\x00" * len(c)]
     one_chunks = [c for c in fake.chunks if c == b"\xff" * len(c)]
-    random_chunks = [c for c in fake.chunks if c != b"\x00" * len(c) and c != b"\xff" * len(c)]
+    random_chunks = [
+        c
+        for c in fake.chunks
+        if c != b"\x00" * len(c) and c != b"\xff" * len(c)
+    ]
     assert sum(len(c) for c in zero_chunks) == size
     assert sum(len(c) for c in one_chunks) == size
     assert sum(len(c) for c in random_chunks) == size
@@ -238,6 +242,37 @@ def test_wipe_dod_three_passes_zero_ones_random(monkeypatch):
     assert events["progress"][-1][0] == 100.0
     assert any("pass 1/3" in p[0] for p in events["phase"])
     assert any("pass 3/3" in p[0] for p in events["phase"])
+
+
+def test_wipe_dod_rewinds_before_second_and_third_pass(monkeypatch):
+    """Each DoD pass must overwrite the drive from offset zero."""
+    size = 1024
+    fake = _FakeKernel(size)
+    worker = _make_worker(fake, method="dod")
+    _patch_kernel(monkeypatch)
+    write_offsets: list[int] = []
+    seek_offsets: list[int] = []
+    real_write = fake._write_chunk
+    real_seek = fake._seek_start
+
+    def recording_write(handle, data: bytes) -> None:
+        write_offsets.append(fake.pos)
+        real_write(handle, data)
+
+    def recording_seek(handle) -> None:
+        real_seek(handle)
+        seek_offsets.append(fake.pos)
+
+    monkeypatch.setattr(worker, "_write_chunk", recording_write)
+    monkeypatch.setattr(worker, "_seek_start", recording_seek)
+
+    events = _run(worker)
+
+    assert events["finished"] == [(True, "")]
+    assert len(fake.chunks) == 3
+    assert [len(chunk) for chunk in fake.chunks] == [size, size, size]
+    assert seek_offsets == [0, 0]
+    assert write_offsets == [0, 0, 0]
 
 
 def test_wipe_cancel_inside_second_dod_pass(monkeypatch):

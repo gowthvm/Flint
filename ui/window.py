@@ -1061,6 +1061,21 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Flint")
+
+        # Dark title bar on Windows 10/11
+        try:
+            import ctypes as _ctypes
+
+            hwnd = int(self.winId())
+            _ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                20,
+                _ctypes.byref(_ctypes.c_int(1)),
+                _ctypes.sizeof(_ctypes.c_int),
+            )
+        except Exception:
+            pass
+
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             geo = screen.availableGeometry()

@@ -140,6 +140,19 @@ def _env_flag(name: str) -> bool:
     return value in ("1", "true", "yes", "on")
 
 
+def _block_bar(pct: float, width: int = 16) -> str:
+    """Render a block-character progress bar: ▓▓▓▓▓░░░░░."""
+    fill = int(pct / 100 * width)
+    return "\u2593" * fill + "\u2591" * (width - fill)
+
+
+def _signoff() -> None:
+    """Print a short branded sign-off after successful destructive commands."""
+    if _JSON:
+        return
+    _eprint("\n  \u2b21 Flint out.")
+
+
 def _ensure_cli_stdio() -> None:
     """Give the packaged (windowed) build real stdio for CLI mode.
 
@@ -216,10 +229,17 @@ def _opts(argv: list[str]) -> tuple[dict[str, object], str | None]:
     opts: dict[str, object] = {}
     i = 0
     missing_value_errors = {
-        "image": "flash requires --image <file>",
-        "drive": "requires --drive <serial|letter>",
+        "image": "requires --image <file>",
+        "drive": "requires --drive <serial|letter|path>",
         "out": "requires --out <file>",
+        "file": "requires --file <file>",
+        "method": "requires --method <zero|random|nist|dod>",
         "confirm": "requires --confirm <serial>",
+        "from": "requires --from <serial|letter|path>",
+        "to": "requires --to <serial|letter|path>",
+        "sha256": "requires --sha256 <hex>",
+        "timeout": "requires --timeout <seconds>",
+        "retries": "requires --retries <1-10>",
     }
     while i < len(argv):
         arg = argv[i]
@@ -562,7 +582,7 @@ def _confirm_drive(
             f"(serial={serial}, {size}GB, letters={letters})"
         )
         _eprint("This will ERASE this drive and every existing file on it.")
-        typed = _prompt("Type the full serial to continue:")
+        typed = _prompt(f"Type the full serial '{serial}' to continue:")
         if typed is None:
             return "cancelled (no input)"
         return _require_confirm(drive, typed.strip())
@@ -641,7 +661,8 @@ def _run_worker(worker: Any, label: str) -> tuple[bool, str]:
                 total=int(state["total"]),
             )
         else:
-            _eprint(f"FLINT {state['pct']:.1f} {speed:.1f}MB/s ETA {eta}s")
+            bar = _block_bar(state["pct"])
+            _eprint(f"FLINT {bar} {state['pct']:.1f}% {speed:.1f}MB/s ETA {eta}s")
         last_print["t"] = time.monotonic()
 
     def on_progress(pct: float) -> None:
@@ -722,7 +743,11 @@ def _cmd_list(opts: dict[str, object]) -> int:
     run destructive commands with the exact value."""
     drives = _detect_drives()
     if not drives:
-        return _result("ok", "no removable drives detected", EXIT_OK)
+        return _result(
+            "ok",
+            "no removable drives detected; run 'flint doctor' for diagnostics",
+            EXIT_OK,
+        )
     if _JSON:
         _emit_json(type="drives", drives=_drives_json(drives))
     else:
@@ -741,7 +766,7 @@ def _cmd_list(opts: dict[str, object]) -> int:
                 (str(index), name, serial, size, letters, path)
             )
 
-        headers = ("INDEX", "NAME", "SERIAL", "SIZE", "LETTERS", "PATH")
+        headers = ("#", "NAME", "SERIAL", "SIZE", "LETTERS")
         widths = [
             max(len(headers[column]), *(len(row[column]) for row in rows))
             for column in range(len(headers))
@@ -749,25 +774,35 @@ def _cmd_list(opts: dict[str, object]) -> int:
         widths[1] = min(widths[1], 20)
         widths[2] = min(widths[2], 20)
 
-        header = "  ".join(
-            f"{value:<{widths[index]}}"
-            for index, value in enumerate(headers)
+        title = f"Drives ({len(drives)})"
+        inner_width = (
+            sum(widths) + 2 * (len(headers) - 1)
         )
-        separator = "  ".join("-" * width for width in widths)
-        _print(header)
-        _print(separator)
+        top_bar = "\u2500" * (inner_width - len(title) - 1)
+        _eprint(f"\u250c\u2500 {title} {top_bar}\u2510")
+
+        header_line = "  ".join(
+            f"{headers[i]:<{widths[i]}}" for i in range(len(headers))
+        )
+        _eprint(f"\u2502 {header_line}\u2502")
 
         for row in rows:
-            idx, name, serial, size, letters, path = row
+            idx, name, serial, size, letters, _path = row
             name_column = _colorize("36", f"{name:<{widths[1]}}")
-            _print(
+            line = (
                 f"{idx:<{widths[0]}}  "
                 f"{name_column}  "
                 f"{serial:<{widths[2]}}  "
                 f"{size:<{widths[3]}}  "
-                f"{letters:<{widths[4]}}  "
-                f"{path:<{widths[5]}}"
+                f"{letters:<{widths[4]}}"
             )
+            # Pad to inner_width accounting for ANSI escape codes in name
+            visible_len = len(idx) + 2 + len(name) + 2 + len(serial) + 2 + len(size) + 2 + len(letters)
+            pad = inner_width - visible_len
+            _eprint(f"\u2502 {line}{' ' * max(pad, 0)}\u2502")
+
+        bottom_bar = "\u2500" * inner_width
+        _eprint(f"\u2514{bottom_bar}\u2518")
     return _result("ok", f"{len(drives)} drive(s) listed", EXIT_OK)
 
 
@@ -1327,12 +1362,29 @@ def _cmd_scan(opts: dict[str, object]) -> int:
 
     def on_progress(done: int, total: int) -> None:
         if total > 0:
-            elapsed_seconds = int(time.monotonic() - started_at)
-            elapsed = f"{elapsed_seconds // 60:02d}:{elapsed_seconds % 60:02d}"
-            _eprint(
-                f"FLINT {done / total * 100:.1f}% "
-                f"{done}/{total} [{elapsed}]"
+            elapsed_seconds = max(time.monotonic() - started_at, 1e-6)
+            speed_mbps = done / 1_000_000 / elapsed_seconds
+            remaining_bytes = max(total - done, 0)
+            eta_seconds = (
+                int(remaining_bytes / 1_000_000 / speed_mbps)
+                if speed_mbps > 0
+                else 0
             )
+            if _JSON:
+                _emit_json(
+                    type="progress",
+                    pct=round(done / total * 100, 1),
+                    speed=round(speed_mbps, 1),
+                    eta=eta_seconds,
+                    written=done,
+                    total=total,
+                )
+            else:
+                bar = _block_bar(done / total * 100)
+                _eprint(
+                    f"FLINT {bar} {done / total * 100:.1f}% "
+                    f"{speed_mbps:.1f}MB/s ETA {eta_seconds}s"
+                )
 
     result = whole_drive_scan(
         drive["physical_path"],
@@ -1413,7 +1465,14 @@ def main(argv: list[str] | None = None) -> int:
         # silently turn a destructive command into an exit-0 no-op.
         from core.version import APP_VERSION
 
-        _print(f"Flint {APP_VERSION}")
+        title = f"\u2b21 Flint  v{APP_VERSION}"
+        tagline = "Write. Verify. Trust."
+        w = max(len(title), len(tagline)) + 2
+        bar = "\u2500" * w
+        _eprint(f"\u250c{bar}\u2510")
+        _eprint(f"\u2502 {title:<{w}}\u2502")
+        _eprint(f"\u2502 {tagline:<{w}}\u2502")
+        _eprint(f"\u2514{bar}\u2518")
         return EXIT_OK
     if not argv:
         from core.version import APP_VERSION
@@ -1468,8 +1527,12 @@ def main(argv: list[str] | None = None) -> int:
         return elevated
 
     _app = QCoreApplication.instance() or QCoreApplication([])
+    _DESTRUCTIVE = {"flash", "wipe", "clone", "backup", "queue", "flash-all"}
     try:
-        return _COMMANDS[command](opts)
+        rc = _COMMANDS[command](opts)
+        if rc == EXIT_OK and command in _DESTRUCTIVE:
+            _signoff()
+        return rc
     except KeyboardInterrupt:
         return _result("canceled", "interrupted by user", EXIT_CANCELLED)
     except Exception as exc:  # never die silently in scripts

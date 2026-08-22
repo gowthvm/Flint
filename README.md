@@ -55,6 +55,13 @@ Windows users with Python 3.10+ can install Flint from PyPI:
 pip install flint-usb
 ```
 
+> **If `flint` is not recognized:** Python's Scripts directory is not on
+> your PATH. Run this once to fix it:
+> ```powershell
+> $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+> [Environment]::SetEnvironmentVariable("Path", "$env:Path;$scripts", "User")
+> ```
+
 This installs both a GUI and a CLI — no SmartScreen warning, no download
 verification needed (pip generates the launcher locally):
 

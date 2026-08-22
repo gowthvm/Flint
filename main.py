@@ -1,5 +1,6 @@
 import ctypes
 import faulthandler
+import logging
 import os
 import subprocess
 import sys
@@ -7,18 +8,9 @@ import time
 import traceback
 from contextlib import ExitStack
 from types import TracebackType
+from typing import Any
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication
-
-from core import cli, settings
-from core.log import setup_logging
-from ui import dialogs
-from ui.style import build_style
-from ui.window import MainWindow
-
-logger = setup_logging()
+logger = logging.getLogger("flint")
 _crash_file_stack = ExitStack()
 _SINGLE_INSTANCE_NAME = "FlintFlashingApp_v1"
 _CRASH_PATH = os.path.join(
@@ -81,7 +73,7 @@ def _is_launcher_exe(path: str) -> bool:
     return path.lower().endswith(".exe") and os.path.isfile(path)
 
 
-def _ensure_admin() -> None:
+def _ensure_admin(settings: Any) -> None:
     if ctypes.windll.shell32.IsUserAnAdmin():
         _log("already elevated")
         return
@@ -127,7 +119,7 @@ def _ensure_admin() -> None:
     sys.exit(0)
 
 
-_server_global: QLocalServer | None = None
+_server_global: Any | None = None
 
 
 def release_single_instance() -> None:
@@ -137,6 +129,8 @@ def release_single_instance() -> None:
     the old instance (still alive while it shuts down) holds it and the new
     instance exits thinking another copy is running.
     """
+    from PyQt6.QtNetwork import QLocalServer
+
     global _server_global
     if _server_global is None:
         return
@@ -150,14 +144,16 @@ def release_single_instance() -> None:
 
 
 def _acquire_single_instance(
+    qlocal_server: Any,
+    qlocal_socket: Any,
     name: str = _SINGLE_INSTANCE_NAME,
-) -> QLocalServer | None:
+) -> Any | None:
     # If another instance is alive, poke it to come to the foreground and
     # exit. A listen failure right after that means the other instance is
     # mid-exit (e.g. an elevation relaunch): retry briefly instead of
     # exiting immediately.
     for _ in range(6):
-        probe = QLocalSocket()
+        probe = qlocal_socket()
         probe.connectToServer(name)
         if probe.waitForConnected(500):
             probe.write(b"show")
@@ -166,15 +162,20 @@ def _acquire_single_instance(
             probe.disconnectFromServer()
             return None
         probe.abort()
-        QLocalServer.removeServer(name)
-        server = QLocalServer()
+        qlocal_server.removeServer(name)
+        server = qlocal_server()
         if server.listen(name):
             return server
         time.sleep(0.3)
     return None
 
 
-def _maybe_show_crash_report(window: MainWindow) -> None:
+def _maybe_show_crash_report(
+    window: Any,
+    settings: Any,
+    dialogs: Any,
+    application: Any,
+) -> None:
     """If the crash log grew since the last run, offer to copy the report."""
     try:
         with open(_CRASH_PATH, "r", encoding="utf-8", errors="replace") as f:
@@ -199,7 +200,7 @@ def _maybe_show_crash_report(window: MainWindow) -> None:
         ],
     )
     if dlg.run() == "copy":
-        clipboard = QApplication.clipboard()
+        clipboard = application.clipboard()
         if clipboard is not None:
             clipboard.setText(
                 content[seen:].strip() or content.strip()
@@ -207,8 +208,9 @@ def _maybe_show_crash_report(window: MainWindow) -> None:
 
 
 def main() -> int:
-    _log(f"start: pid={os.getpid()} argv={sys.argv}")
-    _install_crash_logging()
+    global logger
+    global _server_global
+
     args = sys.argv[1:]
     if args:
         # Any argument detours to headless mode: no elevation prompt loop,
@@ -216,75 +218,108 @@ def main() -> int:
         # output come from the cli module (which also explains unknown args,
         # so 'flint frobnicate' can never silently open a window). A bare
         # launch with no arguments starts the GUI.
+        from core import cli
+
         return cli.main()
-    _ensure_admin()
-    app = QApplication(sys.argv)
-    app.setStyleSheet(build_style(settings.get("theme")))
-    app.setQuitOnLastWindowClosed(False)
 
-    server = _acquire_single_instance()
-    if server is None:
-        _log("another instance is running; exiting")
-        return 0
-    global _server_global
-    _server_global = server
+    try:
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+        from PyQt6.QtWidgets import QApplication
 
-    window = MainWindow()
+        from core import settings
+        from core.log import setup_logging
+        from ui import dialogs
+        from ui.style import build_style
+        from ui.window import MainWindow
 
-    def _on_new_instance() -> None:
-        while server.hasPendingConnections():
-            conn = server.nextPendingConnection()
-            if conn is None:
-                continue
+        logger = setup_logging()
+        _log(f"start: pid={os.getpid()} argv={sys.argv}")
+        _install_crash_logging()
+        _ensure_admin(settings)
+        app = QApplication(sys.argv)
+        app.setStyleSheet(build_style(settings.get("theme")))
+        app.setQuitOnLastWindowClosed(False)
 
-            def _on_data(c: QLocalSocket = conn) -> None:
-                c.readAll()
-                window._force_show()
+        server = _acquire_single_instance(QLocalServer, QLocalSocket)
+        if server is None:
+            _log("another instance is running; exiting")
+            return 0
+        _server_global = server
 
-            conn.readyRead.connect(_on_data)
+        window = MainWindow()
 
-    server.newConnection.connect(_on_new_instance)
+        def _on_new_instance() -> None:
+            while server.hasPendingConnections():
+                conn = server.nextPendingConnection()
+                if conn is None:
+                    continue
 
-    window.show()
-    _log(
-        f"shown: visible={window.isVisible()} "
-        f"minimized={window.isMinimized()} "
-        f"native_visible={window._native_is_visible()}"
-    )
+                def _on_data(c: QLocalSocket = conn) -> None:
+                    c.readAll()
+                    window._force_show()
 
-    def _ensure_visible() -> None:
-        window._force_show()
-        if window.isMinimized():
-            window.showNormal()
+                conn.readyRead.connect(_on_data)
+
+        server.newConnection.connect(_on_new_instance)
+
+        window.show()
         _log(
-            f"retry show: visible={window.isVisible()} "
+            f"shown: visible={window.isVisible()} "
             f"minimized={window.isMinimized()} "
             f"native_visible={window._native_is_visible()}"
         )
 
-    def _on_quit() -> None:
-        window._shutdown()
-        _log(
-            f"aboutToQuit: visible={window.isVisible()} "
-            f"writer={window._writer is not None} "
-            f"verifier={window._verifier is not None} "
-            f"tray={window._tray is not None}"
+        def _ensure_visible() -> None:
+            window._force_show()
+            if window.isMinimized():
+                window.showNormal()
+            _log(
+                f"retry show: visible={window.isVisible()} "
+                f"minimized={window.isMinimized()} "
+                f"native_visible={window._native_is_visible()}"
+            )
+
+        def _on_quit() -> None:
+            window._shutdown()
+            _log(
+                f"aboutToQuit: visible={window.isVisible()} "
+                f"writer={window._writer is not None} "
+                f"verifier={window._verifier is not None} "
+                f"tray={window._tray is not None}"
+            )
+
+        app.aboutToQuit.connect(_on_quit)
+        QTimer.singleShot(
+            400,
+            lambda: _maybe_show_crash_report(
+                window, settings, dialogs, QApplication
+            ),
         )
+        QTimer.singleShot(300, _ensure_visible)
+        QTimer.singleShot(1200, _ensure_visible)
+        QTimer.singleShot(3000, _ensure_visible)
+        # Quiet 7-day update check; never blocks and only surfaces a new release.
+        try:
+            QTimer.singleShot(6000, window._maybe_auto_check_updates)
+        except Exception:
+            logger.exception("failed to schedule update check")
 
-    app.aboutToQuit.connect(_on_quit)
-    QTimer.singleShot(400, lambda: _maybe_show_crash_report(window))
-    QTimer.singleShot(300, _ensure_visible)
-    QTimer.singleShot(1200, _ensure_visible)
-    QTimer.singleShot(3000, _ensure_visible)
-    # Quiet 7-day update check; never blocks and only surfaces a new release.
-    try:
-        QTimer.singleShot(6000, window._maybe_auto_check_updates)
+        rc = app.exec()
+        _log(f"app exited rc={rc}")
+        return rc
     except Exception:
-        logger.exception("failed to schedule update check")
-
-    rc = app.exec()
-    _log(f"app exited rc={rc}")
-    return rc
+        logger.exception("GUI failed to start")
+        try:
+            print(
+                "GUI failed to start — try 'flint doctor' for diagnostics "
+                "or use CLI commands like 'flint list'",
+                file=sys.stderr,
+                flush=True,
+            )
+        except OSError:
+            pass
+        return 1
 
 
 if __name__ == "__main__":
