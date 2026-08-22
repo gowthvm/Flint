@@ -745,10 +745,10 @@ def _cmd_list(opts: dict[str, object]) -> int:
         _print(separator)
 
         for row in rows:
-            index, name, serial, size, letters, path = row
+            idx, name, serial, size, letters, path = row
             name_column = _colorize("36", f"{name:<{widths[1]}}")
             _print(
-                f"{index:<{widths[0]}}  "
+                f"{idx:<{widths[0]}}  "
                 f"{name_column}  "
                 f"{serial:<{widths[2]}}  "
                 f"{size:<{widths[3]}}  "
