@@ -122,13 +122,15 @@ def _result(status: str, message: str, exit_code: int) -> int:
     if _JSON:
         _emit_json(type="result", status=status, message=message, exit=exit_code)
     else:
-        line = f"RESULT {status}: {message}"
-        if exit_code == EXIT_USAGE:
-            line = _colorize("33", line)
-        elif status == "ok":
-            line = _colorize("32", line)
-        elif status in ("fail", "canceled", "cancelled"):
-            line = _colorize("31", line)
+        icons = {
+            "ok": ("✓", "32"),
+            "fail": ("✗", "31"),
+            "canceled": ("⚠", "33"),
+            "cancelled": ("⚠", "33"),
+        }
+        icon, colour = icons.get(status, ("", "33"))
+        prefix = f"{icon} " if icon else ""
+        line = _colorize(colour, f"{prefix}RESULT {status}: {message}")
         _print(line)
     return exit_code
 
@@ -1203,9 +1205,23 @@ def _cmd_doctor(opts: dict[str, object]) -> int:
             drives=_drives_json(drives),
         )
     else:
-        _eprint("flint doctor")
-        for key, value in info.items():
-            _eprint(f"  {key:<14} {value}")
+        title = "Flint Doctor"
+        key_width = max(len(key) for key in info)
+        rows = [
+            f"  {key:<{key_width}}  {value}  "
+            for key, value in info.items()
+        ]
+        width = max(
+            max(len(row) for row in rows),
+            len(title) + 4,
+        )
+        _eprint(
+            f"┌─ {title} "
+            f"{'─' * (width - len(title) - 3)}┐"
+        )
+        for row in rows:
+            _eprint(f"│{row:<{width}}│")
+        _eprint(f"└{'─' * width}┘")
         for index, drive in enumerate(drives, 1):
             _print(
                 f"DRIVE {index} {drive.get('name') or drive.get('model')} "
