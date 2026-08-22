@@ -2404,10 +2404,10 @@ class MainWindow(QMainWindow):
         if getattr(sys, "frozen", False):
             meipass = getattr(sys, "_MEIPASS", "")
             if meipass:
-                candidates.append(os.path.join(meipass, "flint.ico"))
+                candidates.append(os.path.join(meipass, "ui", "flint.ico"))
         else:
             candidates.append(
-                str(Path(__file__).resolve().parent.parent / "flint.ico")
+                str(Path(__file__).resolve().parent / "flint.ico")
             )
         for candidate in candidates:
             if os.path.isfile(candidate):
