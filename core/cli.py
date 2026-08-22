@@ -215,6 +215,12 @@ def _opts(argv: list[str]) -> tuple[dict[str, object], str | None]:
     """Parse ``--name value`` pairs; return ``(opts, error)``."""
     opts: dict[str, object] = {}
     i = 0
+    missing_value_errors = {
+        "image": "flash requires --image <file>",
+        "drive": "requires --drive <serial|letter>",
+        "out": "requires --out <file>",
+        "confirm": "requires --confirm <serial>",
+    }
     while i < len(argv):
         arg = argv[i]
         if not arg.startswith("--"):
@@ -222,7 +228,9 @@ def _opts(argv: list[str]) -> tuple[dict[str, object], str | None]:
         name = arg[2:]
         if name in _VALUE_OPTS:
             if i + 1 >= len(argv):
-                return {}, f"missing value for --{name}"
+                return {}, missing_value_errors.get(
+                    name, f"missing value for --{name}"
+                )
             opts[name] = argv[i + 1]
             i += 2
         elif name in _FLAG_OPTS or name == "cli":
@@ -348,7 +356,10 @@ _COMMAND_HELP: dict[str, str] = {
 
 
 def _usage() -> str:
+    from core.version import APP_VERSION
+
     lines = [
+        f"Flint {APP_VERSION}",
         "Usage: flint <command> [options]",
         "",
         "Commands:",
@@ -1181,14 +1192,15 @@ def _cmd_doctor(opts: dict[str, object]) -> int:
         admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         admin = False
-    native = "present" if _load_native_writer() is not None else "missing"
+    native_available = _load_native_writer() is not None
+    native = "✓ present" if native_available else "✗ missing"
     info: dict[str, object] = {
         "version": APP_VERSION,
         "runtime": "frozen exe" if getattr(sys, "frozen", False) else "python",
         "python": platform.python_version(),
         "os": platform.platform(),
         "arch": platform.machine(),
-        "admin": admin,
+        "admin": "✓ yes" if admin else "✗ no",
         "native_writer": native,
         "drives": len(drives),
     }
@@ -1311,10 +1323,16 @@ def _cmd_scan(opts: dict[str, object]) -> int:
         f"scanning "
         f"{drive.get('name') or drive.get('model') or drive['physical_path']}..."
     )
+    started_at = time.monotonic()
 
     def on_progress(done: int, total: int) -> None:
         if total > 0:
-            _eprint(f"FLINT {done / total * 100:.1f}% {done}/{total}")
+            elapsed_seconds = int(time.monotonic() - started_at)
+            elapsed = f"{elapsed_seconds // 60:02d}:{elapsed_seconds % 60:02d}"
+            _eprint(
+                f"FLINT {done / total * 100:.1f}% "
+                f"{done}/{total} [{elapsed}]"
+            )
 
     result = whole_drive_scan(
         drive["physical_path"],
@@ -1398,6 +1416,10 @@ def main(argv: list[str] | None = None) -> int:
         _print(f"Flint {APP_VERSION}")
         return EXIT_OK
     if not argv:
+        from core.version import APP_VERSION
+
+        _eprint(f"  ⬡ Flint v{APP_VERSION}")
+        _eprint("  ⬡ Write. Verify. Trust.")
         _print(_usage())
         return EXIT_OK
     first = argv[0]
