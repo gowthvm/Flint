@@ -70,7 +70,10 @@ def _windowless_python() -> str:
 
 def _is_launcher_exe(path: str) -> bool:
     """Return True if path is a real .exe file (pip launcher or frozen)."""
-    return path.lower().endswith(".exe") and os.path.isfile(path)
+    if os.path.isfile(path):
+        return path.lower().endswith(".exe")
+    # Python 3.12+ pip scripts may omit the .exe extension in sys.argv[0].
+    return bool(os.path.isfile(path + ".exe"))
 
 
 def _ensure_admin(settings: Any) -> None:
@@ -106,6 +109,8 @@ def _ensure_admin(settings: Any) -> None:
     # Otherwise fall back to pythonw + script (dev mode).
     if _is_launcher_exe(sys.argv[0]):
         exe = sys.argv[0]
+        if not exe.lower().endswith(".exe") and os.path.isfile(exe + ".exe"):
+            exe = exe + ".exe"
         args = sys.argv[1:]
     else:
         exe = _windowless_python()
@@ -116,6 +121,9 @@ def _ensure_admin(settings: Any) -> None:
         None, "runas", exe, params, None, 10  # SW_SHOWDEFAULT
     )
     _log(f"ShellExecuteW returned {result}")
+    if result <= 32:
+        _log(f"elevation failed (error {result}); continuing without admin")
+        return
     sys.exit(0)
 
 
