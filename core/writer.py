@@ -181,6 +181,7 @@ class UsbWriter(QThread):
         bad_block_scan: bool = False,
         bad_block_retries: int = 3,
         resume: bool = False,
+        bypass_tpm: bool = False,
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
@@ -202,6 +203,7 @@ class UsbWriter(QThread):
         self.bad_block_scan = bad_block_scan
         self.bad_block_retries = max(0, int(bad_block_retries))
         self.resume = resume
+        self.bypass_tpm = bypass_tpm
         self._canceled = False
         self._finished = False
 
@@ -410,6 +412,14 @@ class UsbWriter(QThread):
             else:
                 logger.warning("persistence partial: %s", message)
             self.note.emit(message)
+        if self.bypass_tpm:
+            self.phase.emit("Patching TPM bypass")
+            from core.tpm_bypass import patch_boot_wim_on_usb
+
+            patch_boot_wim_on_usb(letter)
+            self.note.emit(
+                "TPM / Secure Boot / RAM checks bypassed in boot.wim"
+            )
         self.progress.emit(100.0)
 
     def _finish_cancelled(self) -> None:

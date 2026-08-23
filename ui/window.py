@@ -152,6 +152,11 @@ _HELP_TIPS = {
         "reads (1-10 times); unreadable sectors are reported at "
         "4 KiB-aligned offsets."
     ),
+    "bypass_tpm": (
+        "Injects registry keys into boot.wim to skip Windows 11 "
+        "TPM 2.0, Secure Boot and RAM checks during setup. "
+        "Requires file-copy mode."
+    ),
 }
 
 
@@ -3341,8 +3346,28 @@ class MainWindow(QMainWindow):
         body_col.addLayout(wtg_row)
         self._wtg_row = wtg_row
 
+        self._tpm_bypass_toggle = ToggleSwitch(checked=False)
+        self._tpm_bypass_toggle.setToolTip(
+            "Inject registry keys into boot.wim to skip Windows 11 "
+            "TPM 2.0, Secure Boot and RAM checks during setup"
+        )
+        tpm_row = QHBoxLayout()
+        tpm_row.setSpacing(8)
+        tpm_label = QLabel("Bypass TPM / Secure Boot")
+        tpm_label.setObjectName("capLabel")
+        tpm_label.setProperty("colorRole", "label")
+        tpm_row.addWidget(self._tpm_bypass_toggle)
+        tpm_row.addWidget(tpm_label)
+        tpm_row.addWidget(
+            self._help_button(_HELP_TIPS["bypass_tpm"])
+        )
+        tpm_row.addStretch()
+        body_col.addLayout(tpm_row)
+        self._tpm_bypass_row = tpm_row
+
         self._persistence_toggle.toggled.connect(self._on_expert_changed)
         self._wtg_toggle.toggled.connect(self._on_wtg_changed)
+        self._tpm_bypass_toggle.toggled.connect(self._on_tpm_bypass_changed)
         self._expert_toggle.toggled.connect(self._set_expert_mode)
         self._expert_options_body = body
         self._expert_options_body.setVisible(
@@ -3472,6 +3497,16 @@ class MainWindow(QMainWindow):
             self._filesystem_combo.setEnabled(True)
             self._persistence_toggle.setEnabled(True)
 
+    def _on_tpm_bypass_changed(self, enabled: bool) -> None:
+        if enabled:
+            # TPM bypass requires file-copy mode; auto-switch if needed.
+            current_mode = self._mode_combo.currentData()
+            if current_mode != "filecopy":
+                index = self._mode_combo.findData("filecopy")
+                if index >= 0:
+                    self._mode_combo.setCurrentIndex(index)
+        self._on_expert_changed()
+
     def _on_iso_analysis(
         self,
         path: str,
@@ -3504,9 +3539,14 @@ class MainWindow(QMainWindow):
         )
         self._wtg_toggle.setVisible(expert and self._iso_windows)
         self._wtg_toggle.setEnabled(expert and not hybrid)
+        self._tpm_bypass_toggle.setVisible(expert and self._iso_windows)
+        self._tpm_bypass_toggle.setEnabled(
+            expert and self._iso_windows and not hybrid
+        )
         if hybrid:
             self._persistence_toggle.setChecked(False)
             self._wtg_toggle.setChecked(False)
+            self._tpm_bypass_toggle.setChecked(False)
             self._mode_combo.setEnabled(False)
             self._filesystem_combo.setEnabled(False)
             self._partition_combo.setEnabled(False)
@@ -3723,6 +3763,11 @@ class MainWindow(QMainWindow):
             and self._iso_linux
             and self._persistence_toggle.isChecked()
         )
+        bypass_tpm = bool(
+            expert
+            and self._iso_windows
+            and self._tpm_bypass_toggle.isChecked()
+        )
         mode = self._mode_combo.currentData() if expert else "auto"
         if self._iso_hybrid and mode == "filecopy":
             self._progress.set_error(
@@ -3735,6 +3780,12 @@ class MainWindow(QMainWindow):
                 "\u2014 enable it in Expert options"
             )
             return
+        if bypass_tpm and mode != "filecopy":
+            # Auto-switch to file-copy mode for TPM bypass.
+            index = self._mode_combo.findData("filecopy")
+            if index >= 0:
+                self._mode_combo.setCurrentIndex(index)
+                mode = "filecopy"
         persistence_size_mb = 1024
         if persist:
             raw = self._persistence_size.text().strip() or "1024"
@@ -3784,6 +3835,11 @@ class MainWindow(QMainWindow):
             confirm_text += (
                 "\n\nPersistence: a casper-rw / live persistence store is "
                 "created on the drive."
+            )
+        if bypass_tpm:
+            confirm_text += (
+                "\n\nTPM bypass: boot.wim will be patched to skip Windows 11 "
+                "TPM, Secure Boot and RAM checks."
             )
         letters = drive.get("letters") or (
             [drive["letter"]] if drive.get("letter") else []
@@ -3842,6 +3898,7 @@ class MainWindow(QMainWindow):
                     "persistence": persist,
                     "persistence_size_mb": persistence_size_mb,
                     "windows_to_go": wtg,
+                    "bypass_tpm": bypass_tpm,
                     "chunk_size": self._buffer_combo.currentData()
                     * 1024
                     * 1024,

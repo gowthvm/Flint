@@ -79,6 +79,7 @@ _FLAG_OPTS = {
     "dry-run",
     "copy-report",
     "verbose",
+    "bypass-tpm",
 }
 
 _METHODS = ("zero", "random", "nist", "dod")
@@ -292,7 +293,8 @@ _COMMAND_HELP: dict[str, str] = {
     ),
     "flash": (
         "flint flash --image <file> --drive <serial|letter|path>\n"
-        "           [--confirm <serial> | --yes] [--verify] [--quiet]\n"
+        "           [--confirm <serial> | --yes] [--verify] [--bypass-tpm]\n"
+        "           [--quiet]\n"
         "  Write an image to a drive, erasing everything on it. The image\n"
         "  is written raw (no filesystem) and verified by default when\n"
         "  FLINT_VERIFY=1 or --verify is given.\n"
@@ -304,6 +306,8 @@ _COMMAND_HELP: dict[str, str] = {
         "                         prompted for instead\n"
         "  --yes                  bypass drive confirmation without prompting\n"
         "  --verify               read back the drive and compare digests\n"
+        "  --bypass-tpm           patch boot.wim to skip Windows 11 TPM,\n"
+        "                         Secure Boot and RAM checks (file-copy mode)\n"
         "  --quiet                suppress progress and informational messages\n"
         "  Example: flint flash --image C:\\img\\ubuntu.iso --drive E: --confirm 4C530001270509112345\n"
     ),
@@ -884,6 +888,7 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         _eprint(f"  serial: {_serial_of(drive)}")
         _eprint(f"  letters: {_display_letters(drive)}")
         _eprint(f"  verify: {bool(opts.get('verify')) or _env_flag('FLINT_VERIFY')}")
+        _eprint(f"  bypass-tpm: {bool(opts.get('bypass-tpm'))}")
         return _result("ok", "dry run — no changes made", EXIT_OK)
     image_size = os.path.getsize(image)
     if image_size > (drive.get("size_gb", 0) * 1_000_000_000):
@@ -896,6 +901,7 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         drive["physical_path"],
         letters=letters,
         verify_after_write=bool(opts.get("verify")) or _env_flag("FLINT_VERIFY"),
+        bypass_tpm=bool(opts.get("bypass-tpm")),
     )
     ok, message = _run_worker(worker, "flash")
     if not ok:

@@ -117,10 +117,10 @@ def test_help_buttons_have_specific_tooltips(qapp, tmp_path):
             for b in w._verify_options_card.findChildren(QPushButton)
             if b.objectName() == "helpBtn"
         ]
-        assert len(buttons) == 10
+        assert len(buttons) == 11
         tips = [b.tip_text() for b in buttons]
         assert all(tips), "every help button must carry a tip"
-        assert len(set(tips)) == 9, "exactly one tip is shared (buffer size)"
+        assert len(set(tips)) == 10, "exactly one tip is shared (buffer size)"
         joined = " ".join(tips)
         for keyword in (
             "GPT",
@@ -133,6 +133,7 @@ def test_help_buttons_have_specific_tooltips(qapp, tmp_path):
             "SHA-256",
             "4 KiB",
             "MiB",
+            "TPM",
         ):
             assert keyword in joined, f"missing keyword: {keyword}"
     finally:
