@@ -2,6 +2,7 @@ import ctypes
 import faulthandler
 import logging
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -11,6 +12,21 @@ from types import TracebackType
 from typing import Any
 
 logger = logging.getLogger("flint")
+
+if platform.system() != "Windows":
+    print(
+        "error: Flint is a Windows-only tool.\n"
+        "\n"
+        "Flint uses Windows APIs (raw disk access, WMI, SetupAPI) that have "
+        "no cross-platform equivalent.\n"
+        "\n"
+        "If you installed via pip, you can uninstall with:\n"
+        "  pip uninstall flint-usb\n"
+        "\n"
+        "For details see: https://github.com/gowthvm/Flint",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 _crash_file_stack = ExitStack()
 _SINGLE_INSTANCE_NAME = "FlintFlashingApp_v1"
 _CRASH_PATH = os.path.join(
