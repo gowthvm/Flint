@@ -191,6 +191,220 @@ def test_native_write_callback_cancel(tmp_path):
         native.native_write(str(src), str(tmp_path / "dst.bin"), 4096, boom)
 
 
+# ----------------------------------- native writer error-path coverage ----
+
+
+@requires_native
+def test_native_write_empty_source(tmp_path):
+    """A 0-byte source should return 0 written without crashing."""
+    import core._native_writer as native
+
+    src = tmp_path / "empty.bin"
+    src.write_bytes(b"")
+    dst = tmp_path / "dst.bin"
+
+    written = native.native_write(str(src), str(dst), 4096)
+
+    assert written == 0
+    assert dst.exists()
+    assert dst.stat().st_size == 0
+
+
+@requires_native
+def test_native_write_destination_open_fails(tmp_path):
+    """Writing to a non-existent device path raises OSError."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(_blob(4096, seed=1))
+
+    with pytest.raises(OSError):
+        native.native_write(str(src), r"\\.\PHYSICALDRIVE99")
+
+
+@requires_native
+def test_native_write_readonly_destination_fails(tmp_path):
+    """Writing to a read-only destination raises OSError."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(_blob(4096, seed=2))
+    dst = tmp_path / "readonly.bin"
+    dst.write_bytes(b"\x00" * 4096)
+    dst.chmod(0o444)
+
+    try:
+        with pytest.raises(OSError):
+            native.native_write(str(src), str(dst), 4096)
+    finally:
+        dst.chmod(0o666)
+
+
+@requires_native
+def test_native_write_chunk_size_exact_minimum(tmp_path):
+    """chunk_size=4096 (exact sector size) should work without clamping."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(12288, seed=10)  # exactly 3 sectors
+    src.write_bytes(payload)
+
+    written = native.native_write(str(src), str(dst), 4096)
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_chunk_size_exact_maximum(tmp_path):
+    """chunk_size=256 MiB (exact max) should not be clamped further."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(1_000_000, seed=11)
+    src.write_bytes(payload)
+
+    written = native.native_write(
+        str(src), str(dst), 256 * 1024 * 1024
+    )
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_chunk_size_over_max_clamped(tmp_path):
+    """chunk_size > 256 MiB is clamped to 256 MiB silently."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(500_000, seed=12)
+    src.write_bytes(payload)
+
+    written = native.native_write(
+        str(src), str(dst), 300 * 1024 * 1024
+    )
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_chunk_size_below_minimum_clamped(tmp_path):
+    """chunk_size < 4096 is clamped up to 4096."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(8192, seed=13)
+    src.write_bytes(payload)
+
+    written = native.native_write(str(src), str(dst), 1024)
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_progress_returns_non_none(tmp_path):
+    """A callback that returns a value (not None) should not crash."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(8192, seed=14)
+    src.write_bytes(payload)
+
+    def callback(done, total):
+        return "ignored"
+
+    written = native.native_write(str(src), str(dst), 4096, callback)
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_progress_none_explicitly(tmp_path):
+    """Passing progress=None explicitly should work identically to default."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(8192, seed=15)
+    src.write_bytes(payload)
+
+    written = native.native_write(str(src), str(dst), 4096, None)
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_large_payload_sector_aligned(tmp_path):
+    """Write a payload that is an exact multiple of sector size."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(4096 * 100, seed=16)  # exactly 400 sectors
+    src.write_bytes(payload)
+
+    written = native.native_write(str(src), str(dst), 4096 * 10)
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+@requires_native
+def test_native_write_single_sector(tmp_path):
+    """Write exactly one sector (4096 bytes)."""
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = _blob(4096, seed=17)
+    src.write_bytes(payload)
+
+    written = native.native_write(str(src), str(dst), 4096)
+
+    assert written == len(payload)
+    assert dst.read_bytes() == payload
+
+
+# ------------------------------------------------ load_native_writer edge cases
+
+
+def test_load_native_writer_returns_none_on_import_error(monkeypatch):
+    """_load_native_writer returns None when the extension is missing."""
+    real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__  # type: ignore[union-attr]
+
+    def block_native(name: str, *a: object, **kw: object) -> object:
+        if name == "core._native_writer":
+            raise ImportError("no native")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr("importlib.import_module", block_native)
+    assert writer._load_native_writer() is None
+
+
+def test_load_native_writer_propagates_runtime_error(monkeypatch):
+    """_load_native_writer propagates non-ImportError exceptions."""
+    real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__  # type: ignore[union-attr]
+
+    def boom(name: str, *a: object, **kw: object) -> object:
+        if name == "core._native_writer":
+            raise RuntimeError("corrupt extension")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr("importlib.import_module", boom)
+    with pytest.raises(RuntimeError, match="corrupt extension"):
+        writer._load_native_writer()
+
+
 # ---------------------------------------------------------- writer thread ----
 
 

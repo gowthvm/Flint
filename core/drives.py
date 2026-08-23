@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import psutil
@@ -63,6 +64,7 @@ class DrivePoller(QThread):
 class DriveDetector:
     def __init__(self) -> None:
         self.last_error: str | None = None
+        self._system_disk_cache: set[str] | None = None
 
     @staticmethod
     def format_size(num_bytes: float) -> str:
@@ -96,7 +98,27 @@ class DriveDetector:
             logger.exception("_drive_letters failed")
         return letters
 
+    def _map_physical_paths(self, letters: list[str]) -> dict[str, str | None]:
+        """Map drive letters to ``\\\\.\\PHYSICALDRIVEn`` paths in parallel."""
+        result: dict[str, str | None] = {}
+        if not letters:
+            return result
+        with ThreadPoolExecutor(max_workers=min(len(letters), 8)) as pool:
+            futures = {
+                pool.submit(self._physical_drive_for_letter, letter): letter
+                for letter in letters
+            }
+            for future in as_completed(futures):
+                letter = futures[future]
+                try:
+                    result[letter] = future.result()
+                except Exception:
+                    logger.exception("_map_physical_paths failed for %s", letter)
+                    result[letter] = None
+        return result
+
     def list_removable_drives(self) -> list[dict[str, Any]]:
+        self._system_disk_cache = None
         wmi_error: Exception | None = None
         try:
             drives = self._list_with_wmi()
@@ -123,12 +145,16 @@ class DriveDetector:
 
         A USB boot drive or a machine whose system disk also reports
         "removable" must never appear in the target list: flashing it would
-        erase the running OS.
+        erase the running OS.  Result is cached per ``list_removable_drives``
+        call to avoid redundant IOCTL round-trips.
         """
+        if self._system_disk_cache is not None:
+            return self._system_disk_cache
         system = (os.environ.get("SystemDrive") or "C:").strip()
         letter = system[0] if system else "C"
         physical = self._physical_drive_for_letter(letter)
-        return {physical} if physical else set()
+        self._system_disk_cache = {physical} if physical else set()
+        return self._system_disk_cache
 
     def _list_with_wmi(self) -> list[dict[str, Any]]:
         conn = wmi.WMI()
@@ -241,35 +267,43 @@ class DriveDetector:
     def _list_with_psutil(self) -> list[dict[str, Any]]:
         import win32file
 
-        result: list[dict[str, Any]] = []
+        removable: list[tuple[str, str, int]] = []  # (letter, mountpoint, device_type)
         for part in psutil.disk_partitions(all=False):
             letter = self._drive_letter_from_path(part.device)
             if letter is None:
                 continue
             try:
-                removable = (
+                is_removable = (
                     win32file.GetDriveType(part.device)
                     == win32file.DRIVE_REMOVABLE
                 )
             except Exception:
                 logger.exception("win32file.GetDriveType failed")
-                removable = False
-            if not removable:
-                continue
-            physical = self._physical_drive_for_letter(letter)
-            if physical is None:
-                # Fail closed: writing to a volume handle (\\\\.\\E:) would
-                # silently corrupt a single partition instead of the disk.
-                logger.warning(
-                    "psutil fallback: skipping %s: no physical-drive mapping",
-                    letter,
-                )
+                is_removable = False
+            if not is_removable:
                 continue
             try:
                 size_bytes = shutil.disk_usage(part.mountpoint).total
             except Exception:
                 logger.exception("shutil.disk_usage failed for %s", part.mountpoint)
                 size_bytes = 0
+            removable.append((letter, part.mountpoint, size_bytes))
+
+        if not removable:
+            return []
+
+        letters = [letter for letter, _, _ in removable]
+        path_map = self._map_physical_paths(letters)
+
+        result: list[dict[str, Any]] = []
+        for letter, mountpoint, size_bytes in removable:
+            physical = path_map.get(letter)
+            if physical is None:
+                logger.warning(
+                    "psutil fallback: skipping %s: no physical-drive mapping",
+                    letter,
+                )
+                continue
             result.append(
                 {
                     "name": f"Drive {letter}:",

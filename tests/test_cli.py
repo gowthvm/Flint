@@ -10,7 +10,7 @@ import pytest
 from core import cli
 
 
-def _fake_drives():
+def _fake_drives(_detector: object | None = None):
     return [
         {
             "physical_path": r"\\.\PHYSICALDRIVE3",

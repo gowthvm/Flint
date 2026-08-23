@@ -117,6 +117,22 @@ def _emit_json(**fields: object) -> None:
     _print(json.dumps(fields, separators=(",", ":")))
 
 
+_WINERROR_HINTS: dict[int, str] = {
+    5: "try running as administrator",
+    21: "drive not responding \u2014 check cable and port",
+    31: "device hardware failure \u2014 try another USB port",
+    1167: "drive was disconnected during operation",
+}
+
+
+def _winerror_hint(exc: BaseException) -> str:
+    """Map common Windows error codes to actionable hints."""
+    code = getattr(exc, "winerror", None)
+    if code is None:
+        return ""
+    return _WINERROR_HINTS.get(code, "")
+
+
 def _result(status: str, message: str, exit_code: int) -> int:
     """Emit the final machine-readable line and return the exit code."""
     if _JSON:
@@ -492,11 +508,12 @@ def ensure_elevated(argv: list[str]) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def _detect_drives() -> list[dict[str, Any]]:
-    from core.drives import DriveDetector
+def _detect_drives(detector: Any = None) -> list[dict[str, Any]]:
+    if detector is None:
+        from core.drives import DriveDetector
 
-    detector = DriveDetector()
-    return detector.list_removable_drives()
+        detector = DriveDetector()
+    return detector.list_removable_drives()  # type: ignore[no-any-return]
 
 
 def _resolve_drive(
@@ -1167,10 +1184,13 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
         f"fleet armed: {len(session.images)} image(s); flashing every "
         f"fitting drive until {budget}s pass"
     )
+    from core.drives import DriveDetector
+
+    detector = DriveDetector()
     end = time.monotonic() + budget
     try:
         while time.monotonic() < end:
-            drives = _detect_drives()
+            drives = _detect_drives(detector)
             drive = pick_candidate(
                 drives,
                 session,
@@ -1536,4 +1556,6 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return _result("canceled", "interrupted by user", EXIT_CANCELLED)
     except Exception as exc:  # never die silently in scripts
-        return _result("fail", f"internal error: {exc}", EXIT_FAIL)
+        hint = _winerror_hint(exc)
+        message = f"internal error: {exc}" + (f" \u2014 {hint}" if hint else "")
+        return _result("fail", message, EXIT_FAIL)

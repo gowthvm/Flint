@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -805,6 +806,12 @@ class ProgressArea(ChamferPanel):
         self.setObjectName("progressArea")
         self._total = 0
         self._written = 0
+        self._target_pct: float = 0.0
+        self._eta_window: deque[int] = deque(maxlen=5)
+
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setInterval(50)
+        self._smooth_timer.timeout.connect(self._smooth_tick)
 
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 0)
@@ -867,6 +874,9 @@ class ProgressArea(ChamferPanel):
     def set_ready(self) -> None:
         self._total = 0
         self._written = 0
+        self._target_pct = 0.0
+        self._smooth_timer.stop()
+        self._eta_window.clear()
         self._title.setText("Ready")
         self._pct.setText("\u2014")
         self._bar.setValue(0)
@@ -878,15 +888,30 @@ class ProgressArea(ChamferPanel):
     def reset(self) -> None:
         self._total = 0
         self._written = 0
+        self._target_pct = 0.0
+        self._smooth_timer.stop()
+        self._eta_window.clear()
         self._title.setText("Writing\u2026")
         self._pct.setText("0%")
         self._bar.setValue(0)
         self.set_values(0, 0.0, 0)
         self._error.setVisible(False)
 
+    def _smooth_tick(self) -> None:
+        current = self._bar.value()
+        diff = self._target_pct - current
+        if abs(diff) < 0.5:
+            self._bar.setValue(round(self._target_pct))
+            if self._target_pct >= 100:
+                self._smooth_timer.stop()
+            return
+        self._bar.setValue(round(current + diff * 0.18))
+
     def set_progress(self, percent: float) -> None:
+        self._target_pct = percent
         self._pct.setText(f"{percent:.0f}%")
-        self._bar.setValue(round(percent))
+        if not self._smooth_timer.isActive():
+            self._smooth_timer.start()
 
     def set_speed(self, mbps: float) -> None:
         self._stat_values["Speed"].setText(f"{mbps:.0f} MB/s")
@@ -904,7 +929,12 @@ class ProgressArea(ChamferPanel):
         )
 
     def set_eta(self, seconds: int) -> None:
-        self._stat_values["Remaining"].setText(self._fmt_eta(seconds))
+        self._eta_window.append(seconds)
+        if self._eta_window:
+            median = sorted(self._eta_window)[len(self._eta_window) // 2]
+        else:
+            median = seconds
+        self._stat_values["Remaining"].setText(self._fmt_eta(median))
 
     def set_values(self, written: int, mbps: float, seconds: int) -> None:
         self.set_written(written)
@@ -912,6 +942,9 @@ class ProgressArea(ChamferPanel):
         self.set_eta(seconds)
 
     def set_verifying(self) -> None:
+        self._target_pct = 0.0
+        self._smooth_timer.stop()
+        self._eta_window.clear()
         self._title.setText("Verifying\u2026")
         self._pct.setText("0%")
         self._bar.setValue(0)
@@ -932,6 +965,8 @@ class ProgressArea(ChamferPanel):
         self._title.setText(f"{phase}\u2026")
 
     def set_done(self) -> None:
+        self._smooth_timer.stop()
+        self._target_pct = 100.0
         self._title.setText("Done")
         self._pct.setText("100%")
         self._bar.setValue(100)
@@ -4992,6 +5027,31 @@ class MainWindow(QMainWindow):
             return (
                 f"{message} \u2014 the drive accepted fewer bytes than "
                 "expected. The result may be incomplete."
+            )
+        if "access denied" in lowered:
+            return (
+                f"{message} \u2014 run Flint as administrator, or close any "
+                "program using the drive."
+            )
+        if "device not ready" in lowered or "could not determine device size" in lowered:
+            return (
+                f"{message} \u2014 the drive may not be responding. Try a "
+                "different USB port or cable."
+            )
+        if "verification failed" in lowered:
+            return (
+                f"{message} \u2014 re-download the ISO; the source image "
+                "may be corrupt."
+            )
+        if "volume" in lowered and "in use" in lowered:
+            return (
+                f"{message} \u2014 close Explorer windows, antivirus "
+                "real-time scanning, or other tools accessing the drive."
+            )
+        if "cancelled" in lowered:
+            return (
+                f"{message} The drive may be partially written \u2014 "
+                "flash again before use."
             )
         return message
 

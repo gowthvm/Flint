@@ -313,7 +313,8 @@ class UsbWriter(QThread):
                 self._unlock_volumes(held)
                 raise OSError(
                     f"Volume {letter}: is in use by another program. "
-                    "Close it and try again."
+                    "Close Explorer windows, antivirus real-time scanning, "
+                    "or other tools accessing the drive, then try again."
                 )
             held.append(int(handle))
         return held
