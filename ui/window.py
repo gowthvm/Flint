@@ -2235,6 +2235,7 @@ class MainWindow(QMainWindow):
 
     def _build_verify_page(self) -> QWidget:
         scroll = QScrollArea()
+        self._verify_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -2302,11 +2303,13 @@ class MainWindow(QMainWindow):
             self._verify_progress.set_error(
                 "Wait for the current operation to finish first"
             )
+            self._scroll_to_verify_progress()
             return
         if not self._current_drive:
             self._verify_progress.set_error(
                 "Select a USB drive first \u2014 click the drive card"
             )
+            self._scroll_to_verify_progress()
             return
         iso = self._verify_zone.path
         digest = self._verify_zone.digest
@@ -2318,6 +2321,7 @@ class MainWindow(QMainWindow):
                 self._verify_progress.set_error(
                     "Expected SHA-256 must be 64 hex characters"
                 )
+                self._scroll_to_verify_progress()
                 return
             expected, size = pasted, None
         elif iso and digest:
@@ -2326,10 +2330,12 @@ class MainWindow(QMainWindow):
             self._verify_progress.set_error(
                 "Select an image \u2014 or paste a SHA-256 \u2014 first"
             )
+            self._scroll_to_verify_progress()
             return
         drive_path = self._current_drive_path()
         if not drive_path:
             self._verify_progress.set_error("Drive path unavailable")
+            self._scroll_to_verify_progress()
             return
         if pasted:
             self._verify_mode.setText(
@@ -2396,6 +2402,10 @@ class MainWindow(QMainWindow):
 
     def _on_nav_clicked(self, index: int) -> None:
         if self._busy():
+            self._progress.set_warning(
+                "Complete the current operation before navigating away"
+            )
+            self._scroll_to_progress(self._content_scroll)
             return
         for i, item in enumerate(self._nav_items):
             item.set_active(i == index)
@@ -2971,6 +2981,7 @@ class MainWindow(QMainWindow):
 
     def _build_content(self) -> QScrollArea:
         scroll = QScrollArea()
+        self._content_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -3466,9 +3477,20 @@ class MainWindow(QMainWindow):
     def _update_verify_controls(self) -> None:
         enabled = self._verify_toggle.isChecked()
         self._verify_sha_toggle.setEnabled(enabled)
+        self._verify_sha_toggle.setToolTip(
+            "" if enabled else "Enable 'Verify after write' to use this option"
+        )
         self._bad_block_toggle.setEnabled(enabled)
+        self._bad_block_toggle.setToolTip(
+            "" if enabled else "Enable 'Verify after write' to use this option"
+        )
         self._bad_retries_input.setEnabled(
             enabled and self._bad_block_toggle.isChecked()
+        )
+        self._bad_retries_input.setToolTip(
+            ""
+            if enabled and self._bad_block_toggle.isChecked()
+            else "Enable 'Verify after write' and 'Scan for bad blocks' first"
         )
 
     def _on_expert_changed(self) -> None:
@@ -3491,6 +3513,11 @@ class MainWindow(QMainWindow):
                 self._filesystem_combo.findData("ntfs")
             )
             self._filesystem_combo.setEnabled(False)
+            if self._persistence_toggle.isChecked():
+                self._progress.set_warning(
+                    "Persistence disabled (mutually exclusive with Windows To Go)"
+                )
+                self._scroll_to_progress(self._content_scroll)
             self._persistence_toggle.setChecked(False)
             self._persistence_toggle.setEnabled(False)
         else:
@@ -3505,6 +3532,10 @@ class MainWindow(QMainWindow):
                 index = self._mode_combo.findData("filecopy")
                 if index >= 0:
                     self._mode_combo.setCurrentIndex(index)
+                    self._progress.set_warning(
+                        "Write mode changed to File copy (required for TPM bypass)"
+                    )
+                    self._scroll_to_progress(self._content_scroll)
         self._on_expert_changed()
 
     def _on_iso_analysis(
@@ -3557,6 +3588,11 @@ class MainWindow(QMainWindow):
             self._mode_combo.setToolTip(
                 "Hybrid ISO detected \u2014 raw write recommended"
             )
+            self._progress.set_warning(
+                "Hybrid ISO detected \u2014 raw write required. "
+                "Expert options are disabled."
+            )
+            self._scroll_to_progress(self._content_scroll)
         else:
             self._mode_combo.setEnabled(expert)
             self._filesystem_combo.setEnabled(
@@ -3734,12 +3770,14 @@ class MainWindow(QMainWindow):
         iso = self._iso_zone.path
         if not iso:
             self._progress.set_error("Select an ISO image first")
+            self._scroll_to_progress(self._content_scroll)
             return
         if self._sidecar_status in ("mismatch", "error"):
             self._progress.set_error(
                 "Image checksum does not match its sidecar \u2014 "
                 "flashing blocked"
             )
+            self._scroll_to_progress(self._content_scroll)
             return
         if not self._current_drive:
             if self._drives:
@@ -3748,6 +3786,7 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "No USB drive detected \u2014 plug one in first"
             )
+            self._scroll_to_progress(self._content_scroll)
             return
         drive = self._current_drive
         name = drive["model"] or drive["name"]
@@ -3773,12 +3812,14 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "Hybrid ISO detected \u2014 raw write required"
             )
+            self._scroll_to_progress(self._content_scroll)
             return
         if (persist or wtg) and mode != "filecopy":
             self._progress.set_error(
                 "Persistence / Windows To Go require File copy mode "
                 "\u2014 enable it in Expert options"
             )
+            self._scroll_to_progress(self._content_scroll)
             return
         if bypass_tpm and mode != "filecopy":
             # Auto-switch to file-copy mode for TPM bypass.
@@ -3797,16 +3838,19 @@ class MainWindow(QMainWindow):
                 self._progress.set_error(
                     "Persistence size must be a whole number of MB/GB"
                 )
+                self._scroll_to_progress(self._content_scroll)
                 return
             if persistence_size_mb <= 0:
                 self._progress.set_error(
                     "Persistence size must be greater than zero"
                 )
+                self._scroll_to_progress(self._content_scroll)
                 return
             if persistence_size_mb > 65536:
                 self._progress.set_error(
                     "Persistence size is capped at 64 GiB"
                 )
+                self._scroll_to_progress(self._content_scroll)
                 return
         filesystem = (
             self._filesystem_combo.currentData() if expert else "fat32"
@@ -3819,6 +3863,7 @@ class MainWindow(QMainWindow):
                     "cannot store it. Pick NTFS or exFAT in Expert mode, "
                     "or write raw (DD)."
                 )
+                self._scroll_to_progress(self._content_scroll)
                 return
         confirm_text = self._confirm_text(drive, iso)
         if self._iso_hybrid:
@@ -3867,14 +3912,17 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "Drive changed or disconnected \u2014 refresh and re-pick"
             )
+            self._scroll_to_progress(self._content_scroll)
             return
         drive_path = self._drive_path_for(current)
         if not drive_path:
             self._progress.set_error("Drive path unavailable")
+            self._scroll_to_progress(self._content_scroll)
             return
         # Require typed confirmation for destructive actions
         if not self._require_typed_confirmation(current, iso):
             self._progress.set_error("Confirmation failed — aborting")
+            self._scroll_to_progress(self._content_scroll)
             return
         self._current_drive = current
         self._active_write_drive = current
@@ -3945,6 +3993,8 @@ class MainWindow(QMainWindow):
         )
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Writing\u2026")
+
+        self._scroll_to_progress(self._content_scroll)
 
         writer = UsbWriter(
             iso,
@@ -4242,6 +4292,7 @@ class MainWindow(QMainWindow):
         self._writing = True
         self._write_started = time.perf_counter()
         self._poller.suspend()
+        self._scroll_to_progress(self._content_scroll)
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Wiping\u2026")
 
@@ -4284,6 +4335,7 @@ class MainWindow(QMainWindow):
             self._progress._title.setText("Wiped")
             self._done_label.setText("Drive wiped")
             self._done_bar.setVisible(True)
+            self._scroll_to_done_bar()
             if self._tray is not None:
                 self._tray.showMessage(
                     "Flint \u2014 Wipe finished",
@@ -4865,6 +4917,18 @@ class MainWindow(QMainWindow):
     def _fleet_update_banner(self, text: str) -> None:
         self._fleet_label.setText(text)
 
+    def _scroll_to_progress(self, scroll: QScrollArea) -> None:
+        """Auto-scroll so the progress bar is visible after a short delay."""
+        QTimer.singleShot(100, lambda: scroll.ensureWidgetVisible(self._progress, 0, 50))
+
+    def _scroll_to_verify_progress(self) -> None:
+        """Auto-scroll the verify page so its progress bar is visible."""
+        QTimer.singleShot(100, lambda: self._verify_scroll.ensureWidgetVisible(self._verify_progress, 0, 50))
+
+    def _scroll_to_done_bar(self) -> None:
+        """Auto-scroll so the done bar is visible after an operation completes."""
+        QTimer.singleShot(100, lambda: self._content_scroll.ensureWidgetVisible(self._done_bar, 0, 50))
+
     def _start_drive_operation(self, worker: Any) -> None:
         """Common busy-state setup for backup/clone operations."""
         self._progress.reset()
@@ -4877,6 +4941,7 @@ class MainWindow(QMainWindow):
         self._write_started = time.perf_counter()
         self._write_duration = 0.0
         self._poller.suspend()
+        self._scroll_to_progress(self._content_scroll)
         worker.progress.connect(self._on_write_progress)
         worker.speed_mbps.connect(self._progress.set_speed)
         worker.written_bytes.connect(self._progress.set_written)
@@ -5070,6 +5135,7 @@ class MainWindow(QMainWindow):
                     f"{dst.get('model') or 'target'}"
                 )
             self._done_bar.setVisible(True)
+            self._scroll_to_done_bar()
         else:
             self._progress.set_error(
                 self._friendly_error(message or "Operation failed")
@@ -5306,6 +5372,7 @@ class MainWindow(QMainWindow):
                     "Verified \u2713\ufe0e" if verified_sha else "Flash complete"
                 )
             self._done_bar.setVisible(True)
+            self._scroll_to_done_bar()
         elif error_text == "cancelled":
             self._progress.set_error(
                 "Write cancelled \u2014 the drive was left partially "
@@ -5317,6 +5384,7 @@ class MainWindow(QMainWindow):
                 "The drive needs a complete write before use."
             )
             self._done_bar.setVisible(True)
+            self._scroll_to_done_bar()
         else:
             self._progress.set_error(
                 self._friendly_error(error_text or "Failed")
