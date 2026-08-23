@@ -28,6 +28,7 @@ _DEFAULTS: dict[str, Any] = {
     "verify_sha256": True,
     "bad_block_scan": False,
     "bad_block_retries": 3,
+    "log_level": "INFO",
 }
 
 # Settings whose values must have a specific type. Corrupted or hand-edited
@@ -52,6 +53,7 @@ _TYPE_CHECK: dict[str, type] = {
     "verify_sha256": bool,
     "bad_block_scan": bool,
     "bad_block_retries": int,
+    "log_level": str,
 }
 
 
@@ -104,3 +106,28 @@ def set_many(**values: Any) -> None:
         tmp.replace(SETTINGS_PATH)
     except OSError:
         logger.exception("failed to persist settings")
+
+
+def export_settings(target_path: str | Path) -> bool:
+    """Export current settings to a JSON file."""
+    try:
+        data = _ensure_loaded()
+        with open(target_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except OSError:
+        return False
+
+
+def import_settings(source_path: str | Path) -> tuple[bool, int]:
+    """Import settings from a JSON file. Returns (ok, count_imported)."""
+    try:
+        with open(source_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False, 0
+        valid = {k: v for k, v in data.items() if k in _DEFAULTS}
+        set_many(**valid)
+        return True, len(valid)
+    except (OSError, json.JSONDecodeError):
+        return False, 0

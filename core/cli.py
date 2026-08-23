@@ -67,6 +67,7 @@ _VALUE_OPTS = {
     "sha256",
     "timeout",
     "retries",
+    "shell",
 }
 _FLAG_OPTS = {
     "verify",
@@ -75,6 +76,9 @@ _FLAG_OPTS = {
     "skip-flashed",
     "yes",
     "quiet",
+    "dry-run",
+    "copy-report",
+    "verbose",
 }
 
 _METHODS = ("zero", "random", "nist", "dod")
@@ -375,11 +379,14 @@ _COMMAND_HELP: dict[str, str] = {
         "  Example: flint doctor\n"
     ),
     "completions": (
-        "flint completions\n"
-        "  Print a PowerShell completion script (Register-ArgumentCompleter)\n"
-        "  for flint. Save it to your $PROFILE to get command, option and\n"
-        "  live drive-serial completion.\n"
-        "  Example: flint completions | Out-File -Append $PROFILE\n"
+        "flint completions [--shell powershell|bash|zsh]\n"
+        "  Print a shell completion script. Default is PowerShell.\n"
+        "  --shell bash     generate bash completion script\n"
+        "  --shell zsh      generate zsh completion script\n"
+        "  --shell powershell  generate PowerShell completion script (default)\n"
+        "  PowerShell: flint completions | Out-File -Append $PROFILE\n"
+        "  Bash: flint completions --shell bash | sudo tee /etc/bash_completion.d/flint\n"
+        "  Zsh: flint completions --shell zsh > /usr/local/share/zsh/site-functions/_flint\n"
     ),
     "scan": (
         "flint scan --drive <serial|letter|path> [--retries <1-10>] [--quiet]\n"
@@ -823,6 +830,19 @@ def _cmd_list(opts: dict[str, object]) -> int:
     return _result("ok", f"{len(drives)} drive(s) listed", EXIT_OK)
 
 
+def _copy_to_clipboard(text: str) -> None:
+    """Copy text to the Windows clipboard via PowerShell."""
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", f"Set-Clipboard -Value '{text.replace(chr(39), chr(39)*2)}'"],
+            capture_output=True,
+            check=False,
+        )
+        _eprint("report copied to clipboard")
+    except OSError:
+        pass
+
+
 def _cmd_flash(opts: dict[str, object]) -> int:
     from core.writer import UsbWriter
 
@@ -856,6 +876,15 @@ def _cmd_flash(opts: dict[str, object]) -> int:
     )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
+    if opts.get("dry-run"):
+        image_size = os.path.getsize(image)
+        _eprint("DRY RUN — would flash:")
+        _eprint(f"  image: {image} ({image_size:,} bytes)")
+        _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
+        _eprint(f"  serial: {_serial_of(drive)}")
+        _eprint(f"  letters: {_display_letters(drive)}")
+        _eprint(f"  verify: {bool(opts.get('verify')) or _env_flag('FLINT_VERIFY')}")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     image_size = os.path.getsize(image)
     if image_size > (drive.get("size_gb", 0) * 1_000_000_000):
         return _result("fail", "image is larger than the target drive", EXIT_FAIL)
@@ -875,6 +904,8 @@ def _cmd_flash(opts: dict[str, object]) -> int:
             message,
             EXIT_CANCELLED if message == "cancelled" else EXIT_FAIL,
         )
+    if opts.get("copy-report"):
+        _copy_to_clipboard(f"Flint flash: {os.path.basename(image)} -> {_serial_of(drive)}")
     if not (bool(opts.get("verify")) or _env_flag("FLINT_VERIFY")):
         return _result("ok", "flashed", EXIT_OK)
     digest, hash_error = _iso_digest(image)
@@ -965,6 +996,12 @@ def _cmd_wipe(opts: dict[str, object]) -> int:
     )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
+    if opts.get("dry-run"):
+        _eprint("DRY RUN — would wipe:")
+        _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
+        _eprint(f"  serial: {_serial_of(drive)}")
+        _eprint(f"  method: {opts.get('method', 'zero')!s}")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     method = str(opts.get("method", "zero")).lower()
     if method not in WIPE_METHODS:
         return _result(
@@ -1043,6 +1080,11 @@ def _cmd_clone(opts: dict[str, object]) -> int:
         source.get("size_gb", 0) * 1_000_000_000
     ):
         return _result("fail", "target drive is smaller than the source", EXIT_USAGE)
+    if opts.get("dry-run"):
+        _eprint("DRY RUN — would clone:")
+        _eprint(f"  from: {source.get('model') or source.get('name')} ({source['physical_path']})")
+        _eprint(f"  to: {target.get('model') or target.get('name')} ({target['physical_path']})")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     worker = CloneWorker(
         source["physical_path"],
         target["physical_path"],
@@ -1347,6 +1389,92 @@ Register-ArgumentCompleter -CommandName flint -Native -ScriptBlock {
 }
 """
 
+_BASH_COMPLETION = """# flint bash completion
+# Save to /etc/bash_completion.d/flint or source from ~/.bashrc
+_flint_completions() {
+    local cur prev commands options
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands='list flash verify wipe backup clone queue flash-all doctor completions help scan'
+    options='--image --drive --confirm --verify --out --file --method --from --to --sha256 --timeout --json --quiet --help --version --retries --yes --dry-run --skip-flashed --copy-report'
+
+    if [[ ${cur} == -* ]]; then
+        COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
+    elif [[ ${COMP_CWORD} -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+    elif [[ ${prev} == --image || ${prev} == --out || ${prev} == --file ]]; then
+        COMPREPLY=( $(compgen -f -- ${cur}) )
+    elif [[ ${prev} == --drive || ${prev} == --from || ${prev} == --to ]]; then
+        local drives
+        drives=$(flint list --json 2>/dev/null | grep -o '"serial":"[^"]*"' | cut -d'"' -f4)
+        COMPREPLY=( $(compgen -W "${drives}" -- ${cur}) )
+    fi
+    return 0
+}
+complete -F _flint_completions flint
+"""
+
+_ZSH_COMPLETION = """# flint zsh completion
+# Save to a directory in $fpath (e.g. /usr/local/share/zsh/site-functions/_flint)
+#compdef flint
+
+_flint() {
+    local -a commands options
+    commands=(
+        'list:Print every detected drive with serial'
+        'flash:Write an image to a drive'
+        'verify:Verify a drive (bad-block scan or SHA-256 compare)'
+        'wipe:Erase a drive'
+        'backup:Copy a drive to an image file'
+        'clone:Copy one drive to another'
+        'queue:Flash multiple images from a file'
+        'flash-all:Fleet mode - flash every queued image to every drive'
+        'doctor:Print diagnostic report'
+        'completions:Print shell completion script'
+        'scan:Read every sector to find unreadable media'
+        'help:Show help'
+    )
+    options=(
+        '--image[ISO/IMG/DD image file]:file:_files'
+        '--drive[target drive serial, letter, or path]:'
+        '--confirm[serial of target drive]:'
+        '--verify[read back and compare digests]'
+        '--out[output file for backup]:file:_files'
+        '--file[queue file listing images]:file:_files'
+        '--method[erasure pattern]:zero random nist dod'
+        '--from[source drive serial or letter]:'
+        '--to[target drive serial or letter]:'
+        '--sha256[expected SHA-256 digest]:'
+        '--timeout[timeout in seconds]:'
+        '--json[NDJSON machine-readable output]'
+        '--quiet[suppress progress messages]'
+        '--help[show help]'
+        '--version[show version]'
+        '--retries[retries per failed read]:'
+        '--yes[bypass confirmation]'
+        '--dry-run[preview without performing]'
+        '--skip-flashed[skip drives already flashed]'
+        '--copy-report[copy flash report to clipboard]'
+    )
+
+    _arguments -C \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe 'command' commands
+            ;;
+        args)
+            _describe 'option' options
+            ;;
+    esac
+}
+
+_flint "$@"
+"""
+
 
 def _cmd_scan(opts: dict[str, object]) -> int:
     from core.verify import whole_drive_scan
@@ -1379,6 +1507,7 @@ def _cmd_scan(opts: dict[str, object]) -> int:
         f"{drive.get('name') or drive.get('model') or drive['physical_path']}..."
     )
     started_at = time.monotonic()
+    verbose = bool(opts.get("verbose"))
 
     def on_progress(done: int, total: int) -> None:
         if total > 0:
@@ -1411,6 +1540,12 @@ def _cmd_scan(opts: dict[str, object]) -> int:
         retries=retries,
         progress=on_progress,
     )
+    if verbose and not result["ok"] and result["bad_sectors"]:
+        _eprint(f"\nBad sectors found ({len(result['bad_sectors'])}):")
+        for bs in result["bad_sectors"][:50]:
+            _eprint(f"  offset: {bs['offset']:,} (length: {bs['length']})")
+        if len(result["bad_sectors"]) > 50:
+            _eprint(f"  ... and {len(result['bad_sectors']) - 50} more")
     if _JSON:
         _emit_json(
             type="scan",
@@ -1441,7 +1576,13 @@ def _cmd_scan(opts: dict[str, object]) -> int:
 
 
 def _cmd_completions(opts: dict[str, object]) -> int:
-    _print(_POWERSHELL_COMPLETION)
+    shell = str(opts.get("shell", "powershell")).lower()
+    if shell == "bash":
+        _print(_BASH_COMPLETION)
+    elif shell == "zsh":
+        _print(_ZSH_COMPLETION)
+    else:
+        _print(_POWERSHELL_COMPLETION)
     return EXIT_OK
 
 

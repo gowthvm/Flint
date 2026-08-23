@@ -40,7 +40,7 @@ class optional_build_ext(build_ext):
 
 setup(
     name="flint-native",
-    version="1.3.0",
+    version="1.4.0",
     description="Optional native writer extension for Flint",
     ext_modules=[
         Extension(

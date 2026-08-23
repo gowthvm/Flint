@@ -63,6 +63,25 @@ def export_history(target_path: str | Path) -> bool:
         return False
 
 
+def export_history_csv(target_path: str | Path) -> bool:
+    """Export flash history as a CSV file."""
+    import csv
+
+    try:
+        entries = load_history()
+        if not entries:
+            return False
+        with open(target_path, "w", newline="", encoding="utf-8") as f:
+            if not entries:
+                return True
+            writer = csv.DictWriter(f, fieldnames=list(entries[0].keys()))
+            writer.writeheader()
+            writer.writerows(entries)
+        return True
+    except (OSError, csv.Error):
+        return False
+
+
 def import_history(source_path: str | Path) -> tuple[bool, int]:
     try:
         with open(source_path, "r", encoding="utf-8") as f:

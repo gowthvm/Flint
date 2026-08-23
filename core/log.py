@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 
-def setup_logging(name: str = "flint") -> logging.Logger:
+def setup_logging(name: str = "flint", level: str = "INFO") -> logging.Logger:
     temp = os.environ.get("TEMP", ".")
     log_path = Path(temp) / f"{name}-startup.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -12,7 +12,8 @@ def setup_logging(name: str = "flint") -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
-    logger.setLevel(logging.INFO)
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    logger.setLevel(log_level)
 
     handler = logging.handlers.RotatingFileHandler(
         str(log_path), maxBytes=1024 * 1024, backupCount=3, encoding="utf-8"
@@ -26,6 +27,7 @@ def setup_logging(name: str = "flint") -> logging.Logger:
 
     # also add a console handler for debug convenience
     console = logging.StreamHandler()
+    console.setLevel(log_level)
     console.setFormatter(fmt)
     logger.addHandler(console)
 

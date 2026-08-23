@@ -180,6 +180,7 @@ class UsbWriter(QThread):
         verify_sha256: bool = True,
         bad_block_scan: bool = False,
         bad_block_retries: int = 3,
+        resume: bool = False,
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
@@ -200,6 +201,7 @@ class UsbWriter(QThread):
         self.verify_sha256 = verify_sha256
         self.bad_block_scan = bad_block_scan
         self.bad_block_retries = max(0, int(bad_block_retries))
+        self.resume = resume
         self._canceled = False
         self._finished = False
 
@@ -461,6 +463,18 @@ class UsbWriter(QThread):
         sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
         try:
             with open(self.iso_path, "rb") as source:
+                # Resume from saved state
+                state_path = self.iso_path + ".flint_state"
+                if self.resume and os.path.isfile(state_path):
+                    try:
+                        with open(state_path, "r") as f:
+                            saved = int(f.read().strip())
+                        if 0 < saved < total:
+                            source.seek(saved)
+                            written = saved
+                            self.note.emit(f"Resuming from byte {saved:,}")
+                    except (OSError, ValueError):
+                        pass
                 while chunk := source.read(self.chunk_size):
                     if self._canceled:
                         break
@@ -469,6 +483,13 @@ class UsbWriter(QThread):
                     durations.append(time.perf_counter() - chunk_start)
                     sizes.append(len(chunk))
                     written += len(chunk)
+                    # Persist resume state
+                    if self.resume and written % (10 * 1024 * 1024) < self.chunk_size:
+                        try:
+                            with open(self.iso_path + ".flint_state", "w") as f:
+                                f.write(str(written))
+                        except OSError:
+                            pass
 
                     window_bytes = sum(sizes)
                     window_time = sum(durations)
@@ -487,6 +508,12 @@ class UsbWriter(QThread):
             if not self._canceled:
                 self.phase.emit("Flushing")
                 self._flush(handle)
+                # Clean up resume state file
+                if self.resume:
+                    try:
+                        os.unlink(self.iso_path + ".flint_state")
+                    except OSError:
+                        pass
         except OSError as exc:
             logger.exception("UsbWriter._run_inner: IO error")
             self._finished = True

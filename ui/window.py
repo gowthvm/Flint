@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import time
 from collections import deque
@@ -271,10 +272,12 @@ class HelpButton(QPushButton):
 class IsoWorker(QThread):
     hash_done = pyqtSignal(str, bool, str)
     progress = pyqtSignal(int)
+    eta = pyqtSignal(int)
 
     def __init__(self, path: str) -> None:
         super().__init__()
         self._path = path
+        self._start_time = time.monotonic()
 
     def run(self) -> None:
         try:
@@ -291,6 +294,11 @@ class IsoWorker(QThread):
                         self.progress.emit(
                             round(read_bytes * 100 / total)
                         )
+                        elapsed = time.monotonic() - self._start_time
+                        if elapsed > 0 and read_bytes > 0:
+                            speed = read_bytes / elapsed
+                            remaining = (total - read_bytes) / speed
+                            self.eta.emit(int(remaining))
             if not self.isInterruptionRequested():
                 self.hash_done.emit(self._path, True, digest.hexdigest())
         except Exception:
@@ -561,6 +569,7 @@ class IsoDropZone(QFrame):
         self._worker = worker
         worker.hash_done.connect(self._on_hash_done)
         worker.progress.connect(self._on_hash_progress)
+        worker.eta.connect(self._on_hash_eta)
         worker.start()
 
         analyzer = IsoDetectWorker(path)
@@ -582,6 +591,22 @@ class IsoDropZone(QFrame):
             os.path.getsize(self._path) if os.path.isfile(self._path) else 0
         )
         self._set_meta(False, f"{size} \u00b7 Reading image\u2026 {percent}%")
+
+    def _on_hash_eta(self, seconds: int) -> None:
+        if self._path is None or self._hash_finished:
+            return
+        if seconds <= 0:
+            return
+        size = DriveDetector.format_size(
+            os.path.getsize(self._path) if os.path.isfile(self._path) else 0
+        )
+        if seconds < 60:
+            eta_str = f"~{seconds}s"
+        elif seconds < 3600:
+            eta_str = f"~{seconds // 60}m {seconds % 60}s"
+        else:
+            eta_str = f"~{seconds // 3600}h {(seconds % 3600) // 60}m"
+        self._set_meta(False, f"{size} \u00b7 Reading image\u2026 {eta_str} remaining")
 
     @property
     def path(self) -> str | None:
@@ -1190,6 +1215,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_main())
 
         self.setCentralWidget(central)
+        self.setAcceptDrops(True)
         self._soften_minimum_widths()
         if screen is not None:
             geo = screen.availableGeometry()
@@ -1256,6 +1282,9 @@ class MainWindow(QMainWindow):
         )
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(
             self._iso_zone._browse
+        )
+        QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(
+            self._on_flash_clicked
         )
         for s in self.findChildren(QShortcut):
             s.setContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -2505,6 +2534,34 @@ class MainWindow(QMainWindow):
         self._tray.setContextMenu(menu)
         self._tray.show()
 
+    def _show_toast(self, title: str, message: str) -> None:
+        """Show a Windows toast notification using PowerShell."""
+        try:
+            ps_script = (
+                "[Windows.UI.Notifications.ToastNotificationManager, "
+                "Windows.UI.Notifications, ContentType = WindowsRuntime] "
+                "| Out-Null\n"
+                "[Windows.Data.Xml.Dom.XmlDocument, "
+                "Windows.Data.Xml.Dom, ContentType = WindowsRuntime] "
+                "| Out-Null\n"
+                f'$template = "<toast><visual><binding '
+                f"template='ToastGeneric'><text>{title}</text>"
+                f"<text>{message}</text></binding></visual></toast>\"\n"
+                "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
+                "$xml.LoadXml($template)\n"
+                "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n"
+                "[Windows.UI.Notifications.ToastNotificationManager]"
+                "::CreateToastNotifier('Flint').Show($toast)"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
     def _on_tray_quit(self) -> None:
         if self._busy() and not dialogs.confirm(
             self,
@@ -2700,6 +2757,41 @@ class MainWindow(QMainWindow):
             if retired is not None and not retired.isRunning():
                 retired.deleteLater()
         self._retired_workers.clear()
+
+    def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
+        assert event is not None
+        mime = event.mimeData()
+        if mime is None:
+            event.ignore()
+            return
+        if mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(".sha256"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent | None) -> None:
+        assert event is not None
+        mime = event.mimeData()
+        if mime is None:
+            return
+        for url in mime.urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".sha256"):
+                self._load_sha256_file(url.toLocalFile())
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def _load_sha256_file(self, path: str) -> None:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read(256).strip().lower()
+            if len(text) == 64 and all(c in "0123456789abcdef" for c in text):
+                self._on_nav_clicked(1)
+                self._verify_sha_input.setText(text)
+        except OSError:
+            pass
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         assert event is not None
@@ -5221,6 +5313,13 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Information,
                     4000,
                 )
+
+        toast_msg = (
+            "Image was " + ("verified." if verified_sha else "written.")
+            if succeeded
+            else ("Write cancelled" if error_text == "cancelled" else "Write failed")
+        )
+        self._show_toast("Flint", toast_msg)
 
         if succeeded:
             if skipped_verify:
