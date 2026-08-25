@@ -440,7 +440,10 @@ def test_writer_inner_python_path_uses_chunk_size(tmp_path, monkeypatch):
     w._run_inner()
 
     assert sizes and max(sizes) <= 4096
-    assert sum(sizes) == len(payload)
+    # Final chunk is padded to sector alignment, so sum >= payload.
+    import math
+    assert sum(sizes) >= len(payload)
+    assert sum(sizes) == math.ceil(len(payload) / 4096) * 4096
 
 
 def test_writer_inner_native_dispatch(tmp_path, monkeypatch):
@@ -470,7 +473,8 @@ def test_writer_inner_native_falls_back_when_missing(tmp_path, monkeypatch):
 
     w._run_inner()
 
-    assert sizes and sum(sizes) == len(payload)
+    import math
+    assert sizes and sum(sizes) == math.ceil(len(payload) / 4096) * 4096
 
 
 def test_writer_chunk_size_clamped_to_minimum():

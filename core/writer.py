@@ -153,6 +153,9 @@ class UsbWriter(QThread):
     _FILE_SHARE_READ = 0x1
     _FILE_SHARE_WRITE = 0x2
     _OPEN_EXISTING = 3
+    _FILE_FLAG_NO_BUFFERING = 0x20000000
+    _FILE_FLAG_WRITE_THROUGH = 0x80000000
+    _SECTOR_SIZE = 4096
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
     _IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
     _FSCTL_DISMOUNT_VOLUME = 0x00090020
@@ -195,8 +198,9 @@ class UsbWriter(QThread):
         self.persistence_size_mb = persistence_size_mb
         self.windows_to_go = windows_to_go
         self.chunk_size = (
-            chunk_size if chunk_size >= 4096 else DEFAULT_CHUNK_SIZE
+            chunk_size if chunk_size >= self._SECTOR_SIZE else DEFAULT_CHUNK_SIZE
         )
+        self.chunk_size -= self.chunk_size % self._SECTOR_SIZE
         self.use_native = use_native
         self.verify_after_write = verify_after_write
         self.verify_sha256 = verify_sha256
@@ -218,7 +222,7 @@ class UsbWriter(QThread):
             self._FILE_SHARE_READ | self._FILE_SHARE_WRITE,
             None,
             self._OPEN_EXISTING,
-            0,
+            self._FILE_FLAG_NO_BUFFERING | self._FILE_FLAG_WRITE_THROUGH,
             None,
         )
         if not handle or handle == self._INVALID_HANDLE_VALUE:
@@ -505,6 +509,11 @@ class UsbWriter(QThread):
                 while chunk := source.read(self.chunk_size):
                     if self._canceled:
                         break
+                    # FILE_FLAG_NO_BUFFERING requires sector-aligned writes.
+                    # Pad the final partial chunk with zeros (like dd).
+                    if len(chunk) % self._SECTOR_SIZE != 0:
+                        pad = self._SECTOR_SIZE - (len(chunk) % self._SECTOR_SIZE)
+                        chunk = chunk + b"\x00" * pad
                     chunk_start = time.perf_counter()
                     self._write_chunk(handle, chunk)
                     durations.append(time.perf_counter() - chunk_start)
