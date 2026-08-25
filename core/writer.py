@@ -243,21 +243,38 @@ class UsbWriter(QThread):
             raise OSError("failed to query drive size")
         return size.value
 
+    # Win32 error codes worth retrying on USB devices.
+    _TRANSIENT_ERRORS: frozenset[int] = frozenset({21, 31, 5, 1167})
+
     def _write_chunk(self, handle: int, data: bytes) -> None:
         kernel32 = _kernel32()
-        buffer = ctypes.create_string_buffer(data)
-        written = ctypes.c_ulong()
-        ok = kernel32.WriteFile(
-            handle,
-            buffer,
-            len(data),
-            ctypes.byref(written),
-            None,
-        )
+        last_err = 0
+        for attempt in range(4):  # 0, 1, 2, 3
+            buffer = ctypes.create_string_buffer(data)
+            written = ctypes.c_ulong()
+            ok = kernel32.WriteFile(
+                handle,
+                buffer,
+                len(data),
+                ctypes.byref(written),
+                None,
+            )
+            if ok and written.value == len(data):
+                return
+            last_err = kernel32.GetLastError()
+            if attempt < 3 and last_err in self._TRANSIENT_ERRORS:
+                time.sleep(0.5 * (2 ** attempt))  # 0.5, 1, 2s backoff
+                continue
+            break
+        if last_err in self._TRANSIENT_ERRORS:
+            raise OSError(
+                f"write failed: {last_err} (USB device became unresponsive "
+                f"after {last_err} retries — check cable/port or disable "
+                f"USB selective suspend in Power Options)"
+            )
         if not ok:
-            raise OSError(f"write failed: {kernel32.GetLastError()}")
-        if written.value != len(data):
-            raise OSError("short write on drive")
+            raise OSError(f"write failed: {last_err}")
+        raise OSError("short write on drive")
 
     def _flush(self, handle: int) -> None:
         if not _kernel32().FlushFileBuffers(handle):

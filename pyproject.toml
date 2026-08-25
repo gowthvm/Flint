@@ -53,7 +53,7 @@ package-data = {"ui" = ["reference.html", "flint.ico"]}
 version = {attr = "core.version.APP_VERSION"}
 
 [tool.cibuildwheel]
-build = "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp313-win_amd64 cp314-win_amd64"
+build = "cp3*-win_amd64"
 environment = {CIBW_BUILD_VERBOSITY = "1"}
 before-build = "python -m pip install --upgrade pip setuptools wheel"
 

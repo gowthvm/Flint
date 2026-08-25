@@ -149,23 +149,20 @@ jobs:
           path: dist/*.tar.gz
 
   build-wheels:
-    name: Build wheel (CPython ${{ matrix.cpython }})
+    name: Build wheels
     needs: test
     runs-on: windows-latest
-    strategy:
-      matrix:
-        cpython: ['cp310', 'cp311', 'cp312', 'cp313', 'cp314']
     steps:
       - uses: actions/checkout@v4
 
       - uses: pypa/cibuildwheel@v2.22
         env:
-          CIBW_BUILD: ${{ matrix.cpython }}-win_amd64
+          CIBW_BUILD: "cp3*-win_amd64"
           CIBW_ARCHS_WINDOWS: AMD64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.cpython }}
+          name: wheels
           path: wheelhouse/*.whl
 
   # ---------------------------------------------------------------------------
