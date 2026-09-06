@@ -224,21 +224,42 @@ class WipeWorker(QThread):
             self._device_control(handle, self._FSCTL_UNLOCK_VOLUME)
             kernel32.CloseHandle(handle)
 
+    _TRANSIENT_ERRORS: frozenset[int] = frozenset({21, 31, 5, 1167})
+
     def _write_chunk(self, handle: ctypes.c_void_p, data: bytes) -> None:
         kernel32 = self._kernel32()
-        buffer = ctypes.create_string_buffer(data)
-        written = ctypes.c_ulong()
-        ok = kernel32.WriteFile(
-            handle,
-            buffer,
-            len(data),
-            ctypes.byref(written),
-            None,
-        )
+        max_retries = 3
+        last_err = 0
+        for attempt in range(max_retries + 1):
+            buffer = ctypes.create_string_buffer(data)
+            written = ctypes.c_ulong()
+            ok = kernel32.WriteFile(
+                handle,
+                buffer,
+                len(data),
+                ctypes.byref(written),
+                None,
+            )
+            if ok and written.value == len(data):
+                return
+            if ok and written.value < len(data):
+                last_err = 0
+            else:
+                last_err = kernel32.GetLastError()
+            if attempt < max_retries and (
+                last_err in self._TRANSIENT_ERRORS or (ok and written.value < len(data))
+            ):
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            break
+        if last_err in self._TRANSIENT_ERRORS:
+            raise OSError(
+                f"write failed: {last_err} (USB device became unresponsive "
+                f"after {max_retries} retries — check cable/port)"
+            )
         if not ok:
-            raise OSError(f"write failed: {ctypes.windll.kernel32.GetLastError()}")
-        if written.value != len(data):
-            raise OSError("short write on drive")
+            raise OSError(f"write failed: {last_err}")
+        raise OSError("short write on drive")
 
     def _seek_start(self, handle: ctypes.c_void_p) -> None:
         self._kernel32().SetFilePointer(handle, 0, None, 0)

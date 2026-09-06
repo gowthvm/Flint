@@ -686,7 +686,7 @@ def test_filecopy_mode_runs_verification_after_copy(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(w, "_run_filecopy", lambda: calls.append("filecopy"))
     monkeypatch.setattr(
-        w, "_verify_after_write", lambda: calls.append("verify")
+        w, "_verify_after_write", lambda **kw: calls.append("verify")
     )
 
     w.run()

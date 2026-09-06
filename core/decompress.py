@@ -64,6 +64,7 @@ def decompress_image(path: str) -> Iterator[str]:
         return
 
     tmp_dir = tempfile.mkdtemp(prefix="flint-decompress-")
+    extracted = None
     try:
         if fmt == ".zip":
             extracted = _decompress_zip(path, tmp_dir)
@@ -78,7 +79,16 @@ def decompress_image(path: str) -> Iterator[str]:
             return
         yield extracted
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Clean up the decompressed temp file, then the temp directory.
+        if extracted is not None:
+            try:
+                os.unlink(extracted)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 def _decompress_zip(zip_path: str, tmp_dir: str) -> str:
@@ -123,8 +133,9 @@ def _decompress_zst(zst_path: str, tmp_dir: str) -> str:
     try:
         import zstandard as zstd
     except ImportError:
-        raise ImportError(
-            "zstandard is required for .zst files: pip install zstandard"
+        raise OSError(
+            "The 'zstandard' package is required for .zst files. "
+            "Install it with: pip install zstandard"
         )
     base = os.path.splitext(os.path.basename(zst_path))[0]
     extracted = os.path.join(tmp_dir, base)

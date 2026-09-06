@@ -117,7 +117,7 @@ def test_backup_cancel_midway(tmp_path, monkeypatch):
     events = _run(worker)
 
     assert events["finished"] == [(False, "cancelled")]
-    assert len(out.read_bytes()) < len(payload)
+    assert not out.exists(), "partial file should be removed on cancel"
     assert not events["digest"], "no digest reported for a cancelled backup"
 
 

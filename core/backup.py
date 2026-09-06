@@ -7,6 +7,7 @@ nothing is written to the drive itself.
 
 import hashlib
 import logging
+import os
 import time
 from collections import deque
 from typing import Any
@@ -106,6 +107,7 @@ class BackupWorker(QThread):
     def _run_inner(self) -> None:
         handle = self._open_drive()
         out_file = None
+        success = False
         try:
             total = self._drive_size(handle)
             if total <= 0:
@@ -150,6 +152,7 @@ class BackupWorker(QThread):
                 self.phase.emit("Flushing")
                 self._flush(handle)
                 self.digest.emit(digest.hexdigest())
+                success = True
         except Exception as exc:
             self.finished.emit(False, str(exc))
             return
@@ -157,6 +160,12 @@ class BackupWorker(QThread):
             if out_file is not None:
                 try:
                     out_file.close()
+                except OSError:
+                    pass
+            # Remove partial backup file on error or cancellation.
+            if (self._canceled or not success) and os.path.isfile(self.out_path):
+                try:
+                    os.unlink(self.out_path)
                 except OSError:
                     pass
             kernel32().CloseHandle(handle)

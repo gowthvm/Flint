@@ -4352,6 +4352,7 @@ class MainWindow(QMainWindow):
             self._progress._title.setText("Wiped")
             self._done_label.setText("Drive wiped")
             self._done_summary.setText("")
+            self._reflash_btn.setVisible(False)
             self._done_bar.setVisible(True)
             self._scroll_to_done_bar()
             if self._tray is not None:
@@ -5152,6 +5153,7 @@ class MainWindow(QMainWindow):
                     f"{src.get('model') or 'source'} \u2192 "
                     f"{dst.get('model') or 'target'}"
                 )
+            self._reflash_btn.setVisible(False)
             self._done_bar.setVisible(True)
             self._scroll_to_done_bar()
         else:
@@ -5252,6 +5254,11 @@ class MainWindow(QMainWindow):
                 "as administrator."
             )
         if "write failed" in lowered or "flush failed" in lowered:
+            # The retry logic already provides specific advice (cable/port,
+            # selective suspend). Don't append generic "locked/removed" text
+            # that would be redundant or contradictory.
+            if "retries" in lowered:
+                return message
             return (
                 f"{message} \u2014 the drive may be locked, removed or "
                 "failing. Re-insert it and try again."
@@ -5389,6 +5396,7 @@ class MainWindow(QMainWindow):
                 self._done_label.setText(
                     "Verified \u2713\ufe0e" if verified_sha else "Flash complete"
                 )
+            self._reflash_btn.setVisible(True)
             self._done_bar.setVisible(True)
             self._scroll_to_done_bar()
         elif error_text == "cancelled":
@@ -5401,6 +5409,7 @@ class MainWindow(QMainWindow):
             self._done_summary.setText(
                 "The drive needs a complete write before use."
             )
+            self._reflash_btn.setVisible(True)
             self._done_bar.setVisible(True)
             self._scroll_to_done_bar()
         else:

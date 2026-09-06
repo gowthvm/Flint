@@ -1287,6 +1287,7 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
                     str(drive["physical_path"]),
                     letters=letters,
                     verify_after_write=verify,
+                    bypass_tpm=bool(opts.get("bypass-tpm")),
                 )
                 ok, message = _run_worker(worker, "flash")
                 if not ok:

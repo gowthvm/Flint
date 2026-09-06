@@ -226,7 +226,13 @@ class UsbWriter(QThread):
             None,
         )
         if not handle or handle == self._INVALID_HANDLE_VALUE:
-            raise OSError(f"drive not writable: {self.drive_path}")
+            err = kernel32.GetLastError()
+            if err == 5:  # ERROR_ACCESS_DENIED
+                raise OSError(
+                    f"access denied: {self.drive_path} — run Flint as "
+                    "administrator to write to raw drives"
+                )
+            raise OSError(f"drive not writable: {self.drive_path} (error {err})")
         return int(handle)
 
     def _drive_size(self, handle: int) -> int:
@@ -376,7 +382,9 @@ class UsbWriter(QThread):
                 if self.verify_after_write and (
                     self.verify_sha256 or self.bad_block_scan
                 ):
-                    self._verify_after_write()
+                    # Filecopy mode writes a filesystem, not a raw image —
+                    # byte-comparing against the ISO is meaningless.
+                    self._verify_after_write(skip_source_iso=True)
                 if self._finished:
                     return
                 self.finished.emit(True, "")
@@ -631,7 +639,7 @@ class UsbWriter(QThread):
         self.speed_mbps.emit(0.0)
         self.eta_seconds.emit(0)
 
-    def _verify_after_write(self) -> None:
+    def _verify_after_write(self, skip_source_iso: bool = False) -> None:
         """Read the drive back and compare it against the source image.
 
         Byte-compares when ``verify_sha256`` is set (mismatch offsets are
@@ -648,7 +656,7 @@ class UsbWriter(QThread):
         self.phase.emit("Verifying")
         result = verify_mod.verify_device(
             self.drive_path,
-            source_iso=self.iso_path if self.verify_sha256 else None,
+            source_iso=None if skip_source_iso else (self.iso_path if self.verify_sha256 else None),
             chunk_size=self.chunk_size,
             retries=self.bad_block_retries,
             progress=on_progress,

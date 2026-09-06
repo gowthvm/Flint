@@ -41,7 +41,11 @@ class DrivePoller(QThread):
         self._suspended = False
 
     def run(self) -> None:
-        pythoncom.CoInitialize()
+        try:
+            pythoncom.CoInitialize()
+        except Exception:
+            logger.exception("DrivePoller: CoInitialize failed")
+            return
         try:
             while not self.isInterruptionRequested():
                 if self._suspended:

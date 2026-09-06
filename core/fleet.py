@@ -39,16 +39,21 @@ class FleetSession:
     def fits_on_drive(self, image: str, drive: dict[str, Any]) -> bool:
         """The drive's reported capacity must hold the whole image.
 
-        The picker reports sizes in decimal gigabytes (size_gb * 1e9),
-        so fleet applies the same convention for the capacity check.
+        Uses raw ``size_bytes`` when available (no rounding error);
+        falls back to ``size_gb * 1e9`` for older drive records.
         """
         size = self.image_sizes().get(image)
         if size is None:
             return False
-        capacity = drive.get("size_gb")
-        if not isinstance(capacity, (int, float)):
+        # Prefer raw byte count (no rounding).
+        capacity = drive.get("size_bytes")
+        if isinstance(capacity, (int, float)) and capacity > 0:
+            return size <= capacity
+        # Fallback to rounded gigabytes.
+        capacity_gb = drive.get("size_gb")
+        if not isinstance(capacity_gb, (int, float)):
             return False
-        return size <= capacity * BYTES_PER_GB
+        return size <= capacity_gb * BYTES_PER_GB
 
     def mark_flashed(self, drive: dict[str, Any]) -> None:
         fp = drive_fingerprint(drive)

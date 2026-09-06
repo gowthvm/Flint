@@ -198,7 +198,6 @@ def verify_device(
     progress: Callable[[int, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
     scan_full_drive: bool = False,
-    sample_mode: bool = False,
 ) -> dict[str, Any]:
     """Read a device back and verify it against a source image.
 
@@ -264,93 +263,6 @@ def verify_device(
         if verify_size <= 0:
             result["error"] = "nothing to verify"
             return result
-        if sample_mode and verify_size > 16 * 1024 * 1024:
-            # Quick sample: first 8MB, last 8MB, 4 random 8MB chunks
-            import random
-            SAMPLE_CHUNK = 8 * 1024 * 1024
-            regions = []
-            # First chunk
-            regions.append((0, min(SAMPLE_CHUNK, verify_size)))
-            # Last chunk
-            last_start = max(verify_size - SAMPLE_CHUNK, SAMPLE_CHUNK)
-            regions.append((last_start, min(SAMPLE_CHUNK, verify_size - last_start)))
-            # 4 random middle chunks
-            for _ in range(4):
-                rand_start = random.randint(SAMPLE_CHUNK, max(SAMPLE_CHUNK, verify_size - SAMPLE_CHUNK * 2))
-                regions.append((rand_start, min(SAMPLE_CHUNK, verify_size - rand_start)))
-            # Sort and deduplicate overlapping regions
-            regions.sort()
-            merged: list[tuple[int, int]] = []
-            for start, length in regions:
-                if merged and start <= merged[-1][0] + merged[-1][1]:
-                    prev_start, prev_len = merged[-1]
-                    new_end = start + length
-                    merged[-1] = (prev_start, max(prev_len, new_end - prev_start))
-                else:
-                    merged.append((start, length))
-            regions = merged
-            # Open source ISO for byte comparison if available
-            iso_f = (
-                open(source_iso, "rb") if source_iso is not None else None  # noqa: SIM115
-            )
-            try:
-                # Read and verify only these regions
-                digest = hashlib.sha256()
-                done = 0
-                start_time = time.perf_counter()
-                for region_start, region_len in regions:
-                    if is_cancelled is not None and is_cancelled():
-                        result["error"] = "cancelled"
-                        return result
-                    if not _seek(handle, region_start, retries):
-                        result["error"] = "could not seek for sample verification"
-                        return result
-                    region_done = 0
-                    while region_done < region_len:
-                        count = min(chunk_size, region_len - region_done)
-                        buffer = ctypes.create_string_buffer(count)
-                        try:
-                            nread = _read_chunk(handle, buffer, count, retries, is_cancelled)
-                        except _Cancelled:
-                            result["error"] = "cancelled"
-                            return result
-                        if nread is None:
-                            result["bad_sectors"].append(region_start + region_done - (region_start + region_done) % SECTOR_SIZE)
-                            region_done += count
-                            if not _seek(handle, region_start + region_done, retries):
-                                result["error"] = "could not reposition for sample verification"
-                                return result
-                            if progress is not None:
-                                progress(done + region_done, verify_size)
-                            continue
-                        if nread == 0:
-                            break
-                        data = buffer.raw[:nread]
-                        digest.update(data)
-                        if iso_f is not None and region_start + region_done < (iso_size or 0):
-                            iso_f.seek(region_start + region_done)
-                            expected = iso_f.read(nread)
-                            if expected != data and len(result["mismatches"]) < MAX_MISMATCHES:
-                                first_diff = next((i for i, (a, b) in enumerate(zip(expected, data)) if a != b), 0)
-                                win = min(len(data) - first_diff, MISMATCH_SAMPLE_SIZE)
-                                result["mismatches"].append((
-                                    region_start + region_done, nread, first_diff,
-                                    expected[first_diff:first_diff+win], data[first_diff:first_diff+win],
-                                ))
-                        region_done += nread
-                        done += nread
-                        if progress is not None:
-                            progress(done, verify_size)
-                elapsed = time.perf_counter() - start_time
-                result["speed_mbps"] = done / elapsed / 1_000_000 if elapsed > 0 else 0.0
-                result["digest"] = digest.hexdigest()
-                result["ok"] = not result["bad_sectors"] and not result["mismatches"] and (
-                    expected_sha256 is None or result["digest"] == expected_sha256
-                )
-                return result
-            finally:
-                if iso_f is not None:
-                    iso_f.close()
         with (
             open(source_iso, "rb")
             if source_iso is not None
@@ -613,7 +525,7 @@ def hash_drive(
                 if ok and read.value > 0:
                     break
                 last_err = kernel32.GetLastError()
-                if attempt < 3 and last_err in {21, 31, 1167}:
+                if attempt < 3 and last_err in {21, 31, 5, 1167}:
                     time.sleep(0.5 * (2 ** attempt))
                     continue
                 break
