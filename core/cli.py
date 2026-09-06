@@ -1046,6 +1046,12 @@ def _cmd_backup(opts: dict[str, object]) -> int:
         issue = _require_confirm(drive, confirm)
         if issue:
             return _result("fail", issue, EXIT_USAGE)
+    if opts.get("dry-run"):
+        _eprint("DRY RUN — would backup:")
+        _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
+        _eprint(f"  serial: {_serial_of(drive)}")
+        _eprint(f"  output: {out}")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     letters = drive.get("letters") or (
         [drive["letter"]] if drive.get("letter") else []
     )
@@ -1171,6 +1177,17 @@ def _cmd_queue(opts: dict[str, object]) -> int:
         [drive["letter"]] if drive.get("letter") else []
     )
     verify = bool(opts.get("verify")) or _env_flag("FLINT_VERIFY")
+    bypass_tpm = bool(opts.get("bypass-tpm"))
+    if opts.get("dry-run"):
+        _eprint("DRY RUN — would flash queue:")
+        _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
+        _eprint(f"  serial: {_serial_of(drive)}")
+        _eprint(f"  images: {len(images)}")
+        for i, img in enumerate(images, 1):
+            _eprint(f"    {i}. {img}")
+        _eprint(f"  verify: {verify}")
+        _eprint(f"  bypass-tpm: {bypass_tpm}")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     for index, image in enumerate(images, 1):
         _eprint(f"--- queue {index}/{len(images)}: {os.path.basename(image)}")
         from core.writer import UsbWriter
@@ -1180,6 +1197,7 @@ def _cmd_queue(opts: dict[str, object]) -> int:
             drive["physical_path"],
             letters=letters,
             verify_after_write=verify,
+            bypass_tpm=bypass_tpm,
         )
         ok, message = _run_worker(worker, "flash")
         if not ok:
@@ -1227,7 +1245,16 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
 
     session = FleetSession(images=images)
     skip = bool(opts.get("skip-flashed"))
-    verify = _env_flag("FLINT_VERIFY")
+    verify = bool(opts.get("verify")) or _env_flag("FLINT_VERIFY")
+    if opts.get("dry-run"):
+        _eprint("DRY RUN — would flash fleet:")
+        _eprint(f"  images: {len(images)}")
+        for i, img in enumerate(images, 1):
+            _eprint(f"    {i}. {img}")
+        _eprint(f"  timeout: {budget}s")
+        _eprint(f"  skip-flashed: {skip}")
+        _eprint(f"  verify: {verify}")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     _eprint(
         f"fleet armed: {len(session.images)} image(s); flashing every "
         f"fitting drive until {budget}s pass"

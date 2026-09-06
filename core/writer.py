@@ -252,8 +252,9 @@ class UsbWriter(QThread):
 
     def _write_chunk(self, handle: int, data: bytes) -> None:
         kernel32 = _kernel32()
+        max_retries = 3
         last_err = 0
-        for attempt in range(4):  # 0, 1, 2, 3
+        for attempt in range(max_retries + 1):  # 0, 1, 2, 3
             buffer = ctypes.create_string_buffer(data)
             written = ctypes.c_ulong()
             ok = kernel32.WriteFile(
@@ -265,15 +266,21 @@ class UsbWriter(QThread):
             )
             if ok and written.value == len(data):
                 return
-            last_err = kernel32.GetLastError()
-            if attempt < 3 and last_err in self._TRANSIENT_ERRORS:
+            # Short write is also transient — device may recover on retry.
+            if ok and written.value < len(data):
+                last_err = 0  # no Win32 error, but treat as transient
+            else:
+                last_err = kernel32.GetLastError()
+            if attempt < max_retries and (
+                last_err in self._TRANSIENT_ERRORS or (ok and written.value < len(data))
+            ):
                 time.sleep(0.5 * (2 ** attempt))  # 0.5, 1, 2s backoff
                 continue
             break
         if last_err in self._TRANSIENT_ERRORS:
             raise OSError(
                 f"write failed: {last_err} (USB device became unresponsive "
-                f"after {last_err} retries — check cable/port or disable "
+                f"after {max_retries} retries — check cable/port or disable "
                 f"USB selective suspend in Power Options)"
             )
         if not ok:
@@ -490,6 +497,7 @@ class UsbWriter(QThread):
                 return
 
         written = 0
+        source_written = 0
         durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
         sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
         try:
@@ -502,7 +510,7 @@ class UsbWriter(QThread):
                             saved = int(f.read().strip())
                         if 0 < saved < total:
                             source.seek(saved)
-                            written = saved
+                            source_written = saved
                             self.note.emit(f"Resuming from byte {saved:,}")
                     except (OSError, ValueError):
                         pass
@@ -511,19 +519,21 @@ class UsbWriter(QThread):
                         break
                     # FILE_FLAG_NO_BUFFERING requires sector-aligned writes.
                     # Pad the final partial chunk with zeros (like dd).
-                    if len(chunk) % self._SECTOR_SIZE != 0:
-                        pad = self._SECTOR_SIZE - (len(chunk) % self._SECTOR_SIZE)
+                    source_chunk_len = len(chunk)
+                    if source_chunk_len % self._SECTOR_SIZE != 0:
+                        pad = self._SECTOR_SIZE - (source_chunk_len % self._SECTOR_SIZE)
                         chunk = chunk + b"\x00" * pad
                     chunk_start = time.perf_counter()
                     self._write_chunk(handle, chunk)
                     durations.append(time.perf_counter() - chunk_start)
                     sizes.append(len(chunk))
                     written += len(chunk)
-                    # Persist resume state
-                    if self.resume and written % (10 * 1024 * 1024) < self.chunk_size:
+                    source_written += source_chunk_len
+                    # Persist resume state (source file offset, not padded)
+                    if self.resume and source_written % (10 * 1024 * 1024) < self.chunk_size:
                         try:
                             with open(self.iso_path + ".flint_state", "w") as f:
-                                f.write(str(written))
+                                f.write(str(source_written))
                         except OSError:
                             pass
 
@@ -532,14 +542,14 @@ class UsbWriter(QThread):
                     if window_time > 0 and window_bytes > 0:
                         bytes_per_sec = window_bytes / window_time
                         speed = bytes_per_sec / 1_000_000
-                        remaining = (total - written) / bytes_per_sec
+                        remaining = (total - source_written) / bytes_per_sec
                     else:
                         speed = 0.0
                         remaining = 0.0
 
-                    self.progress.emit(written / total * 100.0)
+                    self.progress.emit(min(source_written / total * 100.0, 100.0))
                     self.speed_mbps.emit(speed)
-                    self.written_bytes.emit(written)
+                    self.written_bytes.emit(source_written)
                     self.eta_seconds.emit(int(remaining))
             if not self._canceled:
                 self.phase.emit("Flushing")

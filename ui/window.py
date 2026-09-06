@@ -2384,6 +2384,15 @@ class MainWindow(QMainWindow):
                 message=message or "The drive matches the selected image.",
                 buttons=[("Close", "primary", "close")],
             )
+        elif message == "cancelled":
+            self._verify_progress.set_error("Verification cancelled")
+            dialogs.completion(
+                self,
+                kind="warning",
+                title="Verification cancelled",
+                message="Verification was cancelled by the user.",
+                buttons=[("Close", "primary", "close")],
+            )
         else:
             self._verify_progress.set_error(
                 self._friendly_error(message or "Verification failed")
@@ -2684,11 +2693,15 @@ class MainWindow(QMainWindow):
             hwnd = ctypes.c_void_p(int(self.winId()))
         except RuntimeError:
             return
-        if percent is None:
-            set_state(ptr, hwnd, 4 if error else 0)  # TBPF_ERROR / NOPROGRESS
-        else:
-            set_state(ptr, hwnd, 2)  # TBPF_NORMAL
-            set_value(ptr, hwnd, round(percent), 100)
+        try:
+            if percent is None:
+                set_state(ptr, hwnd, 4 if error else 0)  # TBPF_ERROR / NOPROGRESS
+            else:
+                set_state(ptr, hwnd, 2)  # TBPF_NORMAL
+                set_value(ptr, hwnd, round(percent), 100)
+        except OSError:
+            # Explorer may have restarted — invalidate and retry later.
+            self._tb = None
 
     def _show_from_tray(self) -> None:
         self._lifecycle_log(
@@ -4241,6 +4254,7 @@ class MainWindow(QMainWindow):
             return
         if not self._current_drive:
             self._progress.set_error("Select a USB drive first")
+            self._scroll_to_progress(self._content_scroll)
             return
         drive = self._current_drive
         name = drive.get("model") or drive.get("name")
@@ -4270,14 +4284,17 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "Drive changed or disconnected \u2014 refresh and re-pick"
             )
+            self._scroll_to_progress(self._content_scroll)
             return
         drive_path = self._drive_path_for(current)
         if not drive_path:
             self._progress.set_error("Drive path unavailable")
+            self._scroll_to_progress(self._content_scroll)
             return
         # Require typed confirmation for destructive actions
         if not self._require_typed_confirmation(current, None):
             self._progress.set_error("Confirmation failed — aborting")
+            self._scroll_to_progress(self._content_scroll)
             return
         self._current_drive = current
         self._active_write_drive = current
@@ -4334,6 +4351,7 @@ class MainWindow(QMainWindow):
             self._progress.set_done()
             self._progress._title.setText("Wiped")
             self._done_label.setText("Drive wiped")
+            self._done_summary.setText("")
             self._done_bar.setVisible(True)
             self._scroll_to_done_bar()
             if self._tray is not None:
