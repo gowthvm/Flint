@@ -4,9 +4,22 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+from core.deviceio import (
+    ES_CONTINUOUS,
+    ES_SYSTEM_REQUIRED,
+    FSCTL_DISMOUNT_VOLUME,
+    FSCTL_LOCK_VOLUME,
+    FSCTL_UNLOCK_VOLUME,
+    GENERIC_READ,
+    GENERIC_WRITE,
+    IOCTL_DISK_GET_LENGTH_INFO,
+    OPEN_EXISTING,
+    TRANSIENT_ERRORS,
+    kernel32,
+)
 
 logger = logging.getLogger("flint")
 
@@ -44,19 +57,7 @@ class WipeWorker(QThread):
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
 
-    _GENERIC_READ = 0x80000000
-    _GENERIC_WRITE = 0x40000000
-    _FILE_SHARE_READ = 0x1
-    _FILE_SHARE_WRITE = 0x2
-    _OPEN_EXISTING = 3
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-    _IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
-    _FSCTL_DISMOUNT_VOLUME = 0x00090020
-    _FSCTL_LOCK_VOLUME = 0x00090018
-    _FSCTL_UNLOCK_VOLUME = 0x0009001C
-    _ES_CONTINUOUS = 0x80000000
-    _ES_SYSTEM_REQUIRED = 0x00000001
-    _ES_DISPLAY_REQUIRED = 0x00000002
 
     def __init__(
         self,
@@ -82,13 +83,13 @@ class WipeWorker(QThread):
         self._canceled = True
 
     def _open_drive(self) -> ctypes.c_void_p:
-        kernel32 = self._kernel32()
-        handle = kernel32.CreateFileW(
+        k32 = kernel32()
+        handle = k32.CreateFileW(
             self.drive_path,
-            self._GENERIC_READ | self._GENERIC_WRITE,
-            self._FILE_SHARE_READ | self._FILE_SHARE_WRITE,
+            GENERIC_READ | GENERIC_WRITE,
+            0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
             None,
-            self._OPEN_EXISTING,
+            OPEN_EXISTING,
             0,
             None,
         )
@@ -96,62 +97,13 @@ class WipeWorker(QThread):
             raise OSError(f"drive not writable: {self.drive_path}")
         return ctypes.c_void_p(handle)
 
-    @staticmethod
-    def _kernel32() -> Any:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateFileW.restype = ctypes.c_void_p
-        kernel32.CreateFileW.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-        ]
-        kernel32.DeviceIoControl.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.POINTER(ctypes.c_ulong),
-            ctypes.c_void_p,
-        ]
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.WriteFile.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.POINTER(ctypes.c_ulong),
-            ctypes.c_void_p,
-        ]
-        kernel32.ReadFile.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.POINTER(ctypes.c_ulong),
-            ctypes.c_void_p,
-        ]
-        kernel32.SetFilePointer.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_long,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-        ]
-        kernel32.FlushFileBuffers.argtypes = [ctypes.c_void_p]
-        kernel32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
-        kernel32.SetThreadExecutionState.restype = ctypes.c_ulong
-        return kernel32
-
     def _drive_size(self, handle: ctypes.c_void_p) -> int:
-        kernel32 = self._kernel32()
+        k32 = kernel32()
         size = ctypes.c_ulonglong()
         returned = ctypes.c_ulong()
-        ok = kernel32.DeviceIoControl(
+        ok = k32.DeviceIoControl(
             handle,
-            self._IOCTL_DISK_GET_LENGTH_INFO,
+            IOCTL_DISK_GET_LENGTH_INFO,
             None,
             0,
             ctypes.byref(size),
@@ -164,10 +116,10 @@ class WipeWorker(QThread):
         return size.value
 
     def _device_control(self, handle: ctypes.c_void_p, code: int) -> bool:
-        kernel32 = self._kernel32()
+        k32 = kernel32()
         returned = ctypes.c_ulong()
         return bool(
-            kernel32.DeviceIoControl(
+            k32.DeviceIoControl(
                 handle,
                 code,
                 None,
@@ -180,19 +132,16 @@ class WipeWorker(QThread):
         )
 
     def _lock_volumes(self) -> list[ctypes.c_void_p]:
-        kernel32 = self._kernel32()
-        _GENERIC_READ = 0x80000000
-        _GENERIC_WRITE = 0x40000000
-        _OPEN_EXISTING = 3
+        k32 = kernel32()
         held: list[ctypes.c_void_p] = []
         for letter in self.letters:
             path = f"\\\\.\\{letter}:"
-            handle = kernel32.CreateFileW(
+            handle = k32.CreateFileW(
                 path,
-                _GENERIC_READ | _GENERIC_WRITE,
+                GENERIC_READ | GENERIC_WRITE,
                 0,
                 None,
-                _OPEN_EXISTING,
+                OPEN_EXISTING,
                 0,
                 None,
             )
@@ -201,15 +150,15 @@ class WipeWorker(QThread):
                 raise OSError(
                     f"Volume {letter}: could not be opened for locking."
                 )
-            self._device_control(handle, self._FSCTL_DISMOUNT_VOLUME)
+            self._device_control(handle, FSCTL_DISMOUNT_VOLUME)
             locked = False
             for _ in range(5):
-                if self._device_control(handle, self._FSCTL_LOCK_VOLUME):
+                if self._device_control(handle, FSCTL_LOCK_VOLUME):
                     locked = True
                     break
                 time.sleep(0.2)
             if not locked:
-                kernel32.CloseHandle(handle)
+                k32.CloseHandle(handle)
                 self._unlock_volumes(held)
                 raise OSError(
                     f"Volume {letter}: is in use by another program. "
@@ -219,21 +168,19 @@ class WipeWorker(QThread):
         return held
 
     def _unlock_volumes(self, held: list[ctypes.c_void_p]) -> None:
-        kernel32 = self._kernel32()
+        k32 = kernel32()
         for handle in held:
-            self._device_control(handle, self._FSCTL_UNLOCK_VOLUME)
-            kernel32.CloseHandle(handle)
-
-    _TRANSIENT_ERRORS: frozenset[int] = frozenset({21, 31, 5, 1167})
+            self._device_control(handle, FSCTL_UNLOCK_VOLUME)
+            k32.CloseHandle(handle)
 
     def _write_chunk(self, handle: ctypes.c_void_p, data: bytes) -> None:
-        kernel32 = self._kernel32()
+        k32 = kernel32()
         max_retries = 3
         last_err = 0
         for attempt in range(max_retries + 1):
             buffer = ctypes.create_string_buffer(data)
             written = ctypes.c_ulong()
-            ok = kernel32.WriteFile(
+            ok = k32.WriteFile(
                 handle,
                 buffer,
                 len(data),
@@ -245,14 +192,14 @@ class WipeWorker(QThread):
             if ok and written.value < len(data):
                 last_err = 0
             else:
-                last_err = kernel32.GetLastError()
+                last_err = k32.GetLastError()
             if attempt < max_retries and (
-                last_err in self._TRANSIENT_ERRORS or (ok and written.value < len(data))
+                last_err in TRANSIENT_ERRORS or (ok and written.value < len(data))
             ):
                 time.sleep(0.5 * (2 ** attempt))
                 continue
             break
-        if last_err in self._TRANSIENT_ERRORS:
+        if last_err in TRANSIENT_ERRORS:
             raise OSError(
                 f"write failed: {last_err} (USB device became unresponsive "
                 f"after {max_retries} retries — check cable/port)"
@@ -262,13 +209,13 @@ class WipeWorker(QThread):
         raise OSError("short write on drive")
 
     def _seek_start(self, handle: ctypes.c_void_p) -> None:
-        self._kernel32().SetFilePointer(handle, 0, None, 0)
+        kernel32().SetFilePointer(handle, 0, None, 0)
 
     def _read_chunk(self, handle: ctypes.c_void_p, size: int) -> bytes:
-        kernel32 = self._kernel32()
+        k32 = kernel32()
         buffer = ctypes.create_string_buffer(size)
         read = ctypes.c_ulong()
-        ok = kernel32.ReadFile(
+        ok = k32.ReadFile(
             handle,
             buffer,
             size,
@@ -276,7 +223,7 @@ class WipeWorker(QThread):
             None,
         )
         if not ok:
-            raise OSError(f"read failed: {ctypes.windll.kernel32.GetLastError()}")
+            raise OSError(f"read failed: {k32.GetLastError()}")
         return buffer.raw[: read.value]
 
     def _pass_chunk(self, pattern: str, size: int, offset: int) -> bytes:
@@ -303,11 +250,10 @@ class WipeWorker(QThread):
         return bytes(out[over : over + size])
 
     def run(self) -> None:
-        kernel32 = self._kernel32()
-        kernel32.SetThreadExecutionState(
-            self._ES_CONTINUOUS
-            | self._ES_SYSTEM_REQUIRED
-            | self._ES_DISPLAY_REQUIRED
+        k32 = kernel32()
+        k32.SetThreadExecutionState(
+            ES_CONTINUOUS
+            | ES_SYSTEM_REQUIRED
         )
         try:
             self.phase.emit("Locking drive")
@@ -320,7 +266,7 @@ class WipeWorker(QThread):
             logger.exception("WipeWorker.run failed")
             self.finished.emit(False, str(exc))
         finally:
-            kernel32.SetThreadExecutionState(self._ES_CONTINUOUS)
+            kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
     def _run_inner(self) -> None:
         handle = self._open_drive()
@@ -332,7 +278,7 @@ class WipeWorker(QThread):
             patterns = _wipe_patterns(self.method)
         except OSError as exc:
             self.finished.emit(False, str(exc))
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel32().CloseHandle(handle)
             return
 
         passes = len(patterns)
@@ -371,7 +317,7 @@ class WipeWorker(QThread):
                     )
             if not self._canceled:
                 self.phase.emit("Flushing")
-                if not ctypes.windll.kernel32.FlushFileBuffers(handle):
+                if not kernel32().FlushFileBuffers(handle):
                     raise OSError(
                         "flush failed: data may not have reached the drive"
                     )
@@ -391,7 +337,7 @@ class WipeWorker(QThread):
             self.finished.emit(False, str(exc))
             return
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel32().CloseHandle(handle)
 
         if self._canceled:
             self.finished.emit(False, "cancelled")

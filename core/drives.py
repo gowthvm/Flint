@@ -200,30 +200,9 @@ class DriveDetector:
         """
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateFileW.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-        ]
-        kernel32.CreateFileW.restype = ctypes.c_void_p
-        kernel32.DeviceIoControl.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
-            ctypes.c_ulong,
-            ctypes.POINTER(ctypes.c_ulong),
-            ctypes.c_void_p,
-        ]
-        kernel32.DeviceIoControl.restype = ctypes.c_ulong
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = ctypes.c_ulong
+        from core.deviceio import IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, kernel32
+
+        k32 = kernel32()
 
         class _DiskExtent(ctypes.Structure):
             _fields_ = [
@@ -238,7 +217,7 @@ class DriveDetector:
                 ("DiskExtents", _DiskExtent * 1),
             ]
 
-        handle = kernel32.CreateFileW(
+        handle = k32.CreateFileW(
             f"\\\\.\\{letter}:",
             0x80000000,  # GENERIC_READ
             0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
@@ -252,9 +231,9 @@ class DriveDetector:
         try:
             extents = _VolumeDiskExtents()
             returned = ctypes.c_ulong()
-            ok = kernel32.DeviceIoControl(
+            ok = k32.DeviceIoControl(
                 handle,
-                0x00560000,  # IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
+                IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
                 None,
                 0,
                 ctypes.byref(extents),
@@ -266,7 +245,7 @@ class DriveDetector:
                 return f"\\\\.\\PHYSICALDRIVE{extents.DiskExtents[0].DiskNumber}"
             return None
         finally:
-            kernel32.CloseHandle(handle)
+            k32.CloseHandle(handle)
 
     def _list_with_psutil(self) -> list[dict[str, Any]]:
         import win32file

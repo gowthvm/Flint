@@ -1,10 +1,8 @@
-"""Low-level Win32 helpers for raw disk I/O shared by the backup and
-clone workers.
+"""Low-level Win32 helpers for raw disk I/O.
 
-The wipe/write/verify workers keep their own copies of these helpers
-(their loops are battle-tested and unit-tested through instance methods);
-this module exists so the newer read/write workers do not duplicate the
-ctypes wiring a third time.
+Single source of truth for ctypes kernel32 wiring, constants, and
+device primitives used by the write, verify, wipe, backup, benchmark,
+and bootcheck modules.
 """
 
 import ctypes
@@ -13,16 +11,23 @@ from typing import Any
 
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-_IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
-_FSCTL_DISMOUNT_VOLUME = 0x00090020
-_FSCTL_LOCK_VOLUME = 0x00090018
-_FSCTL_UNLOCK_VOLUME = 0x0009001C
+IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
+IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000
+FSCTL_DISMOUNT_VOLUME = 0x00090020
+FSCTL_LOCK_VOLUME = 0x00090018
+FSCTL_UNLOCK_VOLUME = 0x0009001C
 
-_GENERIC_READ = 0x80000000
-_GENERIC_WRITE = 0x40000000
-_FILE_SHARE_READ = 0x1
-_FILE_SHARE_WRITE = 0x2
-_OPEN_EXISTING = 3
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2
+OPEN_EXISTING = 3
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+TRANSIENT_ERRORS = frozenset({1117, 21, 31, 5, 1167})
+TRANSIENT_SEEK_ERRORS = frozenset({21, 31, 5, 1167})
 
 
 def kernel32() -> Any:
@@ -68,19 +73,29 @@ def kernel32() -> Any:
     k32.WriteFile.restype = ctypes.c_ulong
     k32.FlushFileBuffers.argtypes = [ctypes.c_void_p]
     k32.FlushFileBuffers.restype = ctypes.c_ulong
+    k32.SetFilePointerEx.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        ctypes.c_ulong,
+    ]
+    k32.SetFilePointerEx.restype = ctypes.c_ulong
+    k32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
+    k32.SetThreadExecutionState.restype = ctypes.c_ulong
+    k32.GetLastError.restype = ctypes.c_ulong
     return k32
 
 
 def open_drive(path: str, *, write: bool) -> Any:
     """Open a raw disk (or volume) handle; raise OSError when it fails."""
     k32 = kernel32()
-    access = _GENERIC_READ | (_GENERIC_WRITE if write else 0)
+    access = GENERIC_READ | (GENERIC_WRITE if write else 0)
     handle = k32.CreateFileW(
         path,
         access,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         None,
-        _OPEN_EXISTING,
+        OPEN_EXISTING,
         0,
         None,
     )
@@ -95,7 +110,7 @@ def drive_size(handle: Any) -> int:
     returned = ctypes.c_ulong()
     ok = k32.DeviceIoControl(
         handle,
-        _IOCTL_DISK_GET_LENGTH_INFO,
+        IOCTL_DISK_GET_LENGTH_INFO,
         None,
         0,
         ctypes.byref(length),
@@ -131,19 +146,19 @@ def lock_volumes(letters: list[str]) -> list[Any]:
     for letter in letters:
         handle = kernel32().CreateFileW(
             f"\\\\.\\{letter}:",
-            _GENERIC_READ | _GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE,
             0,
             None,
-            _OPEN_EXISTING,
+            OPEN_EXISTING,
             0,
             None,
         )
         if not handle or handle == _INVALID_HANDLE_VALUE:
             continue
-        _ioctl(handle, _FSCTL_DISMOUNT_VOLUME)
+        _ioctl(handle, FSCTL_DISMOUNT_VOLUME)
         locked = False
         for _ in range(5):
-            if _ioctl(handle, _FSCTL_LOCK_VOLUME):
+            if _ioctl(handle, FSCTL_LOCK_VOLUME):
                 locked = True
                 break
             time.sleep(0.2)
@@ -161,7 +176,7 @@ def lock_volumes(letters: list[str]) -> list[Any]:
 def unlock_volumes(held: list[Any]) -> None:
     k32 = kernel32()
     for handle in held:
-        _ioctl(handle, _FSCTL_UNLOCK_VOLUME)
+        _ioctl(handle, FSCTL_UNLOCK_VOLUME)
         k32.CloseHandle(handle)
 
 

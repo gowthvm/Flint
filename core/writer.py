@@ -12,6 +12,19 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core import diskpart, persistence
 from core import iso as iso_mod
 from core import verify as verify_mod
+from core.deviceio import (
+    ES_CONTINUOUS,
+    ES_SYSTEM_REQUIRED,
+    FSCTL_DISMOUNT_VOLUME,
+    FSCTL_LOCK_VOLUME,
+    FSCTL_UNLOCK_VOLUME,
+    GENERIC_READ,
+    GENERIC_WRITE,
+    IOCTL_DISK_GET_LENGTH_INFO,
+    OPEN_EXISTING,
+    TRANSIENT_ERRORS,
+    kernel32,
+)
 
 logger = logging.getLogger("flint")
 
@@ -20,55 +33,6 @@ DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
 
 class _NativeCancel(Exception):
     """Raised from the native progress callback to abort the write."""
-
-
-def _kernel32() -> Any:
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-    ]
-    kernel32.CreateFileW.restype = ctypes.c_void_p
-    kernel32.DeviceIoControl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.DeviceIoControl.restype = ctypes.c_ulong
-    kernel32.ReadFile.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.ReadFile.restype = ctypes.c_ulong
-    kernel32.WriteFile.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.WriteFile.restype = ctypes.c_ulong
-    kernel32.FlushFileBuffers.argtypes = [ctypes.c_void_p]
-    kernel32.FlushFileBuffers.restype = ctypes.c_ulong
-    kernel32.SetThreadExecutionState.argtypes = [ctypes.c_ulong]
-    kernel32.SetThreadExecutionState.restype = ctypes.c_ulong
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    kernel32.CloseHandle.restype = ctypes.c_ulong
-    kernel32.GetLastError.restype = ctypes.c_ulong
-    return kernel32
 
 
 def _load_native_writer() -> Any:
@@ -148,22 +112,11 @@ class UsbWriter(QThread):
 
     SPEED_WINDOW = 5
 
-    _GENERIC_READ = 0x80000000
-    _GENERIC_WRITE = 0x40000000
-    _FILE_SHARE_READ = 0x1
-    _FILE_SHARE_WRITE = 0x2
-    _OPEN_EXISTING = 3
     _FILE_FLAG_NO_BUFFERING = 0x20000000
     _FILE_FLAG_WRITE_THROUGH = 0x80000000
     _SECTOR_SIZE = 4096
+
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-    _IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
-    _FSCTL_DISMOUNT_VOLUME = 0x00090020
-    _FSCTL_LOCK_VOLUME = 0x00090018
-    _FSCTL_UNLOCK_VOLUME = 0x0009001C
-    _ES_CONTINUOUS = 0x80000000
-    _ES_SYSTEM_REQUIRED = 0x00000001
-    _ES_DISPLAY_REQUIRED = 0x00000002
 
     def __init__(
         self,
@@ -215,18 +168,18 @@ class UsbWriter(QThread):
         self._canceled = True
 
     def _open_drive(self) -> int:
-        kernel32 = _kernel32()
-        handle = kernel32.CreateFileW(
+        k32 = kernel32()
+        handle = k32.CreateFileW(
             self.drive_path,
-            self._GENERIC_READ | self._GENERIC_WRITE,
-            self._FILE_SHARE_READ | self._FILE_SHARE_WRITE,
+            GENERIC_READ | GENERIC_WRITE,
+            0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
             None,
-            self._OPEN_EXISTING,
+            OPEN_EXISTING,
             self._FILE_FLAG_NO_BUFFERING | self._FILE_FLAG_WRITE_THROUGH,
             None,
         )
         if not handle or handle == self._INVALID_HANDLE_VALUE:
-            err = kernel32.GetLastError()
+            err = k32.GetLastError()
             if err == 5:  # ERROR_ACCESS_DENIED
                 raise OSError(
                     f"access denied: {self.drive_path} — run Flint as "
@@ -236,12 +189,12 @@ class UsbWriter(QThread):
         return int(handle)
 
     def _drive_size(self, handle: int) -> int:
-        kernel32 = _kernel32()
+        k32 = kernel32()
         size = ctypes.c_ulonglong()
         returned = ctypes.c_ulong()
-        ok = kernel32.DeviceIoControl(
+        ok = k32.DeviceIoControl(
             handle,
-            self._IOCTL_DISK_GET_LENGTH_INFO,
+            IOCTL_DISK_GET_LENGTH_INFO,
             None,
             0,
             ctypes.byref(size),
@@ -253,17 +206,14 @@ class UsbWriter(QThread):
             raise OSError("failed to query drive size")
         return size.value
 
-    # Win32 error codes worth retrying on USB devices.
-    _TRANSIENT_ERRORS: frozenset[int] = frozenset({21, 31, 5, 1167})
-
     def _write_chunk(self, handle: int, data: bytes) -> None:
-        kernel32 = _kernel32()
+        k32 = kernel32()
         max_retries = 3
         last_err = 0
         for attempt in range(max_retries + 1):  # 0, 1, 2, 3
             buffer = ctypes.create_string_buffer(data)
             written = ctypes.c_ulong()
-            ok = kernel32.WriteFile(
+            ok = k32.WriteFile(
                 handle,
                 buffer,
                 len(data),
@@ -276,14 +226,14 @@ class UsbWriter(QThread):
             if ok and written.value < len(data):
                 last_err = 0  # no Win32 error, but treat as transient
             else:
-                last_err = kernel32.GetLastError()
+                last_err = k32.GetLastError()
             if attempt < max_retries and (
-                last_err in self._TRANSIENT_ERRORS or (ok and written.value < len(data))
+                last_err in TRANSIENT_ERRORS or (ok and written.value < len(data))
             ):
                 time.sleep(0.5 * (2 ** attempt))  # 0.5, 1, 2s backoff
                 continue
             break
-        if last_err in self._TRANSIENT_ERRORS:
+        if last_err in TRANSIENT_ERRORS:
             raise OSError(
                 f"write failed: {last_err} (USB device became unresponsive "
                 f"after {max_retries} retries — check cable/port or disable "
@@ -294,16 +244,16 @@ class UsbWriter(QThread):
         raise OSError("short write on drive")
 
     def _flush(self, handle: int) -> None:
-        if not _kernel32().FlushFileBuffers(handle):
+        if not kernel32().FlushFileBuffers(handle):
             raise OSError(
                 "flush failed: data may not have reached the drive"
             )
 
     def _device_control(self, handle: int, code: int) -> bool:
-        kernel32 = _kernel32()
+        k32 = kernel32()
         returned = ctypes.c_ulong()
         return bool(
-            kernel32.DeviceIoControl(
+            k32.DeviceIoControl(
                 handle,
                 code,
                 None,
@@ -316,19 +266,16 @@ class UsbWriter(QThread):
         )
 
     def _lock_volumes(self) -> list[int]:
-        kernel32 = _kernel32()
-        _GENERIC_READ = 0x80000000
-        _GENERIC_WRITE = 0x40000000
-        _OPEN_EXISTING = 3
+        k32 = kernel32()
         held: list[int] = []
         for letter in self.letters:
             path = f"\\\\.\\{letter}:"
-            handle = kernel32.CreateFileW(
+            handle = k32.CreateFileW(
                 path,
-                _GENERIC_READ | _GENERIC_WRITE,
+                GENERIC_READ | GENERIC_WRITE,
                 0,
                 None,
-                _OPEN_EXISTING,
+                OPEN_EXISTING,
                 0,
                 None,
             )
@@ -337,17 +284,17 @@ class UsbWriter(QThread):
                 raise OSError(
                     f"Volume {letter}: could not be opened for locking."
                 )
-            self._device_control(int(handle), self._FSCTL_DISMOUNT_VOLUME)
+            self._device_control(int(handle), FSCTL_DISMOUNT_VOLUME)
             locked = False
             for _ in range(5):
                 if self._device_control(
-                    int(handle), self._FSCTL_LOCK_VOLUME
+                    int(handle), FSCTL_LOCK_VOLUME
                 ):
                     locked = True
                     break
                 time.sleep(0.2)
             if not locked:
-                kernel32.CloseHandle(handle)
+                k32.CloseHandle(handle)
                 self._unlock_volumes(held)
                 raise OSError(
                     f"Volume {letter}: is in use by another program. "
@@ -358,17 +305,16 @@ class UsbWriter(QThread):
         return held
 
     def _unlock_volumes(self, held: list[int]) -> None:
-        kernel32 = _kernel32()
+        k32 = kernel32()
         for handle in held:
-            self._device_control(handle, self._FSCTL_UNLOCK_VOLUME)
-            kernel32.CloseHandle(handle)
+            self._device_control(handle, FSCTL_UNLOCK_VOLUME)
+            k32.CloseHandle(handle)
 
     def run(self) -> None:
-        kernel32 = _kernel32()
-        kernel32.SetThreadExecutionState(
-            self._ES_CONTINUOUS
-            | self._ES_SYSTEM_REQUIRED
-            | self._ES_DISPLAY_REQUIRED
+        k32 = kernel32()
+        k32.SetThreadExecutionState(
+            ES_CONTINUOUS
+            | ES_SYSTEM_REQUIRED
         )
         try:
             mode = diskpart.resolve_write_mode(
@@ -411,7 +357,7 @@ class UsbWriter(QThread):
             logger.exception("UsbWriter.run failed")
             self.finished.emit(False, str(exc))
         finally:
-            kernel32.SetThreadExecutionState(self._ES_CONTINUOUS)
+            kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
     def _run_filecopy(self) -> None:
         """Repartition the drive, format it, then copy ISO contents."""
@@ -485,7 +431,7 @@ class UsbWriter(QThread):
             if handle is not None and self._finished:
                 # Pre-flight failures return before the write loop; release
                 # the drive handle here so Windows does not keep it busy.
-                ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32().CloseHandle(handle)
                 handle = None
 
         assert handle is not None  # pre-flight failures returned above
@@ -501,7 +447,7 @@ class UsbWriter(QThread):
                     # The extension opens its own handles; this Python-side
                     # drive handle must still be released (it is only closed
                     # by the Python-path finally below).
-                    ctypes.windll.kernel32.CloseHandle(handle)
+                    kernel32().CloseHandle(handle)
                 return
 
         written = 0
@@ -575,7 +521,7 @@ class UsbWriter(QThread):
             return
         finally:
             if handle is not None:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32().CloseHandle(handle)
 
         if self._canceled:
             self._finished = True
@@ -647,11 +593,26 @@ class UsbWriter(QThread):
         sectors are reported when ``bad_block_scan`` is set. Progress is
         reported through the regular progress signals.
         """
+        t_start = time.perf_counter()
+        last_done = 0
+        last_time = t_start
 
         def on_progress(done: int, total: int) -> None:
+            nonlocal last_done, last_time
             self.progress.emit(done / total * 100.0)
             self.written_bytes.emit(done)
             self.total_bytes.emit(total)
+            now = time.perf_counter()
+            dt = now - last_time
+            if dt >= 0.5:
+                dd = done - last_done
+                speed = dd / dt / 1_000_000 if dt > 0 else 0.0
+                self.speed_mbps.emit(speed)
+                if speed > 0:
+                    remaining = (total - done) / speed / 1_000_000
+                    self.eta_seconds.emit(int(remaining))
+                last_done = done
+                last_time = now
 
         self.phase.emit("Verifying")
         result = verify_mod.verify_device(

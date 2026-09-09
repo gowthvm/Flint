@@ -626,7 +626,7 @@ def test_writer_volume_open_failure_aborts(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         writer.diskpart, "resolve_write_mode", lambda mode, iso: "raw"
     )
-    monkeypatch.setattr(writer, "_kernel32", lambda: kernel)
+    monkeypatch.setattr("core.writer.kernel32", lambda: kernel)
     monkeypatch.setattr(w, "_run_inner", lambda: inner_calls.append(True))
 
     w.run()
@@ -652,7 +652,7 @@ def test_wipe_volume_open_failure_aborts(monkeypatch, capsys):
     inner_calls: list[bool] = []
     worker.finished.connect(lambda ok, msg: results.append((ok, msg)))
 
-    monkeypatch.setattr(worker, "_kernel32", lambda: kernel)
+    monkeypatch.setattr("core.wipe.kernel32", lambda: kernel)
     monkeypatch.setattr(worker, "_run_inner", lambda: inner_calls.append(True))
 
     worker.run()

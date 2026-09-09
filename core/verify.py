@@ -9,6 +9,13 @@ from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.deviceio import (
+    GENERIC_READ,
+    IOCTL_DISK_GET_LENGTH_INFO,
+    TRANSIENT_SEEK_ERRORS,
+    kernel32,
+)
+
 logger = logging.getLogger("flint")
 
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
@@ -20,80 +27,35 @@ MAX_MISMATCHES = 20
 # preserved; the window is enough context to diagnose corruption.
 MISMATCH_SAMPLE_SIZE = SECTOR_SIZE
 
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
 
 class _Cancelled(Exception):
     """Raised internally when the caller's cancel callback fires."""
 
 
-def _kernel32() -> Any:
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-    ]
-    kernel32.CreateFileW.restype = ctypes.c_void_p
-    kernel32.DeviceIoControl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.DeviceIoControl.restype = ctypes.c_ulong
-    kernel32.ReadFile.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.ReadFile.restype = ctypes.c_ulong
-    kernel32.SetFilePointerEx.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_longlong,
-        ctypes.POINTER(ctypes.c_longlong),
-        ctypes.c_ulong,
-    ]
-    kernel32.SetFilePointerEx.restype = ctypes.c_ulong
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    kernel32.CloseHandle.restype = ctypes.c_ulong
-    return kernel32
-
-
 def _open_reader(path: str) -> Any:
     """Open a file or raw device for reading; return the handle or None."""
-    kernel32 = _kernel32()
-    handle = kernel32.CreateFileW(
+    k32 = kernel32()
+    handle = k32.CreateFileW(
         path,
-        0x80000000,  # GENERIC_READ
+        GENERIC_READ,
         0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
         None,
         3,  # OPEN_EXISTING
         0,
         None,
     )
-    if not handle or handle == _INVALID_HANDLE_VALUE:
+    if not handle or handle == ctypes.c_void_p(-1).value:
         return None
     return handle
 
 
 def _device_size(handle: Any) -> int:
-    kernel32 = _kernel32()
+    k32 = kernel32()
     length = ctypes.c_ulonglong()
     returned = ctypes.c_ulong()
-    ok = kernel32.DeviceIoControl(
+    ok = k32.DeviceIoControl(
         handle,
-        0x0007405C,  # IOCTL_DISK_GET_LENGTH_INFO
+        IOCTL_DISK_GET_LENGTH_INFO,
         None,
         0,
         ctypes.byref(length),
@@ -112,10 +74,10 @@ def _seek(handle: Any, offset: int, retries: int) -> bool:
     Returns False when every attempt failed (``_Cancelled`` is not raised;
     callers keep the cancel check in the read loop).
     """
-    kernel32 = _kernel32()
+    k32 = kernel32()
     for _ in range(retries + 1):
         position = ctypes.c_longlong()
-        if kernel32.SetFilePointerEx(
+        if k32.SetFilePointerEx(
             handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
         ):
             return True
@@ -136,12 +98,12 @@ def _read_chunk(
     every attempt failed. Raises ``_Cancelled`` when the cancel callback
     fires between attempts.
     """
-    kernel32 = ctypes.windll.kernel32
+    k32 = kernel32()
     read = ctypes.c_ulong()
     for attempt in range(retries + 1):
         if is_cancelled is not None and is_cancelled():
             raise _Cancelled()
-        if kernel32.ReadFile(handle, buffer, count, ctypes.byref(read), None):
+        if k32.ReadFile(handle, buffer, count, ctypes.byref(read), None):
             return read.value
         if attempt < retries:
             time.sleep(0.05)
@@ -186,7 +148,7 @@ def compute_sha256(
                 progress(done, size)
         return True, digest.hexdigest()
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32().CloseHandle(handle)
 
 
 def verify_device(
@@ -367,7 +329,7 @@ def verify_device(
             )
             return result
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32().CloseHandle(handle)
 
 
 def scan_bad_sectors(
@@ -444,43 +406,16 @@ def hash_drive(
     `size` is None) and compare against the expected SHA-256 digest.
 
     Returns (ok, hexdigest) on success or (False, message) on failure."""
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.restype = ctypes.c_void_p
-    kernel32.DeviceIoControl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.DeviceIoControl.restype = ctypes.c_ulong
-    kernel32.ReadFile.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.ReadFile.restype = ctypes.c_ulong
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    kernel32.CloseHandle.restype = ctypes.c_ulong
-    GENERIC_READ = 0x80000000
-    FILE_SHARE_READ = 0x1
-    FILE_SHARE_WRITE = 0x2
-    OPEN_EXISTING = 3
+    k32 = kernel32()
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-    IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
     CHUNK = 4 * 1024 * 1024
 
-    handle = kernel32.CreateFileW(
+    handle = k32.CreateFileW(
         drive_path,
         GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
         None,
-        OPEN_EXISTING,
+        3,  # OPEN_EXISTING
         0,
         None,
     )
@@ -490,7 +425,7 @@ def hash_drive(
         if size is None:
             length = ctypes.c_ulonglong()
             returned = ctypes.c_ulong()
-            ok = kernel32.DeviceIoControl(
+            ok = k32.DeviceIoControl(
                 handle,
                 IOCTL_DISK_GET_LENGTH_INFO,
                 None,
@@ -515,7 +450,7 @@ def hash_drive(
             last_err = 0
             for attempt in range(4):
                 read = ctypes.c_ulong()
-                ok = kernel32.ReadFile(
+                ok = k32.ReadFile(
                     handle,
                     buffer,
                     count,
@@ -524,8 +459,8 @@ def hash_drive(
                 )
                 if ok and read.value > 0:
                     break
-                last_err = kernel32.GetLastError()
-                if attempt < 3 and last_err in {21, 31, 5, 1167}:
+                last_err = k32.GetLastError()
+                if attempt < 3 and last_err in TRANSIENT_SEEK_ERRORS:
                     time.sleep(0.5 * (2 ** attempt))
                     continue
                 break
@@ -543,7 +478,7 @@ def hash_drive(
             return False, "verification failed: hash mismatch"
         return True, result
     finally:
-        kernel32.CloseHandle(handle)
+        k32.CloseHandle(handle)
 
 
 class VerifyWorker(QThread):

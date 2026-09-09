@@ -169,6 +169,8 @@ QPushButton:pressed {
 
 QPushButton:disabled {
     color: @faded;
+    background: @card;
+    border-color: @card;
 }
 
 QPushButton#primary {
@@ -287,7 +289,7 @@ QListWidget {
     background: transparent;
     border: none;
     font-size: $font_base;
-    outline: 0;
+    outline: none;
     padding: $space_md $space_sm;
 }
 
@@ -305,6 +307,11 @@ QListWidget::item:hover {
 
 QListWidget::item:selected {
     background: @track;
+    color: @text;
+}
+
+QListWidget::item:selected:!active {
+    background: @card;
     color: @text;
 }
 
@@ -482,6 +489,11 @@ QFrame#isoDropZone {
     padding: $space_xl;
 }
 
+QFrame#isoDropZone[dragging="true"] {
+    border: 2px solid @primary;
+    background: @track;
+}
+
 QFrame#isoDropZone[loaded="true"] {
     border: 1px solid @border;
 }
@@ -632,9 +644,26 @@ QWidget#toggleTrack {
     border-radius: 8px;
 }
 
+QWidget#toggleTrack:hover {
+    background: @text;
+}
+
 QWidget#toggleTrack[on="false"] {
     background: @track;
     border: 1px solid @border;
+}
+
+QWidget#toggleTrack[on="false"]:hover {
+    background: @card;
+    border-color: @faded;
+}
+
+QWidget#toggleTrack:disabled {
+    opacity: 0.4;
+}
+
+QWidget#toggleTrack:disabled[on="false"] {
+    opacity: 0.3;
 }
 
 QLabel#toggleKnob {

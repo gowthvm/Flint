@@ -262,7 +262,12 @@ def main() -> int:
         _install_crash_logging()
         _ensure_admin(settings)
         app = QApplication(sys.argv)
-        app.setStyleSheet(build_style(settings.get("theme")))
+        startup_theme = settings.get("theme")
+        if startup_theme == "auto":
+            from ui.window import _windows_uses_dark_mode
+
+            startup_theme = "dark" if _windows_uses_dark_mode() else "light"
+        app.setStyleSheet(build_style(startup_theme))
         app.setQuitOnLastWindowClosed(False)
 
         server = _acquire_single_instance(QLocalServer, QLocalSocket)

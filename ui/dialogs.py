@@ -114,6 +114,7 @@ class FlintDialog(QDialog):
         for label, style_name, result in buttons or []:
             btn = QPushButton(label)
             btn.setObjectName(style_name)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setMinimumWidth(90)
             btn.clicked.connect(
                 lambda _=False, r=result: self._accept(r)

@@ -1,6 +1,8 @@
 import ctypes
 from typing import Any
 
+from core.deviceio import kernel32
+
 _GPT_SIG = b"EFI PART"
 
 
@@ -9,43 +11,21 @@ def probe_bootability(drive_path: str, size_read: int = 65536) -> dict[str, Any]
 
     Reads the first `size_read` bytes and reports:
       mbr_signature: True if the legacy boot signature (0x55AA) is present
-      gpt: True if a GPT header (\"EFI PART\") is present at LBA 1
+      gpt: True if a GPT header ("EFI PART") is present at LBA 1
       efi_path_hint: True when a GPT/legacy partition layout points at an
                      ESP-looking partition (bootable MBR partition or
                      EFI System Partition type GUID match)
       error: message when the drive could not be read
     """
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.restype = ctypes.c_void_p
-    kernel32.CreateFileW.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.c_ulong,
-        ctypes.c_void_p,
-    ]
-    kernel32.ReadFile.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong),
-        ctypes.c_void_p,
-    ]
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    _GENERIC_READ = 0x80000000
-    _FILE_SHARE_READ = 0x1
-    _FILE_SHARE_WRITE = 0x2
-    _OPEN_EXISTING = 3
+    k32 = kernel32()
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-    handle = kernel32.CreateFileW(
+    handle = k32.CreateFileW(
         drive_path,
-        _GENERIC_READ,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        0x80000000,  # GENERIC_READ
+        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
         None,
-        _OPEN_EXISTING,
+        3,  # OPEN_EXISTING
         0,
         None,
     )
@@ -61,7 +41,7 @@ def probe_bootability(drive_path: str, size_read: int = 65536) -> dict[str, Any]
     try:
         buffer = ctypes.create_string_buffer(size_read)
         read = ctypes.c_ulong()
-        ok = kernel32.ReadFile(
+        ok = k32.ReadFile(
             handle,
             buffer,
             size_read,
@@ -94,5 +74,5 @@ def probe_bootability(drive_path: str, size_read: int = 65536) -> dict[str, Any]
     except OSError:
         report["error"] = "could not read drive header"
     finally:
-        kernel32.CloseHandle(handle)
+        k32.CloseHandle(handle)
     return report

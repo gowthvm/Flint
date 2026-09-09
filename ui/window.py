@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import deque
 from collections.abc import Callable
@@ -32,6 +33,8 @@ from PyQt6.QtGui import (
     QCursor,
     QDesktopServices,
     QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
     QDropEvent,
     QEnterEvent,
     QGuiApplication,
@@ -104,6 +107,22 @@ from ui import dialogs, style
 from ui.chamfer import ChamferPanel
 
 logger = logging.getLogger("flint")
+
+
+def _windows_uses_dark_mode() -> bool:
+    """Return True when Windows is configured for dark app mode."""
+    try:
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return int(value) == 0
+    except Exception:
+        return True  # default to dark on failure
 
 _HELP_TIPS = {
     "partition_scheme": (
@@ -348,6 +367,7 @@ class IsoDropZone(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._path: str | None = None
+        self._decompressed_path: str | None = None
         self._worker: IsoWorker | None = None
         self._analyzer: IsoDetectWorker | None = None
         self._digest: str | None = None
@@ -362,7 +382,7 @@ class IsoDropZone(QFrame):
         self._loaded.setVisible(False)
 
         self._drop_error = QLabel(
-            "Only .iso, .img or .bin images are supported"
+            "Only image files (.iso, .img, .bin) or compressed archives (.zip, .gz, .xz, .zst) are supported"
         )
         self._drop_error.setObjectName("dropError")
         self._drop_error.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -424,9 +444,10 @@ class IsoDropZone(QFrame):
         info.addWidget(self._iso_name)
         info.addWidget(self._iso_meta)
 
-        self._iso_check = QLabel("\u2713\ufe0e")
+        self._iso_check = QLabel("")
         self._iso_check.setObjectName("isoCheck")
         self._iso_check.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._iso_check.setVisible(False)
 
         self._iso_clear = QPushButton("\u2715")
         self._iso_clear.setObjectName("isoClear")
@@ -468,11 +489,29 @@ class IsoDropZone(QFrame):
         assert mime is not None
         if mime.hasUrls():
             event.acceptProposedAction()
+            self.setProperty("dragging", True)
+            _restyle(self)
         else:
             event.ignore()
 
+    def dragMoveEvent(self, event: QDragMoveEvent | None) -> None:
+        assert event is not None
+        mime = event.mimeData()
+        assert mime is not None
+        if mime.hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent | None) -> None:
+        self.setProperty("dragging", False)
+        _restyle(self)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent | None) -> None:
         assert event is not None
+        self.setProperty("dragging", False)
+        _restyle(self)
         mime = event.mimeData()
         assert mime is not None
         urls = mime.urls()
@@ -486,21 +525,20 @@ class IsoDropZone(QFrame):
             self.load_iso(url.toLocalFile())
         else:
             self._drop_error.setVisible(True)
-            self._drop_timer.start(3600)
+            self._drop_timer.start(3000)
             event.acceptProposedAction()
 
     def _first_iso_url(self, event: QDropEvent) -> QUrl | None:
         mime = event.mimeData()
         if mime is None:
             return None
+        _IMAGE_EXTS = (".iso", ".img", ".bin")
+        _COMPRESSED_EXTS = (".zip", ".gz", ".xz", ".zst")
         for url in mime.urls():
-            if (
-                url.isLocalFile()
-                and url.toLocalFile().lower().endswith(
-                    (".iso", ".img", ".bin")
-                )
-            ):
-                return url
+            if url.isLocalFile():
+                low = url.toLocalFile().lower()
+                if low.endswith(_IMAGE_EXTS + _COMPRESSED_EXTS):
+                    return url
         return None
 
     def _browse(self) -> None:
@@ -510,7 +548,7 @@ class IsoDropZone(QFrame):
             self,
             "Select image",
             settings.get("last_iso_dir") or "",
-            "Disk image (*.iso *.img *.bin);;All files (*)",
+            "Disk image (*.iso *.img *.bin);;Compressed (*.zip *.gz *.xz *.zst);;All files (*)",
         )
         if path:
             settings.set_many(last_iso_dir=os.path.dirname(path))
@@ -560,27 +598,87 @@ class IsoDropZone(QFrame):
         self._worker = None
         self._digest = None
         self._hash_finished = False
+        # Clean up previous decompressed temp file
+        self._cleanup_decompressed()
+        # Auto-decompress compressed images
+        from core.decompress import is_compressed
+
+        hash_path = path
+        if is_compressed(path):
+            try:
+
+                tmp_dir = tempfile.mkdtemp(prefix="flint-decompress-")
+                # Decompress eagerly so we can hash and detect the image
+                from core.decompress import (
+                    _decompress_gz,
+                    _decompress_xz,
+                    _decompress_zip,
+                    compressed_format,
+                )
+
+                fmt = compressed_format(path)
+                if fmt == ".zip":
+                    extracted = _decompress_zip(path, tmp_dir)
+                elif fmt == ".gz":
+                    extracted = _decompress_gz(path, tmp_dir)
+                elif fmt == ".xz":
+                    extracted = _decompress_xz(path, tmp_dir)
+                else:
+                    extracted = path
+                    tmp_dir = ""
+                self._decompressed_path = extracted
+                hash_path = extracted
+            except Exception:
+                logger.exception("failed to decompress %s", path)
+                self._decompressed_path = None
+                self._drop_error.setText(
+                    f"Failed to decompress {os.path.basename(path)}"
+                )
+                self._drop_error.setVisible(True)
+                self._drop_timer.start(5000)
+                return
         self._path = path
         size = DriveDetector.format_size(os.path.getsize(path))
         self._iso_name.setText(os.path.basename(path))
-        self._set_meta(False, f"{size} \u00b7 Verifying\u2026")
+        suffix = ""
+        if is_compressed(path):
+            suffix = " (compressed)"
+        self._iso_meta.setText(f"{size}{suffix} \u00b7 Verifying\u2026")
+        self._iso_meta.setProperty("error", False)
+        _restyle(self._iso_meta)
         self._loaded.setVisible(True)
         self._empty.setVisible(False)
         self.setProperty("loaded", True)
         _restyle(self)
         self.iso_selected.emit(path)
 
-        worker = IsoWorker(path)
+        worker = IsoWorker(hash_path)
         self._worker = worker
         worker.hash_done.connect(self._on_hash_done)
         worker.progress.connect(self._on_hash_progress)
         worker.eta.connect(self._on_hash_eta)
         worker.start()
 
-        analyzer = IsoDetectWorker(path)
+        analyzer = IsoDetectWorker(hash_path)
         self._analyzer = analyzer
         analyzer.detected.connect(self._on_analysis)
         analyzer.start()
+
+    def _cleanup_decompressed(self) -> None:
+        """Remove the previous decompressed temp file if any."""
+        if self._decompressed_path is not None:
+            try:
+                os.unlink(self._decompressed_path)
+            except OSError:
+                pass
+            # Also remove the temp directory
+            tmp_dir = os.path.dirname(self._decompressed_path)
+            if tmp_dir and "flint-decompress-" in tmp_dir:
+                try:
+                    os.rmdir(tmp_dir)
+                except OSError:
+                    pass
+            self._decompressed_path = None
 
     def _on_analysis(
         self, path: str, is_linux: bool, is_windows: bool, is_hybrid: bool
@@ -629,8 +727,12 @@ class IsoDropZone(QFrame):
         size = DriveDetector.format_size(os.path.getsize(self._path or ""))
         if ok:
             self._set_meta(True, f"{size} \u00b7 SHA256 verified")
+            self._iso_check.setText("\u2713\ufe0e")
+            self._iso_check.setVisible(True)
         else:
             self._set_meta(False, f"{size} \u00b7 SHA256 failed")
+            self._iso_check.setText("\u2715")
+            self._iso_check.setVisible(True)
         self.hash_done.emit(path, ok, digest)
 
     def _set_meta(self, ok: bool, text: str) -> None:
@@ -707,6 +809,7 @@ class SegmentedControl(QWidget):
             button.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
             )
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _, i=index: self._select(i))
             layout.addWidget(button)
             self._buttons.append(button)
@@ -1002,12 +1105,14 @@ class ProgressArea(ChamferPanel):
         self._bar.setValue(100)
 
     def set_error(self, message: str) -> None:
+        self._smooth_timer.stop()
         self._error.setText(message)
         self._error.setProperty("level", "error")
         _restyle(self._error)
         self._error.setVisible(True)
 
     def set_warning(self, message: str) -> None:
+        self._smooth_timer.stop()
         self._error.setText(message)
         self._error.setProperty("level", "warning")
         _restyle(self._error)
@@ -1083,6 +1188,7 @@ class NavItem(QFrame):
         label = QLabel(text)
         label.setObjectName("navText")
         label.setProperty("on", active)
+        self._label = label
 
         row.addWidget(label)
         row.addStretch()
@@ -1098,6 +1204,8 @@ class NavItem(QFrame):
         self.setProperty("on", active)
         _restyle(self)
         self.update()
+        self._label.setProperty("on", active)
+        _restyle(self._label)
         if self._badge_label is not None:
             self._badge_label.setObjectName(
                 "badgeOn" if active else "badge"
@@ -1139,7 +1247,7 @@ class MainWindow(QMainWindow):
                 _ctypes.sizeof(_ctypes.c_int),
             )
         except Exception:
-            pass
+            logger.debug("DwmSetWindowAttribute not available on this Windows version")
 
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
@@ -1204,6 +1312,8 @@ class MainWindow(QMainWindow):
         self._tb = None
         self._tb_last_try = 0.0
         self._ejecting = False
+        self._theme_timer: QTimer | None = None
+        self._last_system_dark: bool | None = None
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -1315,7 +1425,7 @@ class MainWindow(QMainWindow):
                 )
                 settings.set_many(onboarding_seen=True)
         except Exception:
-            pass
+            logger.debug("onboarding dialog failed")
 
     def _content_minimum_width(self) -> int:
         """Smallest window width that fits every page without clipping.
@@ -1593,7 +1703,7 @@ class MainWindow(QMainWindow):
         try:
             self._update_controls_state()
         except Exception:
-            pass
+            logger.debug("_update_controls_state failed in _on_drive_changed")
 
     def _update_drive_ui(self) -> None:
         drive = self._current_drive
@@ -1883,7 +1993,7 @@ class MainWindow(QMainWindow):
         try:
             self._update_controls_state()
         except Exception:
-            pass
+            logger.debug("_update_controls_state failed in _on_iso_selected")
 
     def _on_iso_hash_ready(self, path: str, ok: bool, digest: str) -> None:
         # The drop zone finished hashing the image: re-evaluate any sidecar.
@@ -1992,6 +2102,7 @@ class MainWindow(QMainWindow):
         self._theme_radios: dict[str, QRadioButton] = {}
         theme = settings.get("theme")
         for label, key in (
+            ("Auto (system)", "auto"),
             ("Light theme", "light"),
             ("High contrast", "high-contrast"),
             ("Dark theme", "dark"),
@@ -2069,6 +2180,7 @@ class MainWindow(QMainWindow):
 
         reset_btn = QPushButton("Reset window size")
         reset_btn.setObjectName("ghost")
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reset_btn.clicked.connect(lambda: self.resize(900, 580))
         xcol.addWidget(reset_btn)
 
@@ -2081,10 +2193,42 @@ class MainWindow(QMainWindow):
     def _set_theme(self, theme: str) -> None:
         from ui.style import build_style
 
+        if theme == "auto":
+            dark = _windows_uses_dark_mode()
+            resolved = "dark" if dark else "light"
+        else:
+            resolved = theme
         app = QApplication.instance()
         if isinstance(app, QApplication):
-            app.setStyleSheet(build_style(theme))
+            app.setStyleSheet(build_style(resolved))
         settings.set_many(theme=theme)
+        if theme == "auto":
+            self._start_theme_poll()
+        else:
+            self._stop_theme_poll()
+
+    def _start_theme_poll(self) -> None:
+        """Poll the Windows registry every 5 s for system theme changes."""
+        if self._theme_timer is None:
+            self._theme_timer = QTimer(self)
+            self._theme_timer.timeout.connect(self._poll_system_theme)
+        self._last_system_dark = _windows_uses_dark_mode()
+        self._theme_timer.start(5000)
+
+    def _stop_theme_poll(self) -> None:
+        if self._theme_timer is not None:
+            self._theme_timer.stop()
+
+    def _poll_system_theme(self) -> None:
+        dark = _windows_uses_dark_mode()
+        if dark != self._last_system_dark:
+            self._last_system_dark = dark
+            from ui.style import build_style
+
+            resolved = "dark" if dark else "light"
+            app = QApplication.instance()
+            if isinstance(app, QApplication):
+                app.setStyleSheet(build_style(resolved))
 
     def _build_history_page(self) -> QWidget:
         page = QWidget()
@@ -2115,12 +2259,16 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         export_btn = QPushButton("Export\u2026")
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         export_btn.clicked.connect(self._on_history_export)
         import_btn = QPushButton("Import\u2026")
+        import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         import_btn.clicked.connect(self._on_history_import)
         clear_btn = QPushButton("Clear")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_btn.clicked.connect(self._on_history_clear)
         diag_btn = QPushButton("Export diagnostics\u2026")
+        diag_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         diag_btn.clicked.connect(self._on_export_diagnostics)
         diag_btn.setToolTip(
             "Bundle version info, drive list, history and logs into a "
@@ -2279,14 +2427,40 @@ class MainWindow(QMainWindow):
         self._verify_mode.setProperty("colorRole", "muted")
         col.addWidget(self._verify_mode)
 
+        self._verify_hash_frame = QFrame()
+        self._verify_hash_frame.setObjectName("block")
+        hrow = QHBoxLayout(self._verify_hash_frame)
+        hrow.setContentsMargins(14, 10, 14, 10)
+        hrow.setSpacing(8)
+        self._verify_hash_label = QLabel("SHA-256:")
+        self._verify_hash_label.setObjectName("capLabel")
+        self._verify_hash_label.setProperty("colorRole", "muted")
+        self._verify_hash_value = QLabel("")
+        self._verify_hash_value.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._verify_hash_copy = QPushButton("Copy")
+        self._verify_hash_copy.setObjectName("ghost")
+        self._verify_hash_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._verify_hash_copy.setToolTip("Copy SHA-256 to clipboard")
+        self._verify_hash_copy.setEnabled(False)
+        self._verify_hash_copy.clicked.connect(self._on_verify_hash_copy)
+        hrow.addWidget(self._verify_hash_label)
+        hrow.addWidget(self._verify_hash_value, 1)
+        hrow.addWidget(self._verify_hash_copy)
+        self._verify_hash_frame.setVisible(False)
+        col.addWidget(self._verify_hash_frame)
+
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         self._verify_cancel_btn = QPushButton("Cancel")
         self._verify_cancel_btn.setObjectName("ghost")
+        self._verify_cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._verify_cancel_btn.setEnabled(False)
         self._verify_cancel_btn.clicked.connect(self._on_page_verify_cancel)
         self._verify_start_btn = QPushButton("Run verification")
         self._verify_start_btn.setObjectName("primary")
+        self._verify_start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._verify_start_btn.setMinimumHeight(
             style.DESIGN_TOKENS["button_height"]
         )
@@ -2352,6 +2526,9 @@ class MainWindow(QMainWindow):
         self._verify_progress.set_verifying()
         self._verify_start_btn.setEnabled(False)
         self._verify_cancel_btn.setEnabled(True)
+        self._verify_hash_frame.setVisible(False)
+        self._verify_hash_value.setText("")
+        self._verify_hash_copy.setEnabled(False)
         verifier.progress.connect(self._on_page_verify_progress)
         verifier.stats.connect(self._on_page_verify_stats)
         verifier.finished.connect(self._on_page_verify_finished)
@@ -2377,6 +2554,10 @@ class MainWindow(QMainWindow):
         if ok:
             self._verify_progress.set_done()
             self._verify_progress._title.setText("Verified")
+            # Show the computed hash for clipboard copy
+            self._verify_hash_value.setText(message)
+            self._verify_hash_copy.setEnabled(True)
+            self._verify_hash_frame.setVisible(True)
             dialogs.completion(
                 self,
                 kind="success",
@@ -2386,6 +2567,7 @@ class MainWindow(QMainWindow):
             )
         elif message == "cancelled":
             self._verify_progress.set_error("Verification cancelled")
+            self._verify_hash_frame.setVisible(False)
             dialogs.completion(
                 self,
                 kind="warning",
@@ -2397,12 +2579,26 @@ class MainWindow(QMainWindow):
             self._verify_progress.set_error(
                 self._friendly_error(message or "Verification failed")
             )
+            self._verify_hash_frame.setVisible(False)
             dialogs.completion(
                 self,
                 kind="error",
                 title="Verification failed",
                 message=self._friendly_error(message or "Verification failed"),
                 buttons=[("Close", "primary", "close")],
+            )
+
+    def _on_verify_hash_copy(self) -> None:
+        """Copy the verification SHA-256 hash to the clipboard."""
+        text = self._verify_hash_value.text()
+        if not text:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+        if self._tray is not None:
+            self._tray.showMessage(
+                "Flint", "SHA-256 copied to clipboard.",
             )
 
     def _on_page_verify_cancel(self) -> None:
@@ -2584,7 +2780,7 @@ class MainWindow(QMainWindow):
                 timeout=5,
             )
         except Exception:
-            pass
+            logger.debug("PowerShell completions install failed")
 
     def _on_tray_quit(self) -> None:
         if self._busy() and not dialogs.confirm(
@@ -2905,6 +3101,7 @@ class MainWindow(QMainWindow):
 
         self._wipe_btn = QPushButton("Wipe drive")
         self._wipe_btn.setObjectName("ghost")
+        self._wipe_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._wipe_btn.clicked.connect(lambda: self._on_wipe_clicked("zero"))
         wipe_menu = QMenu(self)
         for label, method, tip in (
@@ -2929,6 +3126,7 @@ class MainWindow(QMainWindow):
         self._wipe_menu = wipe_menu
         self._wipe_menu_btn = QPushButton("\u25be")
         self._wipe_menu_btn.setObjectName("iconBtn")
+        self._wipe_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._wipe_menu_btn.setToolTip("Wipe method")
         self._wipe_menu_btn.setFixedSize(30, 30)
         self._wipe_menu_btn.clicked.connect(
@@ -2937,10 +3135,12 @@ class MainWindow(QMainWindow):
 
         self._cancel_btn = QPushButton("Cancel")
         self._cancel_btn.setObjectName("ghost")
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cancel_btn.clicked.connect(self._on_cancel_clicked)
 
         self._flash_btn = QPushButton("Flash drive")
         self._flash_btn.setObjectName("primary")
+        self._flash_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._flash_btn.setMinimumHeight(style.DESIGN_TOKENS["button_height"])
         self._flash_btn.clicked.connect(self._on_flash_clicked)
 
@@ -2977,11 +3177,13 @@ class MainWindow(QMainWindow):
 
         refresh = QPushButton("\u21bb")
         refresh.setObjectName("iconBtn")
+        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh.setFixedSize(30, 30)
         refresh.setToolTip("Refresh drives (F5)")
         self._refresh_btn = refresh
         dots = QPushButton("\u22ef")
         dots.setObjectName("iconBtn")
+        dots.setCursor(Qt.CursorShape.PointingHandCursor)
         dots.setFixedSize(30, 30)
         dots.setToolTip("Open settings")
         self._dots_btn = dots
@@ -3043,6 +3245,7 @@ class MainWindow(QMainWindow):
         target_row.addStretch()
         self._target_change = QPushButton("Choose drive")
         self._target_change.setObjectName("primary")
+        self._target_change.setCursor(Qt.CursorShape.PointingHandCursor)
         self._target_change.setMinimumHeight(
             style.DESIGN_TOKENS["button_height"]
         )
@@ -3051,6 +3254,7 @@ class MainWindow(QMainWindow):
 
         self._target_admin_btn = QPushButton("Run as administrator")
         self._target_admin_btn.setObjectName("ghost")
+        self._target_admin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._target_admin_btn.clicked.connect(self._relaunch_elevated)
         self._target_admin_btn.setVisible(False)
         target_row.addWidget(self._target_admin_btn)
@@ -3084,15 +3288,19 @@ class MainWindow(QMainWindow):
         queue_buttons = QHBoxLayout()
         self._queue_add_btn = QPushButton("Add images\u2026")
         self._queue_add_btn.setObjectName("ghost")
+        self._queue_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._queue_add_btn.clicked.connect(self._on_queue_add_clicked)
         self._queue_remove_btn = QPushButton("Remove selected")
         self._queue_remove_btn.setObjectName("ghost")
+        self._queue_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._queue_remove_btn.clicked.connect(self._on_queue_remove_clicked)
         self._queue_clear_btn = QPushButton("Clear")
         self._queue_clear_btn.setObjectName("ghost")
+        self._queue_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._queue_clear_btn.clicked.connect(self._on_queue_clear_clicked)
         self._flash_queue_btn = QPushButton("Flash queue")
         self._flash_queue_btn.setObjectName("primary")
+        self._flash_queue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._flash_queue_btn.setMinimumHeight(
             style.DESIGN_TOKENS["button_height"]
         )
@@ -3147,6 +3355,7 @@ class MainWindow(QMainWindow):
         self._fleet_label.setWordWrap(True)
         self._fleet_stop_btn = QPushButton("Stop")
         self._fleet_stop_btn.setObjectName("ghost")
+        self._fleet_stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fleet_stop_btn.clicked.connect(self._on_fleet_stop_clicked)
         fleet_banner_row.addWidget(self._fleet_label, 1)
         fleet_banner_row.addWidget(self._fleet_stop_btn)
@@ -3190,8 +3399,14 @@ class MainWindow(QMainWindow):
         done_text.addWidget(self._done_label)
         done_text.addWidget(self._done_summary)
         self._reflash_btn = QPushButton("Flash again")
+        self._reflash_btn.setObjectName("ghost")
+        self._reflash_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._eject_btn = QPushButton("Eject drive")
+        self._eject_btn.setObjectName("ghost")
+        self._eject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._copy_btn = QPushButton("Copy report")
+        self._copy_btn.setObjectName("ghost")
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._reflash_btn.clicked.connect(self._on_flash_clicked)
         self._eject_btn.clicked.connect(self._on_eject_clicked)
         self._copy_btn.clicked.connect(self._on_copy_report_clicked)
@@ -4961,6 +5176,9 @@ class MainWindow(QMainWindow):
         self._write_duration = 0.0
         self._poller.suspend()
         self._scroll_to_progress(self._content_scroll)
+        if self._tray is not None:
+            op = "Backing up" if self._backup_out else "Cloning"
+            self._tray.setToolTip(f"Flint \u2014 {op}\u2026")
         worker.progress.connect(self._on_write_progress)
         worker.speed_mbps.connect(self._progress.set_speed)
         worker.written_bytes.connect(self._progress.set_written)
@@ -5156,11 +5374,20 @@ class MainWindow(QMainWindow):
             self._reflash_btn.setVisible(False)
             self._done_bar.setVisible(True)
             self._scroll_to_done_bar()
+            if self._tray is not None:
+                self._tray.setToolTip("Flint")
+                self._tray.showMessage(
+                    "Flint \u2014 operation finished",
+                    "Backup complete." if is_backup else "Clone complete.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    4000,
+                )
         else:
             self._progress.set_error(
                 self._friendly_error(message or "Operation failed")
             )
             if self._tray is not None:
+                self._tray.setToolTip("Flint")
                 self._tray.showMessage(
                     "Flint \u2014 operation finished",
                     "Backup/clone failed." if not is_backup else "Backup failed.",
