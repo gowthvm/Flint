@@ -29,6 +29,7 @@ _DEFAULTS: dict[str, Any] = {
     "bad_block_scan": False,
     "bad_block_retries": 3,
     "log_level": "INFO",
+    "auto_eject": False,
 }
 
 # Settings whose values must have a specific type. Corrupted or hand-edited
@@ -54,6 +55,7 @@ _TYPE_CHECK: dict[str, type] = {
     "bad_block_scan": bool,
     "bad_block_retries": int,
     "log_level": str,
+    "auto_eject": bool,
 }
 
 

@@ -174,3 +174,51 @@ def test_close_quits_when_disabled(qapp, tmp_path, monkeypatch):
         assert calls
     finally:
         w._shutdown()
+
+
+def test_auto_eject_toggle_persists(qapp, tmp_path):
+    import core.settings as s
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        assert not w._auto_eject_toggle.isChecked()
+        w._auto_eject_toggle.setChecked(True)
+        assert s.get("auto_eject") is True
+        w._auto_eject_toggle.setChecked(False)
+        assert s.get("auto_eject") is False
+    finally:
+        w._shutdown()
+
+
+def test_auto_eject_seeded_from_settings(qapp, tmp_path):
+    w = _make_window(qapp, tmp_path, seed={"auto_eject": True})
+    try:
+        assert w._auto_eject_toggle.isChecked()
+    finally:
+        w._shutdown()
+
+
+def test_auto_eject_triggers_eject_on_success(qapp, tmp_path, monkeypatch):
+    w = _make_window(qapp, tmp_path, seed={"auto_eject": True})
+    ejected: list[int] = []
+    monkeypatch.setattr(w, "_on_eject_clicked", lambda: ejected.append(1))
+    monkeypatch.setattr(w, "_show_toast", lambda *a, **k: None)
+    try:
+        w._finish_flash(True, "", None)
+        assert ejected, "auto-eject must call eject on a successful flash"
+    finally:
+        w._shutdown()
+
+
+def test_auto_eject_off_shows_completion_dialog(qapp, tmp_path, monkeypatch):
+    from ui import dialogs as d
+
+    w = _make_window(qapp, tmp_path, seed={"auto_eject": False})
+    shown: list[dict] = []
+    monkeypatch.setattr(d, "completion", lambda *a, **kw: shown.append(kw) or "close")
+    monkeypatch.setattr(w, "_show_toast", lambda *a, **k: None)
+    try:
+        w._finish_flash(True, "", None)
+        assert shown, "completion dialog must appear when auto-eject is off"
+    finally:
+        w._shutdown()

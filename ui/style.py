@@ -4,18 +4,18 @@ QSS from a palette; themes: dark (default), light, high-contrast."""
 _PALETTES = {
     "dark": {
         "bg": "#0a0a0a",
-        "card": "#0e0e0e",
-        "border": "#1f1f1f",
+        "card": "#121212",
+        "border": "#2a2a2a",
         "text": "#ffffff",
         "muted": "#a8a8a8",  # matches flint-web --muted (AA on all surfaces)
         "faded": "#6f6f6f",  # matches flint-web --faded
-        "track": "#1a1a1a",
+        "track": "#1b1b1b",
         "primary": "#ffffff",
         "onPrimary": "#000000",
         "error": "#ff4444",
         "success": "#2ecc71",
         "warning": "#ffb300",
-        "menuHover": "#262626",
+        "menuHover": "#2d2d2d",
     },
     "light": {
         "bg": "#f2f2f2",
@@ -69,7 +69,7 @@ DESIGN_TOKENS = {
     "btn_pad_v": 9,
     "btn_pad_h": 16,
     "btn_primary_pad": 10,
-    "progress_h": 6,
+    "progress_h": 4,
     "font_xs": 10,
     "font_sm": 11,
     "font_base": 13,
@@ -89,7 +89,13 @@ def px(n: int) -> str:
 
 _QSS_TEMPLATE = """
 QMainWindow {
-    background: @bg;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #0c0c0c,
+        stop:1 #090909
+    );
 }
 
 QWidget {
@@ -98,10 +104,36 @@ QWidget {
     font-size: $font_base;
 }
 
+QWidget:focus {
+    outline: none;
+}
+
+QWidget#sidebar {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:1, y2:0,
+        stop:0 #0d0d0d,
+        stop:1 #0a0a0a
+    );
+    border-right: 1px solid @border;
+}
+
 QFrame {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #141414,
+        stop:1 #0f0f0f
+    );
     border: 1px solid @border;
-    border-radius: 8px;
+    border-radius: 10px;
+}
+
+QWidget#fixedStrip {
+    background: @bg;
+    border: none;
 }
 
 QLabel {
@@ -144,13 +176,25 @@ QProgressBar {
     color: transparent;
 }
 
+QProgressBar:focus {
+    border: none;
+    outline: none;
+}
+
 QProgressBar::chunk {
     background: @primary;
+    border: none;
     border-radius: 3px;
 }
 
 QPushButton {
-    background: transparent;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1a1a1a,
+        stop:1 #121212
+    );
     border: 1px solid @border;
     border-radius: $radius_btn;
     color: @muted;
@@ -159,12 +203,26 @@ QPushButton {
 }
 
 QPushButton:hover {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #242424,
+        stop:1 #1b1b1b
+    );
+    border-color: @faded;
     color: @text;
 }
 
 QPushButton:pressed {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #111111,
+        stop:1 #0d0d0d
+    );
+    border-color: @faded;
 }
 
 QPushButton:disabled {
@@ -174,7 +232,13 @@ QPushButton:disabled {
 }
 
 QPushButton#primary {
-    background: @primary;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #ffffff,
+        stop:1 #e6e6e6
+    );
     border: none;
     color: @onPrimary;
     font-weight: 500;
@@ -186,17 +250,34 @@ QPushButton#primary:disabled {
     color: @faded;
 }
 
-QPushButton#primary:hover, QPushButton#primary:pressed {
-    background: @primary;
+QPushButton#primary:hover {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #f4f4f4,
+        stop:1 #dedede
+    );
+    color: @onPrimary;
+}
+
+QPushButton#primary:pressed {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #e4e4e4,
+        stop:1 #d7d7d7
+    );
     color: @onPrimary;
 }
 
 QPushButton:focus {
-    border: 1px solid @muted;
+    border-color: @muted;
 }
 
 QPushButton#primary:focus {
-    border: 1px solid @text;
+    border: 1px solid @muted;
 }
 
 QPushButton#danger {
@@ -207,13 +288,18 @@ QPushButton#danger {
     padding: $btn_primary_pad;
 }
 
-QPushButton#danger:hover, QPushButton#danger:pressed {
-    background: @error;
+QPushButton#danger:hover {
+    background: #e63c3c;
+    color: @onPrimary;
+}
+
+QPushButton#danger:pressed {
+    background: #cc3333;
     color: @onPrimary;
 }
 
 QPushButton#danger:focus {
-    border: 1px solid @text;
+    border: 1px solid @muted;
 }
 
 QPushButton#ghost {
@@ -224,6 +310,11 @@ QPushButton#ghost {
 
 QPushButton#ghost:hover {
     background: @track;
+    color: @text;
+}
+
+QPushButton#ghost:pressed {
+    background: @border;
     color: @text;
 }
 
@@ -243,7 +334,13 @@ QPushButton#helpBtn:hover {
 }
 
 QComboBox {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1d1d1d,
+        stop:1 #121212
+    );
     border: 1px solid @border;
     border-radius: $radius_md;
     color: @text;
@@ -254,10 +351,27 @@ QComboBox {
 
 QComboBox:hover {
     border-color: @faded;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #242424,
+        stop:1 #171717
+    );
 }
 
 QComboBox:focus {
     border: 1px solid @muted;
+}
+
+QComboBox:pressed {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #111111,
+        stop:1 #0f0f0f
+    );
 }
 
 QComboBox:disabled {
@@ -267,6 +381,10 @@ QComboBox:disabled {
 QComboBox::drop-down {
     border: none;
     width: 22px;
+}
+
+QComboBox::drop-down:hover {
+    border-left: 1px solid @border;
 }
 
 QComboBox::down-arrow {
@@ -283,6 +401,20 @@ QComboBox QAbstractItemView {
     color: @text;
     selection-background-color: @track;
     selection-color: @text;
+    outline: none;
+}
+
+QAbstractItemView::item:selected,
+QAbstractItemView::item:selected:focus {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1f1f1f,
+        stop:1 #171717
+    );
+    color: @text;
+    border: none;
 }
 
 QListWidget {
@@ -301,17 +433,35 @@ QListWidget::item {
 }
 
 QListWidget::item:hover {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1b1b1b,
+        stop:1 #161616
+    );
     color: @text;
 }
 
 QListWidget::item:selected {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #242424,
+        stop:1 #1a1a1a
+    );
     color: @text;
 }
 
 QListWidget::item:selected:!active {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1f1f1f,
+        stop:1 #171717
+    );
     color: @text;
 }
 
@@ -338,21 +488,36 @@ QLabel#capLabel {
     font-family: $font_mono;
     font-size: 10px;
     font-weight: 600;
+    letter-spacing: 0.08em;
     padding-bottom: 2px;
 }
 
 QFrame#navItem {
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     border-radius: 6px;
 }
 
 QFrame#navItem:hover {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1a1a1a,
+        stop:1 #141414
+    );
+    border: 1px solid @border;
 }
 
 QFrame#navItem[on="true"] {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1d1d1d,
+        stop:1 #181818
+    );
+    border: 1px solid @border;
 }
 
 QFrame#navItem:focus {
@@ -385,21 +550,37 @@ QLabel#badgeOn {
 }
 
 QFrame#driveChip {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #171717,
+        stop:1 #101010
+    );
     border: 1px solid @border;
     border-radius: $radius_md;
-    padding: $space_sm $space_md;
 }
 
 QFrame#driveChip:hover {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1f1f1f,
+        stop:1 #161616
+    );
 }
 
 QFrame#driveCard {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #171717,
+        stop:1 #101010
+    );
     border: 1px solid @border;
     border-radius: 8px;
-    padding: 0px;
 }
 
 QFrame#driveCard:hover {
@@ -440,7 +621,7 @@ QLabel#dot[dim="true"] {
 
 QLabel#driveName {
     color: @text;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
 }
 
@@ -458,7 +639,13 @@ QLabel#driveSub[dim="true"] {
 }
 
 QPushButton#iconBtn {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #1c1c1c,
+        stop:1 #0f0f0f
+    );
     border: 1px solid @border;
     border-radius: 6px;
     color: @muted;
@@ -467,14 +654,32 @@ QPushButton#iconBtn {
 }
 
 QPushButton#iconBtn:hover {
-    background: @track;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #242424,
+        stop:1 #141414
+    );
+    border-color: @faded;
+    color: @text;
+}
+
+QPushButton#iconBtn:pressed {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #111111,
+        stop:1 #0b0b0b
+    );
     color: @text;
 }
 
 QLabel#title {
     color: @text;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 15px;
+    font-weight: 600;
 }
 
 QLabel#subtitle {
@@ -483,7 +688,13 @@ QLabel#subtitle {
 }
 
 QFrame#isoDropZone {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #121212,
+        stop:1 #0d0d0d
+    );
     border: 1px dashed @border;
     border-radius: $radius_lg;
     padding: $space_xl;
@@ -499,7 +710,7 @@ QFrame#isoDropZone[loaded="true"] {
 }
 
 QFrame#isoDropZone:focus {
-    border-color: @primary;
+    border-color: @muted;
 }
 
 QLabel#emptyIsoIcon {
@@ -560,10 +771,56 @@ QPushButton#isoClear:pressed {
 }
 
 QFrame#block {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #151515,
+        stop:1 #0f0f0f
+    );
+    border: 1px solid @border;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: $radius_lg;
+}
+
+QFrame#recessed {
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #101010,
+        stop:1 #0b0b0b
+    );
+    border: 1px solid @border;
+    border-radius: $radius_md;
+}
+
+QLabel#chip {
     background: @card;
     border: 1px solid @border;
-    border-radius: $radius_lg;
-    padding: $space_md $space_lg;
+    border-radius: $radius_sm;
+    color: @text;
+    font-size: $font_sm;
+    padding: 3px 8px;
+}
+
+QLabel#chipOn {
+    background: @primary;
+    border: 1px solid @primary;
+    border-radius: $radius_sm;
+    color: @onPrimary;
+    font-size: $font_sm;
+    font-weight: 500;
+    padding: 3px 8px;
+}
+
+QLabel#chipOk {
+    background: @card;
+    border: 1px solid @border;
+    border-radius: $radius_sm;
+    color: @success;
+    font-size: $font_sm;
+    padding: 3px 8px;
 }
 
 QPushButton#seg {
@@ -582,7 +839,7 @@ QPushButton#seg:hover {
 
 QPushButton#seg:focus,
 QPushButton#segOn:focus {
-    border: 1px solid @primary;
+    border-color: @muted;
 }
 
 QPushButton#segOn {
@@ -595,23 +852,33 @@ QPushButton#segOn {
     padding: 7px 0;
 }
 
+QPushButton#segOn:hover {
+    background: @muted;
+}
+
 QFrame#progressArea {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #171717,
+        stop:1 #101010
+    );
     border: 1px solid @border;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
     border-radius: $radius_lg;
-    padding: $space_lg $space_md;
 }
 
 QLabel#progTitle {
     color: @text;
-    font-size: 13px;
+    font-size: $font_sm;
     font-weight: 500;
 }
 
 QLabel#progPct {
     color: @text;
     font-family: $font_mono;
-    font-size: $font_xl;
+    font-size: $font_md;
     font-weight: 500;
 }
 
@@ -689,6 +956,10 @@ QRadioButton::indicator {
     background: @card;
 }
 
+QRadioButton::indicator:hover {
+    border-color: @faded;
+}
+
 QRadioButton::indicator:checked {
     background: @primary;
     border: none;
@@ -705,7 +976,7 @@ QScrollArea > QWidget > QWidget {
 
 QScrollBar:vertical {
     background: transparent;
-    width: $space_sm;
+    width: 8px;
     margin: 0;
 }
 
@@ -713,6 +984,10 @@ QScrollBar::handle:vertical {
     background: @border;
     border-radius: 4px;
     min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: @muted;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -724,7 +999,13 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 }
 
 QMenu {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #161616,
+        stop:1 #0f0f0f
+    );
     border: 1px solid @border;
     color: @text;
     padding: $space_xs;
@@ -736,7 +1017,13 @@ QMenu::item {
 }
 
 QMenu::item:selected {
-    background: @menuHover;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #2a2a2a,
+        stop:1 #1d1d1d
+    );
 }
 
 QMenu::item:disabled {
@@ -750,7 +1037,13 @@ QMenu::separator {
 }
 
 QLineEdit {
-    background: @card;
+    background: qlineargradient(
+        spread:pad,
+        x1:0, y1:0,
+        x2:0, y2:1,
+        stop:0 #171717,
+        stop:1 #0f0f0f
+    );
     border: 1px solid @border;
     border-radius: $radius_btn;
     color: @text;
@@ -764,7 +1057,7 @@ QLineEdit#shaInput {
 }
 
 QLineEdit:focus {
-    border: 1px solid @primary;
+    border: 1px solid @muted;
 }
 
 QDialog#flintDialog {
@@ -821,6 +1114,10 @@ QDialog#flintDialog QCheckBox::indicator {
     border: 1px solid @border;
     border-radius: 4px;
     background: @card;
+}
+
+QDialog#flintDialog QCheckBox::indicator:hover {
+    border-color: @faded;
 }
 
 QDialog#flintDialog QCheckBox::indicator:checked {

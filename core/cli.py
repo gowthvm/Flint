@@ -68,6 +68,9 @@ _VALUE_OPTS = {
     "timeout",
     "retries",
     "shell",
+    "partition-scheme",
+    "filesystem",
+    "write-mode",
 }
 _FLAG_OPTS = {
     "verify",
@@ -80,6 +83,7 @@ _FLAG_OPTS = {
     "copy-report",
     "verbose",
     "bypass-tpm",
+    "check-fake",
 }
 
 _METHODS = ("zero", "random", "nist", "dod")
@@ -294,7 +298,8 @@ _COMMAND_HELP: dict[str, str] = {
     "flash": (
         "flint flash --image <file> --drive <serial|letter|path>\n"
         "           [--confirm <serial> | --yes] [--verify] [--bypass-tpm]\n"
-        "           [--quiet]\n"
+        "           [--partition-scheme gpt|mbr] [--filesystem fat32|ntfs|exfat]\n"
+        "           [--write-mode raw|file-copy] [--quiet]\n"
         "  Write an image to a drive, erasing everything on it. The image\n"
         "  is written raw (no filesystem) and verified by default when\n"
         "  FLINT_VERIFY=1 or --verify is given.\n"
@@ -308,6 +313,15 @@ _COMMAND_HELP: dict[str, str] = {
         "  --verify               read back the drive and compare digests\n"
         "  --bypass-tpm           patch boot.wim to skip Windows 11 TPM,\n"
         "                         Secure Boot and RAM checks (file-copy mode)\n"
+        "  --partition-scheme gpt|mbr\n"
+        "                         partition table type (default: auto)\n"
+        "  --filesystem fat32|ntfs|exfat\n"
+        "                         filesystem for file-copy mode (default: fat32)\n"
+        "  --write-mode raw|file-copy\n"
+        "                         raw writes the image byte-for-byte; file-copy\n"
+        "                         repartitions and copies files (default: auto)\n"
+        "  --check-fake           probe the drive for counterfeit capacity\n"
+        "                         before flashing (non-destructive, ~1 s)\n"
         "  --quiet                suppress progress and informational messages\n"
         "  Example: flint flash --image C:\\img\\ubuntu.iso --drive E: --confirm 4C530001270509112345\n"
     ),
@@ -546,6 +560,38 @@ def _resolve_drive(
         if any(letter.casefold() == lowered.strip(":") for letter in letters):
             return drive
     return None
+
+
+def _is_system_disk(drive: dict[str, Any]) -> bool:
+    """Return True if *drive* hosts the running OS partition."""
+    from core.drives import DriveDetector
+
+    detector = DriveDetector()
+    system_paths = detector._system_disk_paths()
+    return drive.get("physical_path", "") in system_paths
+
+
+def _check_fake_drive(drive: dict[str, Any], assume_yes: bool) -> int | None:
+    """Non-destructively probe *drive* for counterfeit capacity.
+
+    Returns an exit code when the drive appears fake and the user has not
+    consented with ``--yes``; returns ``None`` to allow the operation.
+    """
+    from core.fake_detect import probe_capacity
+
+    reported = drive.get("size_gb", 0) * 1_000_000_000
+    if reported <= 0:
+        return None
+    _eprint("probing drive for counterfeit capacity...")
+    suspicious, msg = probe_capacity(drive["physical_path"], reported)
+    if not suspicious:
+        _eprint(f"  {msg}")
+        return None
+    _eprint(f"WARNING: {msg}")
+    if assume_yes:
+        _eprint("proceeding anyway (--yes was given)")
+        return None
+    return _result("fail", f"fake drive detected — {msg}", EXIT_USAGE)
 
 
 def _serial_of(drive: dict[str, Any]) -> str:
@@ -873,6 +919,16 @@ def _cmd_flash(opts: dict[str, object]) -> int:
             "drive not found — run 'flint list' to see available drives",
             EXIT_USAGE,
         )
+    if _is_system_disk(drive):
+        return _result(
+            "fail",
+            "refusing to flash the system disk (the OS is running from this drive)",
+            EXIT_USAGE,
+        )
+    if opts.get("check-fake"):
+        denied = _check_fake_drive(drive, bool(opts.get("yes")))
+        if denied is not None:
+            return denied
     issue = _confirm_drive(
         drive,
         str(opts.get("confirm", "")),
@@ -889,6 +945,9 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         _eprint(f"  letters: {_display_letters(drive)}")
         _eprint(f"  verify: {bool(opts.get('verify')) or _env_flag('FLINT_VERIFY')}")
         _eprint(f"  bypass-tpm: {bool(opts.get('bypass-tpm'))}")
+        _eprint(f"  partition-scheme: {opts.get('partition-scheme', 'auto')}")
+        _eprint(f"  filesystem: {opts.get('filesystem', 'fat32')}")
+        _eprint(f"  write-mode: {opts.get('write-mode', 'auto')}")
         return _result("ok", "dry run — no changes made", EXIT_OK)
     image_size = os.path.getsize(image)
     if image_size > (drive.get("size_gb", 0) * 1_000_000_000):
@@ -900,6 +959,9 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         image,
         drive["physical_path"],
         letters=letters,
+        partition_scheme=str(opts.get("partition-scheme", "auto")),
+        filesystem=str(opts.get("filesystem", "fat32")),
+        write_mode=str(opts.get("write-mode", "auto")),
         verify_after_write=bool(opts.get("verify")) or _env_flag("FLINT_VERIFY"),
         bypass_tpm=bool(opts.get("bypass-tpm")),
     )
@@ -995,6 +1057,12 @@ def _cmd_wipe(opts: dict[str, object]) -> int:
             "drive not found — run 'flint list' to see available drives",
             EXIT_USAGE,
         )
+    if _is_system_disk(drive):
+        return _result(
+            "fail",
+            "refusing to wipe the system disk (the OS is running from this drive)",
+            EXIT_USAGE,
+        )
     issue = _confirm_drive(
         drive,
         str(opts.get("confirm", "")),
@@ -1042,10 +1110,15 @@ def _cmd_backup(opts: dict[str, object]) -> int:
     if not out:
         return _result("fail", "--out <file> is required", EXIT_USAGE)
     confirm = str(opts.get("confirm", "")) if opts.get("confirm") else None
+    issue: str | None = None
     if confirm and not bool(opts.get("yes")):
         issue = _require_confirm(drive, confirm)
-        if issue:
-            return _result("fail", issue, EXIT_USAGE)
+    if issue:
+        return _result("fail", issue, EXIT_USAGE)
+    if opts.get("check-fake"):
+        denied = _check_fake_drive(drive, bool(opts.get("yes")))
+        if denied is not None:
+            return denied
     if opts.get("dry-run"):
         _eprint("DRY RUN — would backup:")
         _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
@@ -1081,6 +1154,12 @@ def _cmd_clone(opts: dict[str, object]) -> int:
         )
     if source.get("physical_path") == target.get("physical_path"):
         return _result("fail", "source and target are the same drive", EXIT_USAGE)
+    if _is_system_disk(target):
+        return _result(
+            "fail",
+            "refusing to clone to the system disk (the OS is running from this drive)",
+            EXIT_USAGE,
+        )
     issue = _confirm_drive(
         target,
         str(opts.get("confirm", "")),

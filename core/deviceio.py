@@ -30,7 +30,8 @@ TRANSIENT_ERRORS = frozenset({1117, 21, 31, 5, 1167})
 TRANSIENT_SEEK_ERRORS = frozenset({21, 31, 5, 1167})
 
 
-def kernel32() -> Any:
+def _configure_kernel32() -> Any:
+    """Configure ctypes argtypes/restype once at import time."""
     k32 = ctypes.windll.kernel32
     k32.CreateFileW.argtypes = [
         ctypes.c_wchar_p,
@@ -84,6 +85,13 @@ def kernel32() -> Any:
     k32.SetThreadExecutionState.restype = ctypes.c_ulong
     k32.GetLastError.restype = ctypes.c_ulong
     return k32
+
+
+_K32 = _configure_kernel32()
+
+
+def kernel32() -> Any:
+    return _K32
 
 
 def open_drive(path: str, *, write: bool) -> Any:

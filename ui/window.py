@@ -231,10 +231,15 @@ class TipBubble(QFrame):
         self._fade_to(0.0)
 
     def _fade_to(self, goal: float) -> None:
-        self._anim.stop()
-        self._anim.setStartValue(self.windowOpacity())
-        self._anim.setEndValue(goal)
-        self._anim.start()
+        try:
+            self._anim.stop()
+            self._anim.setStartValue(self.windowOpacity())
+            self._anim.setEndValue(goal)
+            self._anim.start()
+        except RuntimeError:
+            # The tooltip may already be tearing down while a queued hide/show
+            # event is still in flight; ignore the stale animation in that case.
+            return
 
     def _position_for(self, anchor: QWidget) -> QPoint:
         top_left = anchor.mapToGlobal(QPoint(0, 0))
@@ -837,7 +842,12 @@ class SegmentedControl(QWidget):
 class ToggleSwitch(QWidget):
     toggled = pyqtSignal(bool)
 
-    def __init__(self, checked: bool = True) -> None:
+    def __init__(
+        self,
+        checked: bool = True,
+        label: str = "",
+        description: str = "",
+    ) -> None:
         super().__init__()
         self.setObjectName("toggleSwitch")
         self._checked = checked
@@ -847,11 +857,8 @@ class ToggleSwitch(QWidget):
         )
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName("Verify after write")
-        self.setAccessibleDescription(
-            "Check the drive after writing by comparing its content "
-            "against the image"
-        )
+        self.setAccessibleName(label)
+        self.setAccessibleDescription(description)
 
         self._track = QLabel()
         self._track.setObjectName("toggleTrack")
@@ -946,11 +953,15 @@ class ProgressArea(ChamferPanel):
         self._smooth_timer.setInterval(50)
         self._smooth_timer.timeout.connect(self._smooth_tick)
 
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
         col = QVBoxLayout(self)
-        col.setContentsMargins(0, 0, 0, 0)
+        col.setContentsMargins(14, 14, 14, 14)
         col.setSpacing(10)
 
         head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(0)
         self._title = QLabel("Writing\u2026")
         self._title.setObjectName("progTitle")
         self._pct = QLabel("0%")
@@ -963,12 +974,14 @@ class ProgressArea(ChamferPanel):
         self._bar.setObjectName("progressBar")
         self._bar.setValue(0)
         self._bar.setTextVisible(False)
+        self._bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self._written_stat = self._make_stat("Written")
         self._speed_stat = self._make_stat("Speed")
         self._eta_stat = self._make_stat("Remaining")
         stats = QHBoxLayout()
-        stats.setSpacing(10)
+        stats.setContentsMargins(0, 0, 0, 0)
+        stats.setSpacing(18)
         stats.addLayout(self._written_stat)
         stats.addLayout(self._speed_stat)
         stats.addLayout(self._eta_stat)
@@ -980,9 +993,7 @@ class ProgressArea(ChamferPanel):
         self._error.setVisible(False)
 
         col.addLayout(head)
-        col.addSpacing(14)
         col.addWidget(self._bar)
-        col.addSpacing(10)
         col.addLayout(stats)
         col.addWidget(self._error)
 
@@ -1288,6 +1299,7 @@ class MainWindow(QMainWindow):
         self._pending_update_path = ""
         self._sidecar_status = "missing"
         self._sidecar_detail = ""
+        self._help_bubble: TipBubble | None = None
         self._retired_workers: list[QThread] = []
         # Threads that refused to stop within the shutdown grace period.
         # Destroying a running QThread aborts the process mid-write, so they
@@ -1321,12 +1333,8 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         sidebar = self._build_sidebar()
-        divider = QFrame()
-        divider.setObjectName("vdiv")
-        divider.setFixedWidth(1)
 
         root.addWidget(sidebar)
-        root.addWidget(divider)
         root.addWidget(self._build_main())
 
         self.setCentralWidget(central)
@@ -1502,8 +1510,8 @@ class MainWindow(QMainWindow):
         available = screen.availableGeometry()
         if not frame.intersects(available):
             self.move(
-                available.center().x() - self.width() // 2,
-                available.center().y() - self.height() // 2,
+                available.center().x() - frame.width() // 2,
+                available.center().y() - frame.height() // 2,
             )
             return
         if (
@@ -1542,6 +1550,7 @@ class MainWindow(QMainWindow):
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(200)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1563,10 +1572,6 @@ class MainWindow(QMainWindow):
 
         logo_box = QWidget()
         logo_box.setLayout(logo_row)
-
-        logo_divider = QFrame()
-        logo_divider.setObjectName("hdiv")
-        logo_divider.setFixedHeight(1)
 
         nav_items = [
             ("Write", True, None),
@@ -1602,7 +1607,6 @@ class MainWindow(QMainWindow):
         foot_box.setLayout(foot)
 
         layout.addWidget(logo_box)
-        layout.addWidget(logo_divider)
         layout.addWidget(nav_box, 1)
         layout.addWidget(foot_divider)
         layout.addWidget(foot_box)
@@ -2056,10 +2060,54 @@ class MainWindow(QMainWindow):
         self._pages.addWidget(self._build_settings_page())
         layout.addWidget(self._pages, 1)
 
-        bottom_divider = QFrame()
-        bottom_divider.setObjectName("hdiv")
-        bottom_divider.setFixedHeight(1)
-        layout.addWidget(bottom_divider)
+        fixed_strip = QWidget()
+        fixed_strip.setObjectName("fixedStrip")
+        self._fixed_strip = fixed_strip
+        strip_layout = QVBoxLayout(fixed_strip)
+        strip_layout.setContentsMargins(24, 8, 24, 8)
+        strip_layout.setSpacing(0)
+
+        self._progress = ProgressArea()
+        self._progress.set_ready()
+        strip_layout.addWidget(self._progress)
+
+        self._done_bar = QFrame()
+        self._done_bar.setObjectName("block")
+        done_row = QHBoxLayout(self._done_bar)
+        done_row.setContentsMargins(16, 12, 16, 12)
+        done_row.setSpacing(8)
+        done_text = QVBoxLayout()
+        done_text.setSpacing(2)
+        self._done_label = QLabel("Flash complete")
+        self._done_label.setObjectName("progTitle")
+        self._done_summary = QLabel("")
+        self._done_summary.setObjectName("doneSummary")
+        done_text.addWidget(self._done_label)
+        done_text.addWidget(self._done_summary)
+        self._reflash_btn = QPushButton("Flash again")
+        self._reflash_btn.setObjectName("ghost")
+        self._reflash_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reflash_btn.setToolTip("Write the same image to this drive again")
+        self._eject_btn = QPushButton("Eject drive")
+        self._eject_btn.setObjectName("ghost")
+        self._eject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._eject_btn.setToolTip("Safely remove the drive from the system")
+        self._copy_btn = QPushButton("Copy report")
+        self._copy_btn.setObjectName("ghost")
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_btn.setToolTip("Copy the write report to clipboard")
+        self._reflash_btn.clicked.connect(self._on_flash_clicked)
+        self._eject_btn.clicked.connect(self._on_eject_clicked)
+        self._copy_btn.clicked.connect(self._on_copy_report_clicked)
+        done_row.addLayout(done_text)
+        done_row.addStretch()
+        done_row.addWidget(self._reflash_btn)
+        done_row.addWidget(self._eject_btn)
+        done_row.addWidget(self._copy_btn)
+        self._done_bar.setVisible(False)
+        strip_layout.addWidget(self._done_bar)
+
+        layout.addWidget(fixed_strip)
 
         self._bottombar = self._build_bottombar()
         layout.addWidget(self._bottombar)
@@ -2099,6 +2147,12 @@ class MainWindow(QMainWindow):
         title.setProperty("colorRole", "muted")
         acol.addWidget(title)
 
+        appearance_recessed = QFrame()
+        appearance_recessed.setObjectName("recessed")
+        appearance_recessed_col = QVBoxLayout(appearance_recessed)
+        appearance_recessed_col.setContentsMargins(8, 8, 8, 8)
+        appearance_recessed_col.setSpacing(6)
+
         self._theme_radios: dict[str, QRadioButton] = {}
         theme = settings.get("theme")
         for label, key in (
@@ -2108,6 +2162,7 @@ class MainWindow(QMainWindow):
             ("Dark theme", "dark"),
         ):
             radio = QRadioButton(label)
+            radio.setCursor(Qt.CursorShape.PointingHandCursor)
             radio.setChecked(theme == key)
             radio.toggled.connect(
                 lambda checked, t=key: (
@@ -2115,7 +2170,9 @@ class MainWindow(QMainWindow):
                 )
             )
             self._theme_radios[key] = radio
-            acol.addWidget(radio)
+            appearance_recessed_col.addWidget(radio)
+
+        acol.addWidget(appearance_recessed)
 
         behavior = QFrame()
         behavior.setObjectName("block")
@@ -2128,11 +2185,20 @@ class MainWindow(QMainWindow):
         title.setProperty("colorRole", "muted")
         bcol.addWidget(title)
 
+        behavior_recessed = QFrame()
+        behavior_recessed.setObjectName("recessed")
+        behavior_recessed_col = QVBoxLayout(behavior_recessed)
+        behavior_recessed_col.setContentsMargins(8, 8, 8, 8)
+        behavior_recessed_col.setSpacing(10)
+
         self._settings_expert_toggle = ToggleSwitch(
-            checked=bool(settings.get("expert_mode"))
+            checked=bool(settings.get("expert_mode")),
+            label="Expert mode",
+            description="Enable advanced settings and options",
         )
         self._settings_expert_toggle.toggled.connect(self._set_expert_mode)
         expert_row = QHBoxLayout()
+        expert_row.setContentsMargins(0, 2, 0, 2)
         expert_row.setSpacing(8)
         expert_label = QLabel("Expert mode")
         expert_label.setObjectName("capLabel")
@@ -2140,15 +2206,18 @@ class MainWindow(QMainWindow):
         expert_row.addWidget(self._settings_expert_toggle)
         expert_row.addWidget(expert_label)
         expert_row.addStretch()
-        bcol.addLayout(expert_row)
+        behavior_recessed_col.addLayout(expert_row)
 
         self._close_to_tray_toggle = ToggleSwitch(
-            checked=bool(settings.get("close_to_tray"))
+            checked=bool(settings.get("close_to_tray")),
+            label="Close to system tray",
+            description="Minimize to system tray instead of closing",
         )
         self._close_to_tray_toggle.toggled.connect(
             lambda on: settings.set_many(close_to_tray=bool(on))
         )
         tray_row = QHBoxLayout()
+        tray_row.setContentsMargins(0, 2, 0, 2)
         tray_row.setSpacing(8)
         tray_label = QLabel(
             "Minimize to system tray when the app is closed"
@@ -2159,13 +2228,37 @@ class MainWindow(QMainWindow):
         tray_row.addWidget(self._close_to_tray_toggle)
         tray_row.addWidget(tray_label)
         tray_row.addStretch()
-        bcol.addLayout(tray_row)
+        behavior_recessed_col.addLayout(tray_row)
         if not QSystemTrayIcon.isSystemTrayAvailable():
             self._close_to_tray_toggle.setEnabled(False)
             tray_label.setToolTip(
                 "No system tray is available on this session \u2014 "
                 "closing the window will always quit the app."
             )
+
+        self._auto_eject_toggle = ToggleSwitch(
+            checked=bool(settings.get("auto_eject")),
+            label="Auto-eject after write",
+            description="Eject the drive automatically after writing completes",
+        )
+        self._auto_eject_toggle.toggled.connect(
+            lambda on: settings.set_many(auto_eject=bool(on))
+        )
+        eject_row = QHBoxLayout()
+        eject_row.setContentsMargins(0, 2, 0, 2)
+        eject_row.setSpacing(8)
+        eject_label = QLabel(
+            "Eject drive automatically after a successful flash"
+        )
+        eject_label.setObjectName("capLabel")
+        eject_label.setProperty("colorRole", "label")
+        eject_label.setWordWrap(True)
+        eject_row.addWidget(self._auto_eject_toggle)
+        eject_row.addWidget(eject_label)
+        eject_row.addStretch()
+        behavior_recessed_col.addLayout(eject_row)
+
+        bcol.addWidget(behavior_recessed)
 
         actions = QFrame()
         actions.setObjectName("block")
@@ -2178,11 +2271,19 @@ class MainWindow(QMainWindow):
         title.setProperty("colorRole", "muted")
         xcol.addWidget(title)
 
+        actions_recessed = QFrame()
+        actions_recessed.setObjectName("recessed")
+        actions_recessed_col = QVBoxLayout(actions_recessed)
+        actions_recessed_col.setContentsMargins(8, 8, 8, 8)
+        actions_recessed_col.setSpacing(8)
+
         reset_btn = QPushButton("Reset window size")
         reset_btn.setObjectName("ghost")
         reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reset_btn.clicked.connect(lambda: self.resize(900, 580))
-        xcol.addWidget(reset_btn)
+        actions_recessed_col.addWidget(reset_btn)
+
+        xcol.addWidget(actions_recessed)
 
         col.addWidget(appearance)
         col.addWidget(behavior)
@@ -2234,7 +2335,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         col = QVBoxLayout(page)
         col.setContentsMargins(24, 20, 24, 20)
-        col.setSpacing(8)
+        col.setSpacing(14)
 
         col.addWidget(self._build_section_label("Flash history"))
 
@@ -2615,10 +2716,18 @@ class MainWindow(QMainWindow):
         for i, item in enumerate(self._nav_items):
             item.set_active(i == index)
         page = {0: 0, 1: 2, 2: 1, 3: 3}[index]
+        titles = {
+            0: "Write bootable USB",
+            1: "Verify a drive",
+            2: "Flash history",
+            3: "Settings",
+        }
+        self._topbar_title.setText(titles.get(index, ""))
         if page == 1:
             self._reload_history()
         self._pages.setCurrentIndex(page)
         self._bottombar.setVisible(page == 0)
+        self._fixed_strip.setVisible(page == 0)
 
     def _set_active_nav(self, index: int) -> None:
         for i, item in enumerate(self._nav_items):
@@ -3144,7 +3253,10 @@ class MainWindow(QMainWindow):
         self._flash_btn.setMinimumHeight(style.DESIGN_TOKENS["button_height"])
         self._flash_btn.clicked.connect(self._on_flash_clicked)
 
-        self._verify_toggle = ToggleSwitch()
+        self._verify_toggle = ToggleSwitch(
+            label="Verify after write",
+            description="Check the drive after writing by comparing its content against the image",
+        )
         verify_label = QLabel("Verify after write")
         verify_label.setObjectName("verifyLabel")
         verify_box = QHBoxLayout()
@@ -3170,6 +3282,7 @@ class MainWindow(QMainWindow):
         left.setSpacing(2)
         title = QLabel("Write bootable USB")
         title.setObjectName("title")
+        self._topbar_title = title
         self._subtitle = QLabel("No drive selected")
         self._subtitle.setObjectName("subtitle")
         left.addWidget(title)
@@ -3236,7 +3349,7 @@ class MainWindow(QMainWindow):
         target_col.setSpacing(2)
         self._target_title = QLabel("Target drive")
         self._target_title.setObjectName("capLabel")
-        self._target_detail = QLabel("No drive selected \u2014 click to choose")
+        self._target_detail = QLabel("No drive selected")
         self._target_detail.setObjectName("driveName")
         self._target_detail.setProperty("dim", True)
         target_col.addWidget(self._target_title)
@@ -3262,6 +3375,12 @@ class MainWindow(QMainWindow):
         col.addWidget(self._build_expert_options())
 
         col.addWidget(self._build_verify_options())
+
+        self._queue_toggle_btn = QPushButton("Flash queue \u25be")
+        self._queue_toggle_btn.setObjectName("ghost")
+        self._queue_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._queue_toggle_btn.clicked.connect(self._toggle_queue)
+        col.addWidget(self._queue_toggle_btn)
 
         queue_block = QFrame()
         queue_block.setObjectName("block")
@@ -3314,7 +3433,11 @@ class MainWindow(QMainWindow):
 
         fleet_row = QHBoxLayout()
         fleet_row.setSpacing(8)
-        self._fleet_toggle = ToggleSwitch(False)
+        self._fleet_toggle = ToggleSwitch(
+            False,
+            label="Fleet mode",
+            description="Write to multiple drives simultaneously",
+        )
         self._fleet_toggle.setObjectName("fleetToggle")
         self._fleet_toggle.toggled.connect(self._on_fleet_toggled)
         fleet_label = QLabel("Fleet mode")
@@ -3333,7 +3456,11 @@ class MainWindow(QMainWindow):
 
         skip_row = QHBoxLayout()
         skip_row.setSpacing(8)
-        self._fleet_skip_flashed = ToggleSwitch(False)
+        self._fleet_skip_flashed = ToggleSwitch(
+            False,
+            label="Skip already-flashed drives",
+            description="Skip drives that have already been flashed with the same image",
+        )
         self._fleet_skip_flashed.setObjectName("fleetToggle")
         skip_label = QLabel("Skip already-flashed drives")
         skip_label.setObjectName("capLabel")
@@ -3363,10 +3490,7 @@ class MainWindow(QMainWindow):
 
         self._queue_block = queue_block
         col.addWidget(queue_block)
-
-        self._progress = ProgressArea()
-        self._progress.set_ready()
-        col.addWidget(self._progress)
+        self._queue_block.setVisible(False)
 
         self._verify_hint = QLabel(
             "Verification reads the drive back after writing \u2014 "
@@ -3384,39 +3508,6 @@ class MainWindow(QMainWindow):
         steps.setProperty("colorRole", "muted")
         steps.setWordWrap(True)
         col.addWidget(steps)
-
-        self._done_bar = QFrame()
-        self._done_bar.setObjectName("block")
-        done_row = QHBoxLayout(self._done_bar)
-        done_row.setContentsMargins(16, 12, 16, 12)
-        done_row.setSpacing(8)
-        done_text = QVBoxLayout()
-        done_text.setSpacing(2)
-        self._done_label = QLabel("Flash complete")
-        self._done_label.setObjectName("progTitle")
-        self._done_summary = QLabel("")
-        self._done_summary.setObjectName("doneSummary")
-        done_text.addWidget(self._done_label)
-        done_text.addWidget(self._done_summary)
-        self._reflash_btn = QPushButton("Flash again")
-        self._reflash_btn.setObjectName("ghost")
-        self._reflash_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._eject_btn = QPushButton("Eject drive")
-        self._eject_btn.setObjectName("ghost")
-        self._eject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._copy_btn = QPushButton("Copy report")
-        self._copy_btn.setObjectName("ghost")
-        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._reflash_btn.clicked.connect(self._on_flash_clicked)
-        self._eject_btn.clicked.connect(self._on_eject_clicked)
-        self._copy_btn.clicked.connect(self._on_copy_report_clicked)
-        done_row.addLayout(done_text)
-        done_row.addStretch()
-        done_row.addWidget(self._reflash_btn)
-        done_row.addWidget(self._eject_btn)
-        done_row.addWidget(self._copy_btn)
-        self._done_bar.setVisible(False)
-        col.addWidget(self._done_bar)
 
         scroll.setWidget(content)
         return scroll
@@ -3436,7 +3527,9 @@ class MainWindow(QMainWindow):
         toggle_row = QHBoxLayout()
         toggle_row.setSpacing(7)
         self._expert_toggle = ToggleSwitch(
-            checked=bool(settings.get("expert_mode"))
+            checked=bool(settings.get("expert_mode")),
+            label="Expert mode",
+            description="Enable advanced flash settings and options",
         )
         self._expert_toggle.setToolTip(
             "Show partition scheme, target system, filesystem and write mode"
@@ -3449,10 +3542,11 @@ class MainWindow(QMainWindow):
         toggle_row.addStretch()
         col.addLayout(toggle_row)
 
-        body = QWidget()
+        body = QFrame()
+        body.setObjectName("recessed")
         body_col = QVBoxLayout(body)
-        body_col.setContentsMargins(0, 0, 0, 0)
-        body_col.setSpacing(8)
+        body_col.setContentsMargins(8, 8, 8, 8)
+        body_col.setSpacing(10)
         col.addWidget(body)
 
         self._partition_combo = QComboBox()
@@ -3513,7 +3607,9 @@ class MainWindow(QMainWindow):
             body_col.addLayout(row)
 
         self._native_toggle = ToggleSwitch(
-            checked=bool(settings.get("native_writer"))
+            checked=bool(settings.get("native_writer")),
+            label="Native writer",
+            description="Use Win32 WriteFile instead of dd for writing",
         )
         self._native_toggle.setToolTip(
             "Use the compiled native writer for raw writes "
@@ -3535,7 +3631,11 @@ class MainWindow(QMainWindow):
         body_col.addLayout(native_row)
         self._native_toggle.toggled.connect(self._on_expert_changed)
 
-        self._persistence_toggle = ToggleSwitch(checked=False)
+        self._persistence_toggle = ToggleSwitch(
+            checked=False,
+            label="Persistence",
+            description="Keep changes across reboots (Ubuntu casper-rw / Debian live)",
+        )
         self._persistence_toggle.setToolTip(
             "Keep changes across reboots (Ubuntu casper-rw / Debian live)"
         )
@@ -3543,9 +3643,11 @@ class MainWindow(QMainWindow):
         self._persistence_size.setObjectName("persistenceSize")
         self._persistence_size.setPlaceholderText("1024")
         self._persistence_size.setFixedWidth(80)
+        self._persistence_size.setToolTip("Size of the persistence overlay in MB or GB")
         self._persistence_unit = QComboBox()
         self._persistence_unit.addItem("MB", "mb")
         self._persistence_unit.addItem("GB", "gb")
+        self._persistence_unit.setToolTip("Unit for persistence size")
         persistence_row = QHBoxLayout()
         persistence_row.setSpacing(8)
         p_label = QLabel("Enable persistence")
@@ -3566,7 +3668,11 @@ class MainWindow(QMainWindow):
             self._persistence_unit,
         ]
 
-        self._wtg_toggle = ToggleSwitch(checked=False)
+        self._wtg_toggle = ToggleSwitch(
+            checked=False,
+            label="Windows To Go",
+            description="Apply the Windows image with dism and boot it from USB (requires NTFS, file-copy mode)",
+        )
         self._wtg_toggle.setToolTip(
             "Apply the Windows image with dism and boot it from USB "
             "(requires NTFS, file-copy mode)"
@@ -3585,7 +3691,11 @@ class MainWindow(QMainWindow):
         body_col.addLayout(wtg_row)
         self._wtg_row = wtg_row
 
-        self._tpm_bypass_toggle = ToggleSwitch(checked=False)
+        self._tpm_bypass_toggle = ToggleSwitch(
+            checked=False,
+            label="TPM bypass",
+            description="Inject registry keys into boot.wim to skip Windows 11 TPM 2.0, Secure Boot and RAM checks",
+        )
         self._tpm_bypass_toggle.setToolTip(
             "Inject registry keys into boot.wim to skip Windows 11 "
             "TPM 2.0, Secure Boot and RAM checks during setup"
@@ -3628,8 +3738,21 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(14, 12, 14, 12)
         col.setSpacing(8)
 
+        title = QLabel("VERIFY OPTIONS")
+        title.setObjectName("capLabel")
+        title.setProperty("colorRole", "muted")
+        col.addWidget(title)
+
+        recessed = QFrame()
+        recessed.setObjectName("recessed")
+        recessed_col = QVBoxLayout(recessed)
+        recessed_col.setContentsMargins(8, 8, 8, 8)
+        recessed_col.setSpacing(10)
+
         self._verify_sha_toggle = ToggleSwitch(
-            checked=bool(settings.get("verify_sha256"))
+            checked=bool(settings.get("verify_sha256")),
+            label="Verify SHA-256",
+            description="Verify the SHA-256 hash of the image after writing",
         )
         self._verify_sha_toggle.setToolTip(
             "Read the drive back after writing and compare its SHA-256 "
@@ -3646,10 +3769,12 @@ class MainWindow(QMainWindow):
             self._help_button(_HELP_TIPS["verify_sha256"])
         )
         sha_row.addStretch()
-        col.addLayout(sha_row)
+        recessed_col.addLayout(sha_row)
 
         self._bad_block_toggle = ToggleSwitch(
-            checked=bool(settings.get("bad_block_scan"))
+            checked=bool(settings.get("bad_block_scan")),
+            label="Bad block scan",
+            description="Scan the drive for bad blocks before writing",
         )
         self._bad_block_toggle.setToolTip(
             "Scan the drive for unreadable sectors; failed reads are retried "
@@ -3659,6 +3784,7 @@ class MainWindow(QMainWindow):
         self._bad_retries_input.setObjectName("persistenceSize")
         self._bad_retries_input.setPlaceholderText("3")
         self._bad_retries_input.setFixedWidth(40)
+        self._bad_retries_input.setToolTip("Number of retries for bad blocks (1-10)")
         bad_row = QHBoxLayout()
         bad_row.setSpacing(8)
         bad_label = QLabel("Bad-block scan")
@@ -3675,7 +3801,9 @@ class MainWindow(QMainWindow):
         bad_row.addStretch()
         bad_row.addWidget(self._bad_retries_input)
         bad_row.addWidget(bad_retries_label)
-        col.addLayout(bad_row)
+        recessed_col.addLayout(bad_row)
+
+        col.addWidget(recessed)
 
         self._verify_sha_toggle.toggled.connect(self._on_verify_options_changed)
         self._bad_block_toggle.toggled.connect(self._on_verify_options_changed)
@@ -3892,14 +4020,20 @@ class MainWindow(QMainWindow):
         assert event is not None
         bubble = getattr(self, "_help_bubble", None)
         if bubble is not None:
-            bubble.hide_fast()
+            try:
+                bubble.hide_fast()
+            except RuntimeError:
+                self._help_bubble = None
         super().moveEvent(event)
 
     def hideEvent(self, event: QHideEvent | None) -> None:
         assert event is not None
         bubble = getattr(self, "_help_bubble", None)
         if bubble is not None:
-            bubble.hide_fast()
+            try:
+                bubble.hide_fast()
+            except RuntimeError:
+                self._help_bubble = None
         super().hideEvent(event)
 
     def _build_iso_zone(self) -> QFrame:
@@ -4672,17 +4806,35 @@ class MainWindow(QMainWindow):
             if path not in existing:
                 self._queue_list.addItem(path)
                 existing.add(path)
+        self._update_queue_badge()
 
     def _on_queue_remove_clicked(self) -> None:
         if self._busy():
             return
         for item in self._queue_list.selectedItems():
             self._queue_list.takeItem(self._queue_list.row(item))
+        self._update_queue_badge()
 
     def _on_queue_clear_clicked(self) -> None:
         if self._busy():
             return
         self._queue_list.clear()
+        self._update_queue_badge()
+
+    def _toggle_queue(self) -> None:
+        visible = not self._queue_block.isVisible()
+        self._queue_block.setVisible(visible)
+        arrow = "\u25b4" if visible else "\u25be"
+        count = self._queue_list.count()
+        count_str = f" ({count})" if count else ""
+        self._queue_toggle_btn.setText(f"Flash queue {arrow}{count_str}")
+
+    def _update_queue_badge(self) -> None:
+        count = self._queue_list.count()
+        visible = self._queue_block.isVisible()
+        arrow = "\u25b4" if visible else "\u25be"
+        count_str = f" ({count})" if count else ""
+        self._queue_toggle_btn.setText(f"Flash queue {arrow}{count_str}")
 
     def _on_check_updates_clicked(self) -> None:
         if self._update_checker is not None:
@@ -5027,6 +5179,8 @@ class MainWindow(QMainWindow):
         images = self._queue_images()
         if not images:
             self._fleet_toggle.setChecked(False)
+            if not self._queue_block.isVisible():
+                self._toggle_queue()
             dialogs.inform(
                 self,
                 kind="warning",
@@ -5152,16 +5306,14 @@ class MainWindow(QMainWindow):
         self._fleet_label.setText(text)
 
     def _scroll_to_progress(self, scroll: QScrollArea) -> None:
-        """Auto-scroll so the progress bar is visible after a short delay."""
-        QTimer.singleShot(100, lambda: scroll.ensureWidgetVisible(self._progress, 0, 50))
+        """Progress area is now fixed; no scrolling needed."""
 
     def _scroll_to_verify_progress(self) -> None:
         """Auto-scroll the verify page so its progress bar is visible."""
         QTimer.singleShot(100, lambda: self._verify_scroll.ensureWidgetVisible(self._verify_progress, 0, 50))
 
     def _scroll_to_done_bar(self) -> None:
-        """Auto-scroll so the done bar is visible after an operation completes."""
-        QTimer.singleShot(100, lambda: self._content_scroll.ensureWidgetVisible(self._done_bar, 0, 50))
+        """Done bar is now fixed; no scrolling needed."""
 
     def _start_drive_operation(self, worker: Any) -> None:
         """Common busy-state setup for backup/clone operations."""
@@ -5736,7 +5888,9 @@ class MainWindow(QMainWindow):
         # running; the queue logic shows a single summary at the end and
         # fleet reports progress in its banner instead.
         if not self._queue_active and not self._fleet_busy:
-            if succeeded:
+            if succeeded and settings.get("auto_eject"):
+                self._on_eject_clicked()
+            elif succeeded:
                 result = dialogs.completion(
                     self, kind=kind, title=title, message=detail
                 )

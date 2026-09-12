@@ -165,6 +165,19 @@ def test_resolve_write_mode_hybrid_forced_to_dd(tmp_path):
     assert diskpart.resolve_write_mode("filecopy", hybrid) == "dd"
 
 
+def test_resolve_write_mode_auto_uses_filecopy_for_linux(tmp_path):
+    from iso_fixture import build_iso, linux_casper_tree
+
+    linux_iso = tmp_path / "ubuntu.iso"
+    build_iso(str(linux_iso), linux_casper_tree())
+    assert diskpart.resolve_write_mode("auto", str(linux_iso)) == "filecopy"
+    # explicit raw mode overrides the Linux heuristic
+    assert diskpart.resolve_write_mode("dd", str(linux_iso)) == "dd"
+    # a non-Linux non-hybrid image stays raw under auto
+    plain = _write_iso(tmp_path, "plain.iso", partitions=False)
+    assert diskpart.resolve_write_mode("auto", plain) == "dd"
+
+
 # ---------------------------------------------------------------------------
 # prepare_partition command sequence (diskpart -> letter -> format)
 # ---------------------------------------------------------------------------

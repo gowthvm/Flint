@@ -767,3 +767,265 @@ def test_scan_drive_not_found(monkeypatch, capsys):
     rc = cli._cmd_scan({"drive": "NOPE"})
     assert rc == cli.EXIT_USAGE
     assert "drive not found" in capsys.readouterr().out
+
+
+# --- v1.9.0: system disk guard, partition/filesystem/write-mode, --check-fake
+
+
+def test_opts_parses_v1_9_flags():
+    opts, error = cli._opts(
+        [
+            "--image", "a.iso", "--drive", "E",
+            "--confirm", "ABC1234",
+            "--partition-scheme", "gpt",
+            "--filesystem", "ntfs",
+            "--write-mode", "filecopy",
+            "--check-fake",
+        ]
+    )
+    assert error is None
+    assert opts["partition-scheme"] == "gpt"
+    assert opts["filesystem"] == "ntfs"
+    assert opts["write-mode"] == "filecopy"
+    assert opts["check-fake"] is True
+
+
+def test_flash_passes_partition_and_write_options_to_worker(
+    tmp_path, monkeypatch, capsys
+):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    seen: dict[str, str] = {}
+
+    def _capture(worker, label):
+        seen["partition_scheme"] = worker.partition_scheme
+        seen["filesystem"] = worker.filesystem
+        seen["write_mode"] = worker.write_mode
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _capture)
+    rc = cli._cmd_flash(
+        {
+            "image": str(image), "drive": "E", "confirm": "ABC1234",
+            "partition-scheme": "gpt",
+            "filesystem": "ntfs",
+            "write-mode": "filecopy",
+        }
+    )
+
+    assert rc == cli.EXIT_OK
+    assert seen == {
+        "partition_scheme": "gpt",
+        "filesystem": "ntfs",
+        "write_mode": "filecopy",
+    }
+
+
+class _FakeDetector:
+    def __init__(self, system: set[str]) -> None:
+        self.system = system
+
+    def _system_disk_paths(self) -> set[str]:
+        return self.system
+
+
+def test_flash_refuses_system_disk(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    from core import drives
+
+    monkeypatch.setattr(
+        drives,
+        "DriveDetector",
+        lambda: _FakeDetector({r"\\.\PHYSICALDRIVE3"}),
+    )
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "system disk" in capsys.readouterr().out
+
+
+def test_wipe_refuses_system_disk(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    from core import drives
+
+    monkeypatch.setattr(
+        drives,
+        "DriveDetector",
+        lambda: _FakeDetector({r"\\.\PHYSICALDRIVE3"}),
+    )
+
+    rc = cli._cmd_wipe(
+        {"drive": "E", "confirm": "ABC1234", "method": "zero"}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "system disk" in capsys.readouterr().out
+
+
+def test_flash_allows_non_system_drive(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    from core import drives
+
+    monkeypatch.setattr(
+        drives, "DriveDetector", lambda: _FakeDetector(set())
+    )
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out
+
+
+def test_check_fake_helper_records_probe(monkeypatch, capsys):
+    from core import fake_detect
+
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        fake_detect,
+        "probe_capacity",
+        lambda path, reported: calls.append((path, reported)) or (False, "clean"),
+    )
+
+    rc = cli._check_fake_drive({"physical_path": "X", "size_gb": 64}, False)
+
+    assert rc is None
+    assert calls == [("X", 64 * 1_000_000_000)]
+
+
+def test_check_fake_helper_rejects_when_suspicious(monkeypatch, capsys):
+    from core import fake_detect
+
+    monkeypatch.setattr(
+        fake_detect, "probe_capacity", lambda p, r: (True, "capacity lies")
+    )
+
+    rc = cli._check_fake_drive({"physical_path": "X", "size_gb": 64}, False)
+
+    assert rc == cli.EXIT_USAGE
+    assert "fake drive detected" in capsys.readouterr().out
+
+
+def test_check_fake_helper_proceeds_with_yes(monkeypatch, capsys):
+    from core import fake_detect
+
+    monkeypatch.setattr(
+        fake_detect, "probe_capacity", lambda p, r: (True, "capacity lies")
+    )
+
+    rc = cli._check_fake_drive({"physical_path": "X", "size_gb": 64}, True)
+
+    assert rc is None
+    assert "proceeding anyway" in capsys.readouterr().err
+
+
+def test_check_fake_helper_skips_when_no_size(monkeypatch):
+    from core import fake_detect
+
+    hit: list[tuple] = []
+    monkeypatch.setattr(
+        fake_detect,
+        "probe_capacity",
+        lambda p, r: hit.append((p, r)) or (True, "x"),
+    )
+
+    rc = cli._check_fake_drive({"physical_path": "X", "size_gb": 0}, False)
+
+    assert rc is None
+    assert hit == []
+
+
+def test_check_fake_helper_surfaces_clean_probe(monkeypatch, capsys):
+    from core import fake_detect
+
+    monkeypatch.setattr(
+        fake_detect, "probe_capacity", lambda p, r: (False, "clean")
+    )
+
+    rc = cli._check_fake_drive({"physical_path": "X", "size_gb": 64}, False)
+
+    assert rc is None
+    assert "clean" in capsys.readouterr().err
+
+
+def test_flash_check_fake_aborts_without_yes(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    from core import fake_detect
+
+    monkeypatch.setattr(
+        fake_detect, "probe_capacity", lambda p, r: (True, "capacity lies")
+    )
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234",
+         "check-fake": True}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "fake drive detected" in capsys.readouterr().out
+
+
+def test_flash_check_fake_aborts_backup_without_yes(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    from core import fake_detect
+
+    monkeypatch.setattr(
+        fake_detect, "probe_capacity", lambda p, r: (True, "capacity lies")
+    )
+
+    rc = cli._cmd_backup(
+        {"drive": "E", "out": str(tmp_path / "b.img"), "check-fake": True}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "fake drive detected" in capsys.readouterr().out
+
+
+def test_flash_check_fake_proceeds_with_yes(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    from core import fake_detect
+
+    monkeypatch.setattr(
+        fake_detect, "probe_capacity", lambda p, r: (True, "capacity lies")
+    )
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234",
+         "check-fake": True, "yes": True}
+    )
+
+    assert rc == cli.EXIT_OK
+    captured = capsys.readouterr()
+    assert "proceeding anyway" in captured.err
+    assert "RESULT ok" in captured.out
+
+
+def test_backup_without_confirm_runs(tmp_path, monkeypatch, capsys):
+    """Regression: plain ``backup`` runs (no ``--confirm``) used to crash
+    with NameError because ``issue`` was only assigned in the confirm
+    branch."""
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    out = tmp_path / "b.img"
+
+    rc = cli._cmd_backup({"drive": "E", "out": str(out)})
+
+    assert rc == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out

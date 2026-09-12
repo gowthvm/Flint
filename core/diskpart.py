@@ -13,7 +13,7 @@ import re
 import subprocess
 import tempfile
 
-from core.iso import is_hybrid_iso
+from core.iso import detect_linux_iso, is_hybrid_iso
 
 SCHEMES = ("auto", "gpt", "mbr")
 TARGET_SYSTEMS = ("auto", "uefi", "legacy")
@@ -55,14 +55,19 @@ def resolve_write_mode(write_mode: str, iso_path: str) -> str:
     """Decide the effective write mode.
 
     Raw (DD) is the default and the only safe mode for hybrid ISOs, whose MBR
-    boot record would be lost by a file-by-file copy.
+    boot record would be lost by a file-by-file copy.  Linux ISOs (Ubuntu,
+    Fedora, etc.) use ISO9660/UDF which Windows cannot read natively, so
+    ``auto`` mode switches to file-copy for them — matching Rufus behaviour
+    and letting Windows Explorer show the drive contents.
     """
     mode = (write_mode or "auto").lower()
-    if mode != "filecopy":
-        return "dd"
     if is_hybrid_iso(iso_path):
         return "dd"
-    return "filecopy"
+    if mode == "filecopy":
+        return "filecopy"
+    if mode == "auto" and detect_linux_iso(iso_path):
+        return "filecopy"
+    return "dd"
 
 
 def drive_number_from_path(drive_path: str) -> int:

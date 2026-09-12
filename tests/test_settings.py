@@ -43,3 +43,18 @@ def test_settings_drops_wrong_typed_values_on_load(tmp_path):
         assert s.get("onboarding_seen") is False
     finally:
         s._CACHE = None
+
+
+def test_auto_eject_defaults_false_and_typechecked(tmp_path):
+    """v1.9.0: auto_eject is off by default and rejects bad types."""
+    assert s.get("auto_eject") is False
+    path = Path(tmp_path) / "s.json"
+    path.write_text(json.dumps({"auto_eject": "yes"}), encoding="utf-8")
+    s.SETTINGS_PATH = path
+    s._CACHE = None
+    try:
+        assert s.get("auto_eject") is False
+        s.set_many(auto_eject=True)
+        assert s.get("auto_eject") is True
+    finally:
+        s._CACHE = None
