@@ -1,69 +1,132 @@
 # Flint — Windows-native Bootable USB & Disk Image Writer
 
-Write ISO/DD disk images to USB drives on Windows, then verify the result.
+Write disk images to USB drives on Windows 10/11, then verify that every byte was written correctly.
 
+[![Release](https://img.shields.io/github/v/release/gowthvm/Flint)](https://github.com/gowthvm/Flint/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/gowthvm/Flint/total)](https://github.com/gowthvm/Flint/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%2064--bit-0078d6)
-[![Website](https://img.shields.io/badge/website-flintweb.vercel.app-0078d6)](https://flintweb.vercel.app)
+[![Docs](https://img.shields.io/badge/docs-flintusb.pages.dev-0078d6)](https://flintusb.pages.dev)
 
-Flint is a lightweight, **Windows-native** utility for writing ISO and DD disk
-images to USB drives. It writes raw images directly to the physical disk,
-optionally re-reads the drive afterwards to confirm the write, and requires
-explicit typed confirmation before any destructive action.
+Flint writes disk images (ISO, IMG, DD) to USB drives on Windows 10/11, then
+reads the drive back and verifies that every byte was written correctly — so
+you can trust the result before you boot from it. It needs no installation
+(a portable `flint.exe`, or one `pip install`), and it never touches a drive
+until you confirm the target by typing its serial number. The same engine is
+available as a fully scriptable command line for power users and IT teams.
 
-![Flint flashing an ISO to a USB drive](https://flintweb.vercel.app/assets/screenshot.png)
+![Flint flashing an ISO to a USB drive](https://flintusb.pages.dev/assets/screenshot.png)
 
-The full manual — user guide, CLI reference, troubleshooting and FAQ — lives
-on the [Flint website](https://flintweb.vercel.app).
+*Flashing an ISO: the image is hashed up front, the target drive is confirmed
+by typing its serial, and the drive is read back after the write.*
+
+**Contents**
+
+- [Features](#features)
+- [Comparison](#comparison)
+- [Download & install](#download--install)
+- [Quick start](#quick-start)
+- [Safety & limitations](#safety--limitations)
+- [Operations](#operations)
+- [Headless mode](#headless-mode)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Support](#support)
+- [License](#license)
 
 ## Features
 
-- Drag & drop or browse for an image — a SHA-256 hash is computed for verification
-- Drive picker with model, size and serial for each detected USB drive
-- Optional post-write verification (SHA-256 compare with mismatch offsets)
-- Bad-block scan that retries unreadable sectors and reports their locations
-- Expert mode: partition scheme, target system, filesystem and write mode
-- Persistence for Linux live images and Windows To Go for Windows images
-- Flash history with export/import and per-flash reports
-- Back up a drive to an image file, or clone a drive onto another drive
-- SHA-256 sidecar files (`image.iso.sha256`) validate the image before flashing
-- Wipe with selectable standards: zero fill, single random pass (NIST), or
-  DoD 5220.22-M (three passes: zeros, ones, random)
-- Headless/scriptable mode (`flint flash`, `verify`, `wipe`, `backup`,
-  `clone`, `queue`, `flash-all`) for automation and IT imaging workflows
+- **One-click flash** — drag & drop or browse for an image; a SHA-256 checksum
+  is computed automatically to confirm the file isn't corrupted.
+- **Drive safety** — every detected USB drive is listed by model, size, and
+  serial; you must type the serial before any write or wipe.
+- **Verify after write** — optionally re-reads the entire drive and compares
+  it byte-for-byte against the source image, reporting the exact location of
+  any mismatch.
+- **Bad-block scan** — retries unreadable sectors up to three times and
+  reports any that permanently fail, so a faulty drive is caught before it
+  matters.
+- **Expert mode** — choose the partition scheme (GPT / MBR), target firmware
+  (UEFI / Legacy BIOS), filesystem (FAT32 / NTFS / exFAT), and write strategy
+  (raw byte-for-byte image or file copy).
+- **Persistence** — keep changes across reboots on a Linux live USB stick.
+  **Windows To Go** — build a portable Windows drive from an installation ISO.
+- **Backup & clone** — image a USB drive to a file, or copy one drive
+  byte-for-byte to another; both are verified by read-back.
+- **Wipe** — securely erase a drive with zero-fill, a single random pass
+  (NIST SP 800-88 clear), or a three-pass DoD 5220.22-M overwrite; the final
+  pattern is always confirmed by reading the drive back.
+- **Checksum sidecars** — a `.sha256` file next to your image is validated
+  before flashing; a mismatch blocks the write.
+- **Flash history** — every operation is logged with an exportable report.
+- **Headless mode** — every feature is also a CLI command — `list`, `flash`,
+  `verify`, `scan`, `wipe`, `backup`, `clone`, `queue`, `flash-all`,
+  `doctor`, `completions` — with machine-readable output and documented exit
+  codes for scripts and CI.
+- **Portable or pip** — run `flint.exe` with no install, or
+  `pip install flint-usb` on a machine with Python 3.10+.
 
-## Download
+## Comparison
+
+| Feature | Flint | Rufus | balenaEtcher | Ventoy |
+| --- | --- | --- | --- | --- |
+| Post-write SHA-256 verification | ✅ | — | ✅ | — |
+| Byte-level mismatch reporting | ✅ | — | — | — |
+| Bad-block / media scan | ✅ | ✅ | — | — |
+| Wipe (NIST / DoD), read-back verified | ✅ | — | — | — |
+| Full headless CLI | ✅ | Limited | — | Limited |
+| Fleet / batch mode | ✅ | — | — | — |
+| Backup & clone (verified) | ✅ | Partial | — | — |
+| Typed confirmation safety | ✅ | — | — | Partial |
+| Operation history / audit trail | ✅ | — | — | — |
+| Multi-boot ISOs on one drive | — | — | — | ✅ |
+| Cross-platform (Win / Mac / Linux) | — | — | ✅ | Partial |
+
+Flint's edge is confidence: it reads the drive back after every write and
+verifies the result, where most tools stop at "wrote the file." The full
+walkthrough is on the [comparison page](https://flintusb.pages.dev/compare).
+
+## Download & install
+
+### Portable executable
 
 - [Latest release](https://github.com/gowthvm/Flint/releases/latest) — download
-  `flint.exe` (portable, no installation required).
-- Windows 10/11, 64-bit.
+  `flint.exe`. No installer, no dependencies, no telemetry.
+- Windows 10/11, 64-bit. Runs elevated, so Windows may ask for administrator
+  permission on every launch.
 
-> SmartScreen: the executable is currently unsigned, so Windows may show a
-> "Windows protected your PC" warning. Click **More info → Run anyway**.
-> Verify the download against the published SHA-256 checksum first:
+> **SmartScreen warning.** The executable is currently unsigned, so Windows
+> may show a "Windows protected your PC" dialog on first run. This is expected
+> for unsigned open-source builds — click **More info → Run anyway**. Verify
+> the download against the published SHA-256 checksum first:
 >
 > ```powershell
 > certutil -hashfile flint.exe SHA256
 > ```
 >
-> and compare the result with `flint.exe.sha256` on the release page.
+> Compare the result with `flint.exe.sha256` on the release page.
 
-### Install via pip
+<details>
+<summary><strong>Install via pip</strong> (Python 3.10+ or later, 64-bit)</summary>
 
-Windows users with Python 3.10+ can install Flint from PyPI:
+Windows users with Python 3.10+ can install Flint from PyPI. Because pip
+generates the launcher locally, there is no SmartScreen warning and no
+download verification needed:
 
 ```powershell
 pip install flint-usb
 ```
 
-> **If `flint` is not recognized:** Python's Scripts directory is not on
-> your PATH. Run this once to fix it:
+> **If `flint` is not recognized:** Python's Scripts directory is not on your
+> PATH. Run this once to fix it:
 > ```powershell
 > $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 > [Environment]::SetEnvironmentVariable("Path", "$env:Path;$scripts", "User")
 > ```
+> New terminals only — restart the terminal after running it.
 
-This installs both a GUI and a CLI — no SmartScreen warning, no download
-verification needed (pip generates the launcher locally):
+This installs a GUI and a CLI:
 
 ```powershell
 flint          # open the GUI
@@ -71,47 +134,71 @@ flintw         # GUI without console window
 flint --help   # CLI usage
 ```
 
-The installer pulls in PyQt6, psutil, pywin32 and wmi. On first run Flint
-prompts for administrator privileges automatically. The native writer
+pip pulls in PyQt6, psutil, pywin32, and wmi as dependencies. On first run
+Flint prompts for administrator privileges automatically. The native writer
 extension is compiled into the wheel for full write performance.
+
+</details>
 
 ## Quick start
 
-1. **Pick an image** — drag & drop an ISO/IMG onto the drop zone, or click it
-   to browse (Ctrl+O).
-2. **Choose a target drive** — click the drive card and select from the list
-   (F5 refreshes).
-3. **Flash** — click "Flash drive". Confirm the target by typing the drive
-   serial or name when prompted.
+1. **Pick an image** — drag & drop an ISO/IMG file onto the drop zone, or
+   click it to browse (Ctrl+O). A SHA-256 checksum is computed immediately.
+2. **Choose the target drive** — click the drive card; model, size, and serial
+   are shown (F5 rescans).
+3. **Flash** — confirm the target by typing the drive serial or name when
+   prompted, then it writes and re-reads the drive to verify the result.
 
-Flint runs elevated, so it will ask for administrator permission when started.
-Every write and wipe is irreversible — the typed confirmation is your last
-guard against wiping the wrong drive.
+Flint runs elevated and asks for administrator permission when started. Every
+write and wipe is permanent — the typed confirmation is what prevents
+overwriting the wrong drive.
 
-## Verification
+## Safety & limitations
+
+- 64-bit Windows only.
+- Flint writes images directly to disks — this **permanently erases all data**
+  on the target. Always confirm the target drive and back up important data.
+- When file-copy mode targets a FAT32 drive, Flint refuses images that contain
+  files over 4 GiB (FAT32 cannot store them) unless you switch the filesystem
+  to NTFS or exFAT.
+- Flash history is stored locally on your machine.
+
+## Operations
+
+<details>
+<summary><strong>Verification</strong></summary>
 
 - **Verify after write** re-reads the drive after writing (streaming SHA-256,
   live speed and remaining time).
-- **Verify using SHA256** compares the read-back digest against the image and
-  reports the offsets of any mismatched regions.
+- **Verify using SHA-256** compares the read-back digest against the image and
+  reports the offsets of any mismatched regions, so a bad flash is a located,
+  reported event.
 - **Bad-block scan** retries failed reads up to the configured number of times
-  (default 3) and reports the 4096-aligned offsets of sectors that never read
+  (default 3) and reports the 4 KiB-aligned offsets of sectors that never read
   back; unreadable chunks are skipped so the rest of the image is still checked.
+- **Checksum sidecars** — if a `*.sha256` file sits next to your image
+  (`ubuntu.iso.sha256` or `ubuntu.sha256`), Flint reads it, verifies the image
+  digest against it, and shows the result under the image source. A mismatch
+  blocks flashing — a corrupt or wrong image can never erase a drive by
+  accident.
 - On mismatch, Flint offers to retry the write or abort. A cancelled
   verification is reported as completed-but-unverified — never as a false
   success.
 
-## Expert mode
+</details>
+
+<details>
+<summary><strong>Expert mode</strong></summary>
 
 Expert mode is enabled by default and can be turned off with the toggle on the
-write page. It adds:
+Flash screen. It adds:
 
 - **Partition scheme** (GPT / MBR / Auto), **target system** (UEFI / Legacy /
-  Auto) and **filesystem** (FAT32 / NTFS / exFAT).
-- **Write mode**: raw (DD) or file copy. File-copy mode repartitions and
-  formats the drive, then copies the image contents onto it — it is Windows-only,
-  requires elevation, and is skipped for hybrid ISOs, which are always written
-  raw so their boot record survives.
+  Auto), and **filesystem** (FAT32 / NTFS / exFAT).
+- **Write mode**: raw (DD) or file-copy. File-copy mode repartitions and
+  formats the drive, then copies the image contents onto it. It is
+  Windows-only, requires elevation, and is skipped for hybrid ISOs, which are
+  always written raw so their boot record survives.
 - **Buffer size** for raw writes (4–64 MiB) and an optional **native writer**
   using unbuffered disk I/O for maximum throughput.
 - **Persistence** (Linux) and **Windows To Go** (Windows) options — see below.
@@ -122,26 +209,23 @@ write page. It adds:
 > without recovery. Only use these options when you know what your target
 > firmware and bootloader require; back up data first.
 
-## Persistence and Windows To Go
+</details>
 
-- **Persistence** keeps changes between reboots on live Linux sticks
-  (Ubuntu `casper-rw`, Debian live overlay). It requires WSL with an ext4
-  tool to format the persistence image.
-- **Windows To Go** applies a Windows installation ISO to the drive so it
-  boots as a portable Windows installation (requires NTFS and elevation).
+<details>
+<summary><strong>Persistence & Windows To Go</strong></summary>
+
+- **Persistence** keeps changes between reboots on live Linux sticks (Ubuntu
+  `casper-rw`, Debian live overlay). It requires an ext4 formatting tool such
+  as WSL's `mke2fs` or a native `mke2fs`/`makefs` binary.
+- **Windows To Go** applies a Windows installation ISO to the drive so it boots
+  as a portable Windows installation (requires NTFS and elevation).
 - Both features require file-copy mode, are mutually exclusive, and are only
   shown for supported images.
 
-## Safety & limitations
+</details>
 
-- 64-bit Windows only.
-- Flint writes raw images directly to disks — this **irreversibly erases data**.
-  Always confirm the target and back up important data before use.
-- Before a raw write to a FAT32 target, Flint refuses images containing files
-  over 4 GiB (impossible on FAT32) unless you switch to NTFS/exFAT.
-- Flash history is stored locally on your machine.
-
-## Back up, clone and wipe
+<details>
+<summary><strong>Back up, clone & wipe</strong></summary>
 
 - **Back up** (drive picker → "Backup this drive to an image…") streams a USB
   drive into a `.img` file, locking the drive's volumes while reading. The
@@ -152,28 +236,29 @@ write page. It adds:
   confirmation as a flash.
 - **Wipe** methods (the ▾ menu next to "Wipe drive"):
   - **Zero fill (fast)** — single pass of zeros
-  - **Random data (NIST)** — single pass of random data (NIST SP 800-88 clear)
-  - **DoD 5220.22-M (3 passes)** — zeros, then ones, then random data
+  - **Random data (NIST SP 800-88 clear)** — single pass of random data
+  - **DoD 5220.22-M** — zeros, then ones, then random data (three passes)
 
-## Checksum sidecars
+Every wipe ends with a read-back pass that confirms the final pattern; a wipe
+that cannot be verified is reported as failed, and the result is recorded in
+history.
 
-If a `*.sha256` file sits next to your image (`ubuntu.iso.sha256` or
-`ubuntu.sha256`), Flint reads it, verifies the image digest against it, and
-shows the result under the image source. A mismatch blocks flashing — a
-corrupt or wrong image can never erase a drive by accident.
+</details>
 
 ## Headless mode
 
-Every feature is available headless for imaging labs, scripts and CI.
-`flint` below is the `flint.exe` you downloaded. Commands that need it
-relaunch elevated automatically (one UAC prompt); `list`, `doctor` and
-`completions` need no privileges at all. The older `--cli` prefix is still
+Every feature is available headless (command-line only, no GUI) for imaging
+labs, scripts, and CI. In the examples below, `flint` is the CLI — whether
+from the downloaded `flint.exe` or the pip-installed launcher. Commands that
+need it relaunch elevated automatically (one UAC prompt); `list`, `doctor`,
+and `completions` need no privileges at all. The older `--cli` flag is still
 accepted as a compatibility alias:
 
 ```text
 flint list
 flint flash  --image image.iso --drive E: --confirm <serial> [--verify]
 flint verify --drive E: [--sha256 <hex> --image image.iso]
+flint scan   --drive E: [--retries <1-10>]
 flint wipe   --drive E: --confirm <serial> [--method zero|random|nist|dod]
 flint backup --drive E: --out backup.img [--confirm <serial>]
 flint clone  --from E: --to F: --confirm <serial of --to>
@@ -184,48 +269,188 @@ flint completions | Out-File -Append $PROFILE
 flint help [<command>]
 ```
 
-- `--drive` accepts a serial number, volume letter (`E:`) or physical path
-  (`\\.\PHYSICALDRIVE1`); it only selects the drive. `--confirm` is the
-  safety check: it must match the full serial of the drive being destroyed,
-  validated against the live drive list — a wrong serial can never match
-  another drive. `flint list` prints every detected drive with the exact
-  serial `--confirm` expects.
-- `flash-all` is fleet mode: it writes every `--image` to every drive that
-  is — or becomes — plugged in, until the time budget expires (default
-  3600 s). Arming requires the literal word `ARM`.
+- `--drive` accepts a serial number, volume letter (`E:`), or physical path
+  (`\\.\PHYSICALDRIVE1`); it only selects the drive. `--confirm` is the safety
+  check: it must match the full serial of the drive being destroyed, validated
+  against the live drive list — a wrong serial can never match another drive.
+  `flint list` prints every detected drive with the exact serial `--confirm`
+  expects.
+- `flash-all` is fleet mode: it writes every `--image` to every drive that is —
+  or becomes — plugged in, until the time budget expires (default 3600 s).
+  Arming requires the literal word `ARM`.
+- `flash` also accepts `--resume` (continue an interrupted write from where it
+  left off), `--check-fake` (probe for counterfeit capacity), `--bypass-tpm`,
+  `--dry-run` (preview without writing), and `--quiet`. See `flint flash --help`
+  or the [CLI reference](https://flintusb.pages.dev/cli) for the full list.
 - When `--confirm` is omitted on an interactive terminal, the serial is
-  prompted for; a piped command without `--confirm` is refused, never
-  guessed.
-- `verify` without a digest runs a read-only bad-block scan; with `--sha256`
-  it compares only the image's byte range against the drive, so `--image` is
-  required to know how many bytes to check.
+  prompted for; a piped command without `--confirm` is refused, never guessed.
+- `verify` without a digest runs a read-only bad-block scan (equivalent to
+  `flint scan`); with `--sha256` it compares only the image's byte range
+  against the drive, so `--image` is required to know how many bytes to check.
 - The queue file holds one image path per line (`#` comments allowed); images
   are flashed to the same drive in order, stopping on the first failure.
-- `--json` switches all output to NDJSON (progress, results, drive lists);
-  `FLINT_PROGRESS=json` is equivalent and `FLINT_VERIFY=1` makes `flash`
-  verify by default.
-- **Streams are split**: data and the final `RESULT ok|fail|canceled: …`
-  line go to stdout; `FLINT <pct> <speed>MB/s ETA <s>s` progress and notes
-  go to stderr, so scripts capture stdout as pure data without `2>&1` noise.
-- Exit codes: `0` ok, `1` failure, `2` cancelled, `3` usage/validation,
+- `--json` switches all output to NDJSON (progress, results, drive lists,
+  doctor reports); `FLINT_PROGRESS=json` is equivalent and `FLINT_VERIFY=1`
+  makes `flash` verify by default.
+- **Streams are split:** data and the final `RESULT ok|fail|cancelled: …` line
+  go to stdout; `FLINT <pct> <speed>MB/s ETA <sec>s` progress and notes go to
+  stderr, so scripts capture stdout as pure data without `2>&1` noise.
+- Exit codes: `0` OK, `1` failure, `2` cancelled, `3` usage/validation error,
   `4` elevation denied.
+- `flint completions --shell powershell|bash|zsh` prints a shell completion
+  script (commands, options, and live drive serials); for example
+  `flint completions --shell bash | tee ~/.bashrc`.
 
-## Signing
+## Troubleshooting
 
-The release workflow signs `flint.exe` automatically when the
-`WINDOWS_SIGNING_PFX` (base64 PFX) and `WINDOWS_SIGNING_PASSWORD` repository
-secrets are set. To sign locally once you have a certificate:
+- **"Windows protected your PC"** — expected for unsigned builds. Verify the
+  checksum, then click **More info → Run anyway**.
+- **`flint` is not recognized after pip install** — Python's Scripts directory
+  is not on your PATH; run the PATH-fix snippet in [Download & install](#download--install).
+- **"Drive path unavailable"** — the drive was disconnected or re-enumerated;
+  refresh (F5) and re-pick it.
+- **Flash succeeded but verification failed** — re-flash once. If it fails
+  again at the same offsets, the drive is likely failing hardware or
+  counterfeit capacity; replace it.
+
+The complete symptom guide lives in the
+[manual's troubleshooting section](https://flintusb.pages.dev/docs#troubleshoot).
+
+## Development
+
+### Prerequisites
+
+- Windows 10/11 (64-bit) — Flint is Windows-native (uses pywin32, wmi, and
+  raw disk access).
+- Python 3.10–3.13 (64-bit).
+- Git for Windows.
+- A C compiler (Visual Studio Build Tools or MSVC) to optionally build the
+  native writer extension. Without it, Flint falls back to a pure-Python write
+  path automatically.
+
+### Setup
 
 ```powershell
-.\scripts\sign.ps1 -PfxPath .\cert.pfx -PfxPassword 'secret'
+git clone https://github.com/gowthvm/Flint.git
+cd Flint
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+Then build the optional native writer extension:
+
+```powershell
+python setup.py build_ext --inplace
+```
+
+This compiles `core/_native_writer.c` into a `.pyd` in `core/`. If compilation
+fails, the build is tolerated and Flint uses the pure-Python fallback.
+
+### Quality gates
+
+Run these before opening a PR — they mirror CI exactly:
+
+```powershell
+# Lint
+ruff check .
+
+# Type check
+mypy core ui main.py --ignore-missing-imports
+
+# Tests (full suite, a few minutes)
+python -m pytest -q
+```
+
+### Building the standalone exe
+
+```powershell
+pip install pyinstaller==6.22.0
+python -m PyInstaller --clean --noconfirm flint.spec
+```
+
+Produces `dist\flint.exe` — a single-file, UAC-admin, windowed build. The spec
+bundles `ui/reference.html` and `ui/flint.ico`, includes pywin32/wmi/psutil
+hidden imports, and auto-includes the native writer `.pyd` if present.
+
+### Project structure
+
+```
+Flint/
+├── main.py               # Entry point — GUI + CLI dispatch
+├── __main__.py
+├── core/                 # Backend logic
+│   ├── version.py        # APP_VERSION
+│   ├── cli.py            # Argument parsing and headless commands
+│   ├── writer.py         # Buffered and direct write paths
+│   ├── _native_writer.c  # Optional C extension (setup.py compiles it)
+│   ├── drives.py         # Drive enumeration and detection
+│   ├── verify.py         # Byte-level verification
+│   ├── checksum.py       # SHA-256 / hash utilities
+│   ├── wipe.py, clone.py, backup.py
+│   ├── fleet.py          # Multi-device ("fleet") writes
+│   ├── persistence.py, tpm_bypass.py
+│   ├── decompress.py     # .zip / .gz / .xz / .zst
+│   ├── history.py, updates.py, settings.py, diagnostics.py
+│   └── ...
+├── ui/                   # PyQt6 GUI
+│   ├── window.py         # Main window
+│   ├── dialogs.py, style.py, chamfer.py
+│   ├── reference.html    # Embedded in-app reference (bundled into the exe)
+│   └── flint.ico
+├── tests/                # pytest suite (unit + pytest-qt)
+├── scripts/
+│   └── sign.ps1          # Code-signing helper
+├── flint-web/            # Docs / marketing website (Vercel)
+├── setup.py              # Builds the optional C extension only
+├── pyproject.toml        # Build config, project metadata, ruff config
+├── flint.spec            # PyInstaller spec
+├── requirements.txt      # Pinned runtime dependencies
+├── requirements-dev.txt  # Pinned dev/test dependencies
+└── mypy.ini              # mypy config
+```
+
+## Contributing
+
+1. **Fork & branch** off `main`. Use a descriptive branch name
+   (`fix/drive-detection`, `feat/ntfs-label`).
+2. **Install all dependencies** (runtime + dev) and build the native extension
+   as shown above.
+3. **Write or update tests** for any new functionality or bug fix. Tests live
+   in `tests/` and are named `test_<module>.py`.
+4. **Run the full gate suite** before pushing:
+   ```powershell
+   ruff check .
+   mypy core ui main.py --ignore-missing-imports
+   python -m pytest -q
+   ```
+   All three must pass.
+5. **Open a PR** against `main`. CI runs the same gates on Windows with Python
+   3.11.
+
+**What to include in a PR:**
+
+- Code changes with passing tests.
+- Updated docstrings or help text if user-facing behavior changed.
+- A changelog-ready description (even if you don't edit the changelog).
+
+**Avoid:**
+
+- Unpinned dependency bumps (pin versions and re-run the gates).
+- Secrets, keys, or signing credentials in code or commits.
+- Changes to `flint-web/` unless directly related to your feature.
 
 ## Support
 
-- User guide and full documentation: https://flintweb.vercel.app
+- Full manual — user guide, CLI reference, and FAQ:
+  https://flintusb.pages.dev
 - Report issues and open pull requests on GitHub:
   https://github.com/gowthvm/Flint
 
 ## License
 
-- [MIT License](LICENSE) — Copyright (c) 2026 Gowtham G.K
+[MIT License](LICENSE) — Copyright (c) 2026 Gowtham G.K

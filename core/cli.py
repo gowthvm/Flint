@@ -4,7 +4,7 @@ Modern invocation (no ``--cli`` prefix needed — it is accepted as a
 compat alias)::
 
     flint list
-    flint flash  --image <file> --drive <serial|letter|path> --confirm <serial> [--verify]
+    flint flash  --image <file> --drive <serial|letter|path> --confirm <serial> [--verify] [--resume]
     flint verify --drive <serial|letter|path> [--sha256 <hex> --image <file>]
     flint wipe   --drive <serial|letter|path> --confirm <serial> [--method zero|random|nist|dod]
     flint backup --drive <serial|letter|path> --out <file> [--confirm <serial>]
@@ -82,6 +82,7 @@ _FLAG_OPTS = {
     "dry-run",
     "copy-report",
     "verbose",
+    "resume",
     "bypass-tpm",
     "check-fake",
 }
@@ -163,6 +164,16 @@ def _result(status: str, message: str, exit_code: int) -> int:
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name, "").strip().lower()
     return value in ("1", "true", "yes", "on")
+
+
+def _missing(opts: dict[str, object], name: str, syntax: str) -> str | None:
+    """Return a missing-required-option message when *name* was not supplied.
+
+    Distinguishes a required flag being absent from the flag being given a
+    value that does not exist (which the caller reports separately)."""
+    if str(opts.get(name, "")).strip():
+        return None
+    return f"missing required option --{name} <{syntax}>"
 
 
 def _block_bar(pct: float, width: int = 16) -> str:
@@ -322,6 +333,9 @@ _COMMAND_HELP: dict[str, str] = {
         "                         repartitions and copies files (default: auto)\n"
         "  --check-fake           probe the drive for counterfeit capacity\n"
         "                         before flashing (non-destructive, ~1 s)\n"
+        "  --resume               continue an interrupted write from the last\n"
+        "                         saved offset (reads '<image>.flint_state');\n"
+        "                         only meaningful for raw writes to the same drive\n"
         "  --quiet                suppress progress and informational messages\n"
         "  Example: flint flash --image C:\\img\\ubuntu.iso --drive E: --confirm 4C530001270509112345\n"
     ),
@@ -641,12 +655,16 @@ def _confirm_drive(
 
     ``--yes`` bypasses confirmation entirely. Otherwise ``--confirm`` wins;
     when missing and the terminal is interactive, prompt for the full serial.
+    ``--quiet`` never prompts: it falls back to the non-interactive error so
+    scripts cannot hang on an invisible ``input()`` read.
     """
+    if confirmed and assume_yes:
+        return "pass either --confirm <serial> or --yes, not both"
     if assume_yes:
         return None
     if confirmed:
         return _require_confirm(drive, confirmed)
-    if _interactive():
+    if _interactive() and not _QUIET:
         serial = _serial_of(drive)
         name = drive.get("model") or drive.get("name") or "unknown device"
         size = drive.get("size_gb", 0)
@@ -670,13 +688,15 @@ def _arm_fleet_confirmation(
     assume_yes: bool = False,
 ) -> str | None:
     """Fleet arming: --yes bypasses confirmation; otherwise ARM is required."""
+    if confirmed and assume_yes:
+        return "pass either --confirm ARM or --yes, not both"
     if assume_yes:
         return None
     if confirmed:
         if confirmed.strip().casefold() != "arm":
             return "--confirm must be the literal word ARM"
         return None
-    if _interactive():
+    if _interactive() and not _QUIET:
         _eprint(
             f"Fleet: {image_count} image(s); all fitting drives will be erased."
         )
@@ -817,6 +837,8 @@ def _cmd_list(opts: dict[str, object]) -> int:
     run destructive commands with the exact value."""
     drives = _detect_drives()
     if not drives:
+        if _JSON:
+            _emit_json(type="drives", drives=[])
         return _result(
             "ok",
             "no removable drives detected; run 'flint doctor' for diagnostics",
@@ -896,9 +918,15 @@ def _copy_to_clipboard(text: str) -> None:
 def _cmd_flash(opts: dict[str, object]) -> int:
     from core.writer import UsbWriter
 
+    missing = _missing(opts, "image", "file")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     image = str(opts.get("image", ""))
     if not os.path.isfile(image):
-        return _result("fail", "--image file not found", EXIT_USAGE)
+        return _result("fail", f"--image file not found: {image}", EXIT_USAGE)
+    missing = _missing(opts, "drive", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
@@ -907,9 +935,9 @@ def _cmd_flash(opts: dict[str, object]) -> int:
             # one JSON object, never as raw text lines.
             _emit_json(type="drives", drives=_drives_json(drives))
         else:
-            _print("drive not found; detected drives:")
+            _eprint("drive not found; detected drives:")
             for d in drives:
-                _print(
+                _eprint(
                     f"  serial={_serial_of(d)!r} "
                     f"path={d.get('physical_path')} "
                     f"letters={d.get('letters')}"
@@ -948,10 +976,17 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         _eprint(f"  partition-scheme: {opts.get('partition-scheme', 'auto')}")
         _eprint(f"  filesystem: {opts.get('filesystem', 'fat32')}")
         _eprint(f"  write-mode: {opts.get('write-mode', 'auto')}")
+        _eprint(f"  resume: {bool(opts.get('resume'))}")
         return _result("ok", "dry run — no changes made", EXIT_OK)
     image_size = os.path.getsize(image)
-    if image_size > (drive.get("size_gb", 0) * 1_000_000_000):
-        return _result("fail", "image is larger than the target drive", EXIT_FAIL)
+    drive_capacity = drive.get("size_gb", 0) * 1_000_000_000
+    if image_size > drive_capacity:
+        return _result(
+            "fail",
+            f"image is larger than the target drive "
+            f"({image_size:,} bytes vs {drive_capacity:,} bytes)",
+            EXIT_USAGE,
+        )
     letters = drive.get("letters") or (
         [drive["letter"]] if drive.get("letter") else []
     )
@@ -963,6 +998,7 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         filesystem=str(opts.get("filesystem", "fat32")),
         write_mode=str(opts.get("write-mode", "auto")),
         verify_after_write=bool(opts.get("verify")) or _env_flag("FLINT_VERIFY"),
+        resume=bool(opts.get("resume")),
         bypass_tpm=bool(opts.get("bypass-tpm")),
     )
     ok, message = _run_worker(worker, "flash")
@@ -999,6 +1035,9 @@ def _cmd_verify_raw(
 
 
 def _cmd_verify(opts: dict[str, object]) -> int:
+    missing = _missing(opts, "drive", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
@@ -1049,6 +1088,9 @@ def _cmd_verify(opts: dict[str, object]) -> int:
 def _cmd_wipe(opts: dict[str, object]) -> int:
     from core.wipe import WIPE_METHODS, WipeWorker
 
+    missing = _missing(opts, "drive", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
@@ -1098,6 +1140,9 @@ def _cmd_wipe(opts: dict[str, object]) -> int:
 def _cmd_backup(opts: dict[str, object]) -> int:
     from core.backup import BackupWorker
 
+    missing = _missing(opts, "drive", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
@@ -1106,10 +1151,17 @@ def _cmd_backup(opts: dict[str, object]) -> int:
             "drive not found — run 'flint list' to see available drives",
             EXIT_USAGE,
         )
+    missing = _missing(opts, "out", "file")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     out = str(opts.get("out", ""))
-    if not out:
-        return _result("fail", "--out <file> is required", EXIT_USAGE)
     confirm = str(opts.get("confirm", "")) if opts.get("confirm") else None
+    if confirm and bool(opts.get("yes")):
+        return _result(
+            "fail",
+            "pass either --confirm <serial> or --yes, not both",
+            EXIT_USAGE,
+        )
     issue: str | None = None
     if confirm and not bool(opts.get("yes")):
         issue = _require_confirm(drive, confirm)
@@ -1142,6 +1194,12 @@ def _cmd_backup(opts: dict[str, object]) -> int:
 def _cmd_clone(opts: dict[str, object]) -> int:
     from core.clone import CloneWorker
 
+    missing = _missing(opts, "from", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
+    missing = _missing(opts, "to", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     source = _resolve_drive(str(opts.get("from", "")), drives)
     target = _resolve_drive(str(opts.get("to", "")), drives)
@@ -1228,15 +1286,21 @@ def parse_queue_file(
 def _cmd_queue(opts: dict[str, object]) -> int:
     """Flash every image listed in a file (one per line, # comments
     allowed) to the same drive, stopping on the first failure."""
+    missing = _missing(opts, "file", "file")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     queue_file = str(opts.get("file", ""))
     if not os.path.isfile(queue_file):
-        return _result("fail", "--file not found", EXIT_USAGE)
+        return _result("fail", f"--file not found: {queue_file}", EXIT_USAGE)
     base_dir = os.path.dirname(os.path.abspath(queue_file))
     images, warnings = parse_queue_file(queue_file, base_dir=base_dir)
     for w in warnings:
         _eprint(f"  warning: {w}")
     if not images:
         return _result("fail", "queue file has no valid images", EXIT_USAGE)
+    missing = _missing(opts, "drive", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
@@ -1463,7 +1527,7 @@ _POWERSHELL_COMPLETION = """# flint PowerShell completion
 Register-ArgumentCompleter -CommandName flint -Native -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','doctor','completions','help','scan','--version')
-    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--json','--quiet','--help','--version','--retries','--yes')
+    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--resume','--json','--quiet','--help','--version','--retries','--yes')
     try {
         $raw = & flint list --json 2>$null
         $drives = @()
@@ -1510,7 +1574,7 @@ _flint_completions() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     commands='list flash verify wipe backup clone queue flash-all doctor completions help scan'
-    options='--image --drive --confirm --verify --out --file --method --from --to --sha256 --timeout --json --quiet --help --version --retries --yes --dry-run --skip-flashed --copy-report'
+    options='--image --drive --confirm --verify --out --file --method --from --to --sha256 --timeout --resume --json --quiet --help --version --retries --yes --dry-run --skip-flashed --copy-report'
 
     if [[ ${cur} == -* ]]; then
         COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
@@ -1567,6 +1631,7 @@ _flint() {
         '--retries[retries per failed read]:'
         '--yes[bypass confirmation]'
         '--dry-run[preview without performing]'
+        '--resume[resume an interrupted write from the last saved offset]'
         '--skip-flashed[skip drives already flashed]'
         '--copy-report[copy flash report to clipboard]'
     )
@@ -1592,15 +1657,18 @@ _flint "$@"
 def _cmd_scan(opts: dict[str, object]) -> int:
     from core.verify import whole_drive_scan
 
+    missing = _missing(opts, "drive", "serial|letter|path")
+    if missing:
+        return _result("fail", missing, EXIT_USAGE)
     drives = _detect_drives()
     drive = _resolve_drive(str(opts.get("drive", "")), drives)
     if drive is None:
         if _JSON:
             _emit_json(type="drives", drives=_drives_json(drives))
         else:
-            _print("drive not found; detected drives:")
+            _eprint("drive not found; detected drives:")
             for d in drives:
-                _print(
+                _eprint(
                     f"  serial={_serial_of(d)!r} "
                     f"path={d.get('physical_path')} "
                     f"letters={d.get('letters')}"
@@ -1690,12 +1758,21 @@ def _cmd_scan(opts: dict[str, object]) -> int:
 
 def _cmd_completions(opts: dict[str, object]) -> int:
     shell = str(opts.get("shell", "powershell")).lower()
+    if shell not in ("powershell", "bash", "zsh"):
+        return _result(
+            "fail",
+            "--shell must be one of powershell, bash, zsh",
+            EXIT_USAGE,
+        )
     if shell == "bash":
-        _print(_BASH_COMPLETION)
+        script = _BASH_COMPLETION
     elif shell == "zsh":
-        _print(_ZSH_COMPLETION)
+        script = _ZSH_COMPLETION
     else:
-        _print(_POWERSHELL_COMPLETION)
+        script = _POWERSHELL_COMPLETION
+    if _JSON:
+        return _result("ok", script, EXIT_OK)
+    _print(script)
     return EXIT_OK
 
 
@@ -1714,6 +1791,66 @@ _COMMANDS = {
 }
 
 TOP_LEVEL_COMMANDS = frozenset(_COMMANDS) | {"help"}
+
+# The parser accepts every option for every command; each command then
+# validates that the options it was given are the ones it honors. A flag
+# that belongs to another command ("flint wipe --verify") is a usage error
+# instead of being silently ignored.
+_COMMAND_OPTS: dict[str, frozenset[str]] = {
+    "list": frozenset({"quiet"}),
+    "flash": frozenset(
+        {
+            "image",
+            "drive",
+            "confirm",
+            "yes",
+            "verify",
+            "bypass-tpm",
+            "partition-scheme",
+            "filesystem",
+            "write-mode",
+            "check-fake",
+            "dry-run",
+            "copy-report",
+            "resume",
+            "quiet",
+        }
+    ),
+    "verify": frozenset({"drive", "sha256", "image", "quiet"}),
+    "wipe": frozenset({"drive", "confirm", "yes", "method", "dry-run", "quiet"}),
+    "backup": frozenset(
+        {"drive", "out", "confirm", "yes", "check-fake", "dry-run", "quiet"}
+    ),
+    "clone": frozenset({"from", "to", "confirm", "yes", "dry-run", "quiet"}),
+    "queue": frozenset(
+        {"file", "drive", "confirm", "yes", "verify", "bypass-tpm", "dry-run", "quiet"}
+    ),
+    "flash-all": frozenset(
+        {
+            "image",
+            "confirm",
+            "yes",
+            "timeout",
+            "skip-flashed",
+            "verify",
+            "bypass-tpm",
+            "dry-run",
+            "quiet",
+        }
+    ),
+    "doctor": frozenset({"quiet"}),
+    "completions": frozenset({"shell", "quiet"}),
+    "scan": frozenset({"drive", "retries", "verbose", "quiet"}),
+}
+
+
+def _validate_command_opts(command: str, opts: dict[str, object]) -> str | None:
+    """Return an error when *opts* contains a flag the command does not use."""
+    allowed = _COMMAND_OPTS.get(command, frozenset())
+    for name in opts:
+        if name not in allowed:
+            return f"option --{name} is not valid for command {command}"
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1739,6 +1876,10 @@ def main(argv: list[str] | None = None) -> int:
         # silently turn a destructive command into an exit-0 no-op.
         from core.version import APP_VERSION
 
+        if _JSON:
+            # Machine callers still get a result line instead of an empty
+            # stdout (the text banner otherwise goes to stderr).
+            return _result("ok", f"Flint v{APP_VERSION}", EXIT_OK)
         title = f"\u2b21 Flint  v{APP_VERSION}"
         tagline = "Write. Verify. Trust."
         w = max(len(title), len(tagline)) + 2
@@ -1751,30 +1892,46 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         from core.version import APP_VERSION
 
-        _eprint(f"  ⬡ Flint v{APP_VERSION}")
-        _eprint("  ⬡ Write. Verify. Trust.")
+        _eprint(f"  \u2b21 Flint v{APP_VERSION}")
+        _eprint("  \u2b21 Write. Verify. Trust.")
+        if _JSON:
+            return _result("ok", "no command given", EXIT_OK)
         _print(_usage())
         return EXIT_OK
     first = argv[0]
     if first in ("help", "--help", "-h"):
-        if len(argv) >= 2 and argv[1] in _COMMANDS:
-            _print(_command_help(argv[1]))
-        else:
-            _print(_usage())
+        text = (
+            _command_help(argv[1])
+            if len(argv) >= 2 and argv[1] in _COMMANDS
+            else _usage()
+        )
+        if _JSON:
+            return _result("ok", text, EXIT_OK)
+        _print(text)
         return EXIT_OK
     command = first
     if command not in _COMMANDS:
         _eprint(f"unknown command: {command}")
+        _result("fail", f"unknown command: {command}", EXIT_USAGE)
         _eprint(_usage())
         return EXIT_USAGE
     rest = argv[1:]
     if "--help" in rest or "-h" in rest:
-        _print(_command_help(command))
+        text = _command_help(command)
+        if _JSON:
+            return _result("ok", text, EXIT_OK)
+        _print(text)
         return EXIT_OK
 
     opts, error = _opts(rest)
     if error:
         _result("fail", error, EXIT_USAGE)
+        _eprint(_usage())
+        return EXIT_USAGE
+
+    invalid = _validate_command_opts(command, opts)
+    if invalid:
+        _result("fail", invalid, EXIT_USAGE)
         _eprint(_usage())
         return EXIT_USAGE
 

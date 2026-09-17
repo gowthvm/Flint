@@ -1007,7 +1007,7 @@ def test_flash_check_fake_proceeds_with_yes(tmp_path, monkeypatch, capsys):
     )
 
     rc = cli._cmd_flash(
-        {"image": str(image), "drive": "E", "confirm": "ABC1234",
+        {"image": str(image), "drive": "E",
          "check-fake": True, "yes": True}
     )
 
@@ -1029,3 +1029,235 @@ def test_backup_without_confirm_runs(tmp_path, monkeypatch, capsys):
 
     assert rc == cli.EXIT_OK
     assert "RESULT ok" in capsys.readouterr().out
+
+
+# --- v1.10.0: scripting contract, strict per-command flags, flash --resume
+
+
+def test_main_unknown_command_emits_result(capsys):
+    """The one failure path that previously dropped the RESULT line now
+    emits it in both text and JSON modes."""
+    assert cli.main(["frobnicate"]) == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "RESULT fail: unknown command: frobnicate" in captured.out
+    assert "unknown command: frobnicate" in captured.err
+
+
+def test_json_unknown_command_emits_result_object(capsys):
+    assert cli.main(["--json", "frobnicate"]) == cli.EXIT_USAGE
+    objects = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert objects == [
+        {
+            "type": "result",
+            "status": "fail",
+            "message": "unknown command: frobnicate",
+            "exit": cli.EXIT_USAGE,
+        }
+    ]
+
+
+def test_json_version_emits_result_object(capsys):
+    from core.version import APP_VERSION
+
+    assert cli.main(["--json", "--version"]) == cli.EXIT_OK
+    objects = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert objects[0]["type"] == "result"
+    assert objects[0]["status"] == "ok"
+    assert "flint" in objects[0]["message"].lower()
+    assert APP_VERSION in objects[0]["message"]
+
+
+def test_json_help_emits_result_object(capsys):
+    assert cli.main(["--json", "help", "flash"]) == cli.EXIT_OK
+    objects = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert objects[0]["type"] == "result"
+    assert objects[0]["status"] == "ok"
+    assert "flint flash --image" in objects[0]["message"]
+
+
+def test_json_no_command_emits_result_object(capsys):
+    assert cli.main(["--json"]) == cli.EXIT_OK
+    objects = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert objects[0]["type"] == "result"
+    assert objects[0]["status"] == "ok"
+
+
+def test_flash_missing_image_reports_required(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    rc = cli._cmd_flash({"drive": "E"})
+    assert rc == cli.EXIT_USAGE
+    assert "missing required option --image" in capsys.readouterr().out
+
+
+def test_flash_missing_drive_reports_required(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    rc = cli._cmd_flash({"image": str(image)})
+    assert rc == cli.EXIT_USAGE
+    assert "missing required option --drive" in capsys.readouterr().out
+
+
+def test_flash_image_not_found_includes_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    rc = cli._cmd_flash({"image": str(tmp_path / "nope.iso"), "drive": "E"})
+    assert rc == cli.EXIT_USAGE
+    assert "nope.iso" in capsys.readouterr().out
+
+
+def test_verify_missing_drive_reports_required(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    assert cli._cmd_verify({}) == cli.EXIT_USAGE
+    assert "missing required option --drive" in capsys.readouterr().out
+
+
+def test_queue_missing_file_reports_required(capsys):
+    assert cli._cmd_queue({}) == cli.EXIT_USAGE
+    assert "missing required option --file" in capsys.readouterr().out
+
+
+def test_queue_missing_drive_reports_required(tmp_path, capsys):
+    img = tmp_path / "x.iso"
+    img.write_bytes(b"data")
+    queue_file = tmp_path / "queue.txt"
+    queue_file.write_text(f"{img}\n")
+    rc = cli._cmd_queue({"file": str(queue_file)})
+    assert rc == cli.EXIT_USAGE
+    assert "missing required option --drive" in capsys.readouterr().out
+
+
+def test_backup_missing_drive_reports_required(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    assert cli._cmd_backup({"out": "b.img"}) == cli.EXIT_USAGE
+    assert "missing required option --drive" in capsys.readouterr().out
+
+
+def test_flash_oversize_image_is_usage(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "big.iso"
+    image.write_bytes(b"data")
+    tiny = dict(_fake_drives()[0])
+    tiny["size_gb"] = 0
+    monkeypatch.setattr(cli, "_detect_drives", lambda *args: [tiny])
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    out = capsys.readouterr().out
+    assert "larger than the target drive" in out
+
+
+def test_flash_drive_not_found_listing_stays_on_stderr(
+    tmp_path, monkeypatch, capsys
+):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", list)
+    rc = cli._cmd_flash({"image": str(image), "drive": "E"})
+    assert rc == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "RESULT fail: drive not found" in captured.out
+    assert "detected drives:" not in captured.out
+    assert "detected drives:" in captured.err
+
+
+def test_scan_drive_not_found_listing_stays_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", list)
+    rc = cli._cmd_scan({"drive": "NOPE"})
+    assert rc == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "detected drives:" not in captured.out
+    assert "detected drives:" in captured.err
+
+
+def test_cross_command_flag_rejected(capsys):
+    """flint wipe --verify must be a usage error, not silently ignored."""
+    assert cli.main(["wipe", "--verify"]) == cli.EXIT_USAGE
+    out = capsys.readouterr().out
+    assert "--verify is not valid for command wipe" in out
+
+
+def test_conflicting_confirm_and_yes_flash(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "WRONG", "yes": True}
+    )
+    assert rc == cli.EXIT_USAGE
+    assert "not both" in capsys.readouterr().out
+
+
+def test_conflicting_confirm_and_yes_fleet(tmp_path, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    rc = cli._cmd_flash_all(
+        {"images": [str(image)], "confirm": "ARM", "yes": True}
+    )
+    assert rc == cli.EXIT_USAGE
+    assert "not both" in capsys.readouterr().out
+
+
+def test_list_json_with_no_drives_emits_empty_array(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_detect_drives", list)
+    assert cli.main(["list", "--json"]) == cli.EXIT_OK
+    objects = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+    ]
+    drives = next(o for o in objects if o["type"] == "drives")
+    assert drives["drives"] == []
+    assert any(o["type"] == "result" and o["status"] == "ok" for o in objects)
+
+
+def test_quiet_never_prompts_and_fails_cleanly(tmp_path, monkeypatch, capsys):
+    """--quiet with a TTY must not block on an invisible input() read."""
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    prompt_calls: list[str] = []
+    monkeypatch.setattr(cli, "_QUIET", True)
+    monkeypatch.setattr(cli, "_prompt", lambda prompt: prompt_calls.append(prompt) or "x")
+
+    rc = cli._cmd_flash({"image": str(image), "drive": "E"})
+
+    assert rc == cli.EXIT_USAGE
+    assert prompt_calls == []
+    assert "pass --confirm" in capsys.readouterr().out
+
+
+def test_completions_rejects_unknown_shell(capsys):
+    assert cli._cmd_completions({"shell": "fish"}) == cli.EXIT_USAGE
+    assert "--shell must be one of" in capsys.readouterr().out
+
+
+def test_flash_resume_flag_passes_to_worker(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    seen: list[bool] = []
+
+    def _capture(worker, label):
+        seen.append(worker.resume)
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _capture)
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234", "resume": True}
+    )
+    assert rc == cli.EXIT_OK
+    assert seen == [True]
+
+
+def test_flash_help_documents_resume(capsys):
+    assert cli.main(["flash", "--help"]) == cli.EXIT_OK
+    assert "--resume" in capsys.readouterr().out
