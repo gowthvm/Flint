@@ -168,8 +168,9 @@ def test_verify_progress_reports_total(tmp_path):
 # ------------------------------------------------- bad sectors & retries ----
 
 def _patch_readfile(monkeypatch, fake):
-    """Replace kernel32.ReadFile (retry loop runs inside _read_chunk)."""
-    kernel32 = verify.ctypes.windll.kernel32
+    """Replace kernel32.ReadFile (retry loop runs inside read_bytes_retry)."""
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
     real_read = kernel32.ReadFile
 
     def flaky_read(handle, buffer, count, byref_read, overlapped):
@@ -314,13 +315,13 @@ def test_verify_zero_retries_means_single_attempt(tmp_path, monkeypatch):
 def test_verify_cancel(tmp_path, monkeypatch):
     _, device, _ = _write_pair(tmp_path, 300_000, seed=13)
     calls = {"n": 0}
-    real = verify._read_chunk
+    real = verify.read_bytes_retry
 
-    def counting(handle, buffer, count, retries, is_cancelled):
+    def counting(handle, count, retries=3, is_cancelled=None):
         calls["n"] += 1
-        return real(handle, buffer, count, retries, is_cancelled)
+        return real(handle, count, retries=retries, is_cancelled=is_cancelled)
 
-    monkeypatch.setattr(verify, "_read_chunk", counting)
+    monkeypatch.setattr(verify, "read_bytes_retry", counting)
     result = verify.verify_device(
         str(device),
         chunk_size=64 * 1024,
@@ -342,10 +343,10 @@ def test_scan_bad_sectors_clean_device(tmp_path):
 def test_scan_bad_sectors_reports_failures(tmp_path, monkeypatch):
     _, device, _ = _write_pair(tmp_path, 150_000, seed=15)
 
-    def always_fail(handle, buffer, count, retries, is_cancelled):
+    def always_fail(handle, count, retries=3, is_cancelled=None):
         return None
 
-    monkeypatch.setattr(verify, "_read_chunk", always_fail)
+    monkeypatch.setattr(verify, "read_bytes_retry", always_fail)
     result = verify.scan_bad_sectors(str(device), chunk_size=64 * 1024)
     assert result["ok"] is False
     assert result["bad_sectors"] != []
@@ -454,10 +455,10 @@ def test_whole_drive_scan_clean(tmp_path):
 def test_whole_drive_scan_reports_bad_sectors(tmp_path, monkeypatch):
     _, device, _ = _write_pair(tmp_path, 200_000, seed=51)
 
-    def always_fail(handle, buffer, count, retries, is_cancelled):
+    def always_fail(handle, count, retries=3, is_cancelled=None):
         return None
 
-    monkeypatch.setattr(verify, "_read_chunk", always_fail)
+    monkeypatch.setattr(verify, "read_bytes_retry", always_fail)
     result = verify.whole_drive_scan(str(device), chunk_size=64 * 1024)
     assert result["ok"] is False
     assert len(result["bad_sectors"]) > 0

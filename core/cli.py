@@ -1786,8 +1786,8 @@ def _cmd_deploy(opts: dict[str, object]) -> int:
         _eprint(f"  verify: {verify}")
         return _result("ok", "dry run - no changes made", EXIT_OK)
 
-    from core.writer import DEFAULT_CHUNK_SIZE, UsbWriter
     from core.paths import APP_DIR
+    from core.writer import DEFAULT_CHUNK_SIZE, UsbWriter
 
     image = images[0]
     image_size = os.path.getsize(image)

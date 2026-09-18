@@ -1,8 +1,6 @@
 """Tests for core.benchmark — read/write benchmarks."""
 
 import ctypes
-import os
-import time
 
 from core.benchmark import benchmark_read, benchmark_write, estimate_write_time
 
@@ -54,21 +52,21 @@ def _fake_kernel32(monkeypatch):
 
 
 def test_benchmark_write_returns_positive(monkeypatch):
-    calls, fake = _fake_kernel32(monkeypatch)
+    _fake_kernel32(monkeypatch)
     result = benchmark_write("\\\\.\\E:", size=1024, chunk=512)
     assert isinstance(result, float)
     assert result >= 0.0
 
 
 def test_benchmark_read_returns_positive(monkeypatch):
-    calls, fake = _fake_kernel32(monkeypatch)
+    _fake_kernel32(monkeypatch)
     result = benchmark_read("\\\\.\\E:", size=1024, chunk=512)
     assert isinstance(result, float)
     assert result >= 0.0
 
 
 def test_estimate_write_time_returns_positive(monkeypatch):
-    calls, fake = _fake_kernel32(monkeypatch)
+    _fake_kernel32(monkeypatch)
     result = estimate_write_time("\\\\.\\E:", image_size=10_000_000_000)
     assert isinstance(result, float)
     assert result >= 0.0

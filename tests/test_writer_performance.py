@@ -618,7 +618,8 @@ def test_writer_volume_open_failure_aborts(tmp_path, monkeypatch, capsys):
     """A volume that cannot be opened for locking must abort the write."""
     w, _ = _monkeypatched_writer(monkeypatch, tmp_path)
     w.letters = ["X"]
-    kernel = _FailingVolumeKernel(w._INVALID_HANDLE_VALUE)
+    from core.deviceio import _INVALID_HANDLE_VALUE
+    kernel = _FailingVolumeKernel(_INVALID_HANDLE_VALUE)
     results: list[tuple[bool, str]] = []
     inner_calls: list[bool] = []
     w.finished.connect(lambda ok, msg: results.append((ok, msg)))
@@ -626,7 +627,7 @@ def test_writer_volume_open_failure_aborts(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         writer.diskpart, "resolve_write_mode", lambda mode, iso: "raw"
     )
-    monkeypatch.setattr("core.writer.kernel32", lambda: kernel)
+    monkeypatch.setattr("core.deviceio.kernel32", lambda: kernel)
     monkeypatch.setattr(w, "_run_inner", lambda: inner_calls.append(True))
 
     w.run()
@@ -642,17 +643,18 @@ def test_writer_volume_open_failure_aborts(tmp_path, monkeypatch, capsys):
 
 def test_wipe_volume_open_failure_aborts(monkeypatch, capsys):
     """WipeWorker must abort when a target volume cannot be locked."""
+    from core.deviceio import _INVALID_HANDLE_VALUE
     worker = WipeWorker(
         r"\\.\PHYSICALDRIVE9",
         letters=["X"],
         verify=False,
     )
-    kernel = _FailingVolumeKernel(worker._INVALID_HANDLE_VALUE)
+    kernel = _FailingVolumeKernel(_INVALID_HANDLE_VALUE)
     results: list[tuple[bool, str]] = []
     inner_calls: list[bool] = []
     worker.finished.connect(lambda ok, msg: results.append((ok, msg)))
 
-    monkeypatch.setattr("core.wipe.kernel32", lambda: kernel)
+    monkeypatch.setattr("core.deviceio.kernel32", lambda: kernel)
     monkeypatch.setattr(worker, "_run_inner", lambda: inner_calls.append(True))
 
     worker.run()

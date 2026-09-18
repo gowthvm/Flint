@@ -23,7 +23,7 @@ class _FakeKernel:
         self.fail_read = False
 
     def _open_drive(self):
-        return ctypes.c_void_p(1234)
+        return 1234
 
     def _drive_size(self, handle) -> int:
         return self.size

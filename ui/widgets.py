@@ -28,6 +28,7 @@ from PyQt6.QtGui import (
     QDragMoveEvent,
     QDropEvent,
     QEnterEvent,
+    QHideEvent,
     QKeyEvent,
     QMouseEvent,
 )
@@ -38,6 +39,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -46,8 +48,8 @@ from PyQt6.QtWidgets import (
 
 from core import settings
 from core.drives import DriveDetector
-from ui.chamfer import ChamferPanel
 from ui import style
+from ui.chamfer import ChamferPanel
 
 logger = logging.getLogger("flint")
 
@@ -228,7 +230,7 @@ class HelpButton(QPushButton):
             self._bubble.hide_fast()
         super().leaveEvent(event)
 
-    def hideEvent(self, event: QEvent | None) -> None:
+    def hideEvent(self, event: QHideEvent | None) -> None:
         assert event is not None
         if self._bubble is not None:
             self._bubble.hide_fast()

@@ -1,8 +1,6 @@
 """Shared test fixtures for the Flint test suite."""
 
-import os
 import sys
-import tempfile
 
 import pytest
 
@@ -23,7 +21,7 @@ def _make_window(monkeypatch):
     """Create a MainWindow without showing it (skips elevation checks)."""
 
     def _make():
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from PyQt6.QtWidgets import QApplication
 

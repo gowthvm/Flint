@@ -1,31 +1,22 @@
 import ctypes
-import hashlib
 import logging
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
-from collections import deque
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import (  # type: ignore[attr-defined]
+from PyQt6.QtCore import (
     QByteArray,
-    QEasingCurve,
     QEvent,
-    QPoint,
     QPointF,
-    QPropertyAnimation,
     Qt,
     QThread,
     QTimer,
     QUrl,
-    pyqtProperty,
-    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QCloseEvent,
@@ -33,16 +24,11 @@ from PyQt6.QtGui import (
     QCursor,
     QDesktopServices,
     QDragEnterEvent,
-    QDragLeaveEvent,
-    QDragMoveEvent,
     QDropEvent,
-    QEnterEvent,
     QGuiApplication,
     QHideEvent,
     QIcon,
-    QKeyEvent,
     QKeySequence,
-    QMouseEvent,
     QMoveEvent,
     QPainter,
     QPixmap,
@@ -61,11 +47,9 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
-    QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
-    QSizePolicy,
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -105,18 +89,16 @@ from core.version import APP_VERSION
 from core.wipe import WipeWorker
 from core.writer import DEFAULT_CHUNK_SIZE, UsbWriter
 from ui import dialogs, style
-from ui.chamfer import ChamferPanel
 from ui.widgets import (
+    _HELP_TIPS,
     DriveChip,
     HelpButton,
     IsoDropZone,
     NavItem,
     ProgressArea,
-    SegmentedControl,
     ShaInput,
     TipBubble,
     ToggleSwitch,
-    _HELP_TIPS,
     _restyle,
     _windows_uses_dark_mode,
 )

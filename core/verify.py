@@ -1,4 +1,3 @@
-import ctypes
 import hashlib
 import logging
 import os
@@ -10,7 +9,6 @@ from typing import Any
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.deviceio import (
-    TRANSIENT_SEEK_ERRORS,
     drive_size,
     kernel32,
     open_drive,

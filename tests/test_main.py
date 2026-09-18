@@ -1,6 +1,5 @@
 """Tests for main.py — pure helper functions."""
 
-import os
 import sys
 from unittest.mock import patch
 
@@ -14,7 +13,6 @@ def test_windowless_python_returns_string():
 
 
 def test_windowless_python_prefers_pythonw(monkeypatch):
-    fake_pythonw = "C:\\Python312\\pythonw.exe"
     fake_python = "C:\\Python312\\python.exe"
     monkeypatch.setattr(sys, "executable", fake_python)
 

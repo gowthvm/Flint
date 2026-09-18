@@ -16,7 +16,6 @@ def test_setup_logging_returns_logger(tmp_path, monkeypatch):
 def test_setup_logging_creates_log_file(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "environ", {**os.environ, "APPDATA": str(tmp_path)})
     setup_logging("flint_test_file", "INFO")
-    log_dir = tmp_path / "flint" / "logs"
     # The function may or may not create the dir depending on existing state
     # Just verify it doesn't crash
 

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from core.paths import APP_DIR, file_lock
@@ -10,7 +11,7 @@ logger = logging.getLogger("flint")
 
 SETTINGS_PATH = APP_DIR / "settings.json"
 _LOCK_PATH = SETTINGS_PATH.with_suffix(".lock")
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 _DEFAULTS: dict[str, Any] = {
     "theme": "dark",

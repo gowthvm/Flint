@@ -10,7 +10,6 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.deviceio import (
     ES_CONTINUOUS,
     ES_SYSTEM_REQUIRED,
-    TRANSIENT_ERRORS,
     drive_size,
     flush,
     kernel32,

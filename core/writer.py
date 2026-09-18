@@ -18,7 +18,6 @@ from core.deviceio import (
     ES_SYSTEM_REQUIRED,
     FILE_FLAG_NO_BUFFERING,
     FILE_FLAG_WRITE_THROUGH,
-    TRANSIENT_ERRORS,
     drive_size,
     flush,
     kernel32,
