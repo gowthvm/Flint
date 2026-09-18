@@ -52,6 +52,22 @@ from ui import style
 logger = logging.getLogger("flint")
 
 
+def _windows_uses_dark_mode() -> bool:
+    """Return True when Windows is configured for dark app mode."""
+    try:
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return int(value) == 0
+    except Exception:
+        return True  # default to dark on failure
+
+
 def _restyle(widget: QWidget) -> None:
     """Repolish a widget so property-driven stylesheet selectors apply."""
     s = widget.style()

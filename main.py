@@ -265,7 +265,7 @@ def main() -> int:
         app = QApplication(sys.argv)
         startup_theme = settings.get("theme")
         if startup_theme == "auto":
-            from ui.window import _windows_uses_dark_mode
+            from ui.widgets import _windows_uses_dark_mode
 
             startup_theme = "dark" if _windows_uses_dark_mode() else "light"
         app.setStyleSheet(build_style(startup_theme))

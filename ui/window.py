@@ -118,6 +118,7 @@ from ui.widgets import (
     ToggleSwitch,
     _HELP_TIPS,
     _restyle,
+    _windows_uses_dark_mode,
 )
 
 logger = logging.getLogger("flint")
