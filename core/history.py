@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -50,6 +51,57 @@ def append_history(entry: dict[str, Any]) -> None:
     save_history(entries)
 
 
+def _integrity_payload(entry: dict[str, Any]) -> str:
+    payload = {
+        key: value
+        for key, value in entry.items()
+        if key not in {"integrity_prev", "integrity_sha256"}
+    }
+    return json.dumps(
+        payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+
+
+def history_entry_digest(entry: dict[str, Any]) -> str:
+    """Return the deterministic digest used for an audited history entry."""
+    return hashlib.sha256(_integrity_payload(entry).encode("utf-8")).hexdigest()
+
+
+def append_audited_history(entry: dict[str, Any]) -> dict[str, Any]:
+    """Append a hash-chained operation record and return the stored record."""
+    entries = load_history()
+    record = dict(entry)
+    previous = next(
+        (
+            str(item["integrity_sha256"])
+            for item in reversed(entries)
+            if item.get("integrity_sha256")
+        ),
+        None,
+    )
+    if previous is not None:
+        record["integrity_prev"] = previous
+    record["integrity_sha256"] = history_entry_digest(record)
+    entries.append(record)
+    save_history(entries)
+    return record
+
+
+def verify_history_integrity() -> tuple[bool, int | None]:
+    """Return ``(valid, index)`` for the first broken audited record."""
+    previous: str | None = None
+    for index, entry in enumerate(load_history()):
+        digest = entry.get("integrity_sha256")
+        if not digest:
+            continue
+        if entry.get("integrity_prev") != previous:
+            return False, index
+        if digest != history_entry_digest(entry):
+            return False, index
+        previous = str(digest)
+    return True, None
+
+
 def clear_history() -> None:
     save_history([])
 
@@ -79,6 +131,25 @@ def export_history_csv(target_path: str | Path) -> bool:
             writer.writerows(entries)
         return True
     except (OSError, csv.Error):
+        return False
+
+
+def export_history_markdown(target_path: str | Path) -> bool:
+    """Export operation history as a readable Markdown audit table."""
+    try:
+        entries = load_history()
+        keys = sorted({key for entry in entries for key in entry})
+        if not keys:
+            return False
+        def cell(value: Any) -> str:
+            return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+        lines = ["# Flint Operation History", "", "| " + " | ".join(keys) + " |"]
+        lines.append("| " + " | ".join("---" for _ in keys) + " |")
+        for entry in entries:
+            lines.append("| " + " | ".join(cell(entry.get(key)) for key in keys) + " |")
+        Path(target_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except OSError:
         return False
 
 
@@ -113,11 +184,13 @@ def flash_report(
     written_sha256: str | None = None,
     drive_serial: str | None = None,
     bootable: str | None = None,
+    boot_status: str | None = None,
     avg_mbps: float | None = None,
     wipe_verified: str | None = None,
 ) -> dict[str, Any]:
     return {
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "operation": "flash",
         "iso": iso_name,
         "drive": drive_model,
         "drive_serial": drive_serial,
@@ -126,6 +199,7 @@ def flash_report(
         "verified": bool(verified),
         "success": bool(success),
         "bootable": bootable,
+        "boot_status": boot_status,
         "iso_sha256": iso_sha256,
         "written_sha256": written_sha256,
         "wipe_verified": wipe_verified,

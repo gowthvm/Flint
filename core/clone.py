@@ -4,9 +4,11 @@ Both drives' volumes are locked and dismounted for the duration of the
 copy. The target is completely overwritten; the source is read-only.
 """
 
+import ctypes
 import logging
 import time
 from collections import deque
+from threading import Event
 from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -50,16 +52,23 @@ class CloneWorker(QThread):
         target_path: str,
         source_letters: list[str] | None = None,
         target_letters: list[str] | None = None,
+        cancel_event: Event | None = None,
     ) -> None:
         super().__init__()
         self.source_path = source_path
         self.target_path = target_path
         self.source_letters = source_letters or []
         self.target_letters = target_letters or []
+        self.cancel_event = cancel_event
         self._canceled = False
 
     def cancel(self) -> None:
         self._canceled = True
+
+    def _cancel_requested(self) -> bool:
+        return self._canceled or (
+            self.cancel_event is not None and self.cancel_event.is_set()
+        )
 
     # Instance-method seams (unit tests bind fakes here).
     def _open_source(self) -> Any:
@@ -88,6 +97,16 @@ class CloneWorker(QThread):
 
     def _read_chunk(self, handle: Any, count: int) -> bytes:
         return read_bytes(handle, count)
+
+    def _read_target_chunk(self, handle: Any, count: int) -> bytes:
+        return read_bytes(handle, count)
+
+    def _seek(self, handle: Any, offset: int) -> None:
+        position = ctypes.c_longlong()
+        if not kernel32().SetFilePointerEx(
+            handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
+        ):
+            raise OSError(f"could not seek clone handle to byte {offset:,}")
 
     def _write_chunk(self, handle: Any, data: bytes) -> None:
         write_bytes(handle, data)
@@ -135,7 +154,7 @@ class CloneWorker(QThread):
             durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
             sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
             while done < total:
-                if self._canceled:
+                if self._cancel_requested():
                     break
                 chunk_start = time.perf_counter()
                 data = self._read_chunk(
@@ -162,9 +181,10 @@ class CloneWorker(QThread):
                 self.speed_mbps.emit(speed)
                 self.written_bytes.emit(done)
                 self.eta_seconds.emit(int(remaining))
-            if not self._canceled:
+            if not self._cancel_requested():
                 self.phase.emit("Flushing")
                 self._flush(target)
+                self._verify_clone(source, target, total)
         except Exception as exc:
             self.finished.emit(False, str(exc))
             return
@@ -173,7 +193,42 @@ class CloneWorker(QThread):
             if target is not None:
                 kernel32().CloseHandle(target)
 
-        if self._canceled:
+        if self._cancel_requested():
             self.finished.emit(False, "cancelled")
             return
         self.finished.emit(True, "")
+
+    def _verify_clone(self, source: Any, target: Any, total: int) -> None:
+        """Read both devices back and fail on the first differing region."""
+        self._seek(source, 0)
+        self._seek(target, 0)
+        self.phase.emit("Verifying clone")
+        checked = 0
+        while checked < total:
+            if self._cancel_requested():
+                return
+            count = min(self.CHUNK_SIZE, total - checked)
+            source_data = self._read_chunk(source, count)
+            target_data = self._read_target_chunk(target, count)
+            if source_data != target_data:
+                limit = min(len(source_data), len(target_data))
+                mismatch = next(
+                    (
+                        index
+                        for index in range(limit)
+                        if source_data[index] != target_data[index]
+                    ),
+                    limit,
+                )
+                raise OSError(
+                    f"clone verification failed at byte {checked + mismatch:,}"
+                )
+            if len(source_data) != len(target_data):
+                raise OSError(
+                    f"clone verification failed at byte {checked + limit:,}"
+                )
+            checked += len(source_data)
+            self.progress.emit(checked / total * 100.0)
+            self.written_bytes.emit(checked)
+            if not source_data:
+                raise OSError("clone verification read ended early")

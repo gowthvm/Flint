@@ -73,7 +73,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core import checksum as checksum_mod
-from core import fleet, settings
+from core import fleet, jobs, settings
 from core import iso as iso_mod
 from core.backup import BackupWorker
 from core.bootcheck import probe_bootability
@@ -82,7 +82,8 @@ from core.drives import DriveDetector, DrivePoller
 from core.eject import eject_drive
 from core.fleet import FleetSession
 from core.history import (
-    append_history,
+    _APP_DIR,
+    append_audited_history,
     clear_history,
     export_history,
     flash_report,
@@ -102,7 +103,7 @@ from core.updates import (
 from core.verify import VerifyWorker
 from core.version import APP_VERSION
 from core.wipe import WipeWorker
-from core.writer import UsbWriter
+from core.writer import DEFAULT_CHUNK_SIZE, UsbWriter
 from ui import dialogs, style
 from ui.chamfer import ChamferPanel
 
@@ -1285,6 +1286,9 @@ class MainWindow(QMainWindow):
         self._clone_worker: CloneWorker | None = None
         self._backup_digest = ""
         self._backup_out = ""
+        self._backup_drive: dict[str, Any] | None = None
+        self._clone_source: dict[str, Any] | None = None
+        self._clone_target: dict[str, Any] | None = None
         self._queue_items: list[str] = []
         self._queue_index = 0
         self._queue_active = False
@@ -3487,6 +3491,12 @@ class MainWindow(QMainWindow):
         fleet_banner_row.addWidget(self._fleet_label, 1)
         fleet_banner_row.addWidget(self._fleet_stop_btn)
         queue_col.addWidget(self._fleet_banner)
+        self._fleet_status = QLabel("")
+        self._fleet_status.setObjectName("capLabel")
+        self._fleet_status.setProperty("colorRole", "muted")
+        self._fleet_status.setWordWrap(True)
+        self._fleet_status.setVisible(False)
+        queue_col.addWidget(self._fleet_status)
 
         self._queue_block = queue_block
         col.addWidget(queue_block)
@@ -4331,6 +4341,83 @@ class MainWindow(QMainWindow):
 
         Also used to retry a flash after a failed verification.
         """
+        if self._fleet_busy and writer_kwargs.get("write_mode", "auto") != "filecopy":
+            try:
+                source_size = os.path.getsize(iso)
+                target_size = int(
+                    drive.get("size_bytes")
+                    or drive.get("size_gb", 0) * 1_000_000_000
+                )
+                fingerprint = str(
+                    drive.get("serial") or drive.get("physical_path") or drive_path
+                )
+                chunk_size = int(
+                    writer_kwargs.get("chunk_size", DEFAULT_CHUNK_SIZE)
+                )
+                if chunk_size < 4096:
+                    chunk_size = DEFAULT_CHUNK_SIZE
+                chunk_size -= chunk_size % 4096
+                source_digest = jobs.source_sha256(iso)
+                options = {
+                    "chunk_size": chunk_size,
+                    "verify_after_write": bool(
+                        writer_kwargs.get("verify_after_write", False)
+                    ),
+                    "verify_sha256": bool(
+                        writer_kwargs.get("verify_sha256", True)
+                    ),
+                    "bad_block_scan": bool(
+                        writer_kwargs.get("bad_block_scan", False)
+                    ),
+                }
+                manifest_path: Path | None = None
+                manifest: jobs.JobManifest | None = None
+                jobs_dir = _APP_DIR / "jobs"
+                if jobs_dir.is_dir():
+                    for candidate_path in jobs_dir.glob("*.json"):
+                        try:
+                            candidate = jobs.load_manifest(candidate_path)
+                        except (OSError, TypeError, ValueError):
+                            continue
+                        try:
+                            candidate.validate_resume(
+                                source_path=iso,
+                                source_size=source_size,
+                                source_sha256=source_digest,
+                                target_fingerprint=fingerprint,
+                                target_size=target_size,
+                                options=options,
+                            )
+                        except ValueError:
+                            continue
+                        if candidate.state in {"writing", "resumable", "queued"}:
+                            manifest_path = candidate_path
+                            manifest = candidate
+                            break
+                if manifest is None:
+                    manifest = jobs.JobManifest(
+                        source_path=iso,
+                        source_size=source_size,
+                        source_sha256=source_digest,
+                        target_fingerprint=fingerprint,
+                        target_size=target_size,
+                        options=options,
+                        state="writing",
+                    )
+                    manifest_path = _APP_DIR / "jobs" / f"{manifest.job_id}.json"
+                manifest.state = "writing"
+                manifest.error = None
+                assert manifest_path is not None
+                jobs.save_manifest(manifest_path, manifest)
+                writer_kwargs = {
+                    **writer_kwargs,
+                    "resume": True,
+                    "target_fingerprint": fingerprint,
+                    "manifest_path": str(manifest_path),
+                }
+            except (OSError, ValueError):
+                logger.exception("could not create fleet job manifest")
+
         self._progress.reset()
         self._done_bar.setVisible(False)
         self._set_controls_enabled(False)
@@ -4734,7 +4821,7 @@ class MainWindow(QMainWindow):
                 drive_serial=target.get("serial"),
                 wipe_verified=self._format_wipe_verify(),
             )
-            append_history(report)
+            append_audited_history(report)
         # Copy-report must offer the wipe report (not a previous flash's).
         self._last_report = report
         if self._tray is not None:
@@ -5212,6 +5299,10 @@ class MainWindow(QMainWindow):
         self._fleet_image_index = 0
         self._fleet_drive = None
         self._fleet_banner.setVisible(True)
+        self._fleet_status.setVisible(True)
+        self._fleet_status.setText(
+            "Targets will appear here as they are detected and processed."
+        )
         self._fleet_update_banner(
             "Armed \u2014 waiting for a drive that fits the queue\u2026"
         )
@@ -5226,6 +5317,8 @@ class MainWindow(QMainWindow):
         self._fleet_image_index = 0
         self._fleet_drive = None
         self._fleet_banner.setVisible(False)
+        self._fleet_status.setVisible(False)
+        self._fleet_status.clear()
         if self._fleet_toggle.isChecked():
             self._fleet_toggle.setChecked(False)
         if reason and not was_busy:
@@ -5262,6 +5355,7 @@ class MainWindow(QMainWindow):
         self._fleet_busy = True
         name = drive.get("model") or drive.get("name") or "the drive"
         self._fleet_update_banner(f"Writing to {name}\u2026")
+        self._fleet_update_status(drive, "writing")
         self._start_queue_item(0, drive)
 
     def _fleet_finish_image(self, succeeded: bool) -> None:
@@ -5271,6 +5365,8 @@ class MainWindow(QMainWindow):
         self._fleet_busy = False
         drive = self._fleet_drive
         if not succeeded:
+            if drive is not None:
+                self._fleet_update_status(drive, "failed")
             self._fleet_drive = None
             self._disarm_fleet()
             dialogs.completion(
@@ -5295,6 +5391,7 @@ class MainWindow(QMainWindow):
             self._start_queue_item(self._fleet_image_index, drive)
             return
         session.mark_flashed(drive)
+        self._fleet_update_status(drive, "passed")
         self._fleet_drive = None
         self._fleet_image_index = 0
         self._fleet_update_banner(
@@ -5304,6 +5401,20 @@ class MainWindow(QMainWindow):
 
     def _fleet_update_banner(self, text: str) -> None:
         self._fleet_label.setText(text)
+
+    def _fleet_update_status(self, drive: dict[str, Any], state: str) -> None:
+        """Update the compact per-target campaign status display."""
+        serial = drive.get("serial") or drive.get("physical_path") or "unknown"
+        lines = self._fleet_status.text().splitlines()
+        prefix = f"{serial}:"
+        replacement = f"{prefix} {state}"
+        for index, line in enumerate(lines):
+            if line.startswith(prefix):
+                lines[index] = replacement
+                break
+        else:
+            lines.append(replacement)
+        self._fleet_status.setText("\n".join(lines))
 
     def _scroll_to_progress(self, scroll: QScrollArea) -> None:
         """Progress area is now fixed; no scrolling needed."""
@@ -5546,7 +5657,28 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Warning,
                     4000,
                 )
+        target = self._backup_drive if is_backup else self._clone_target
+        source = self._clone_source if not is_backup else None
+        operation = "backup" if is_backup else "clone"
+        if target is not None:
+            report = flash_report(
+                f"\u2014 {operation} \u2014",
+                target.get("model") or target.get("name") or operation,
+                time.perf_counter() - self._write_started,
+                verified=bool(ok),
+                success=bool(ok),
+                written_sha256=self._backup_digest if is_backup else None,
+                drive_serial=target.get("serial"),
+            )
+            report["operation"] = operation
+            if source is not None:
+                report["source_drive_serial"] = source.get("serial")
+            append_audited_history(report)
+            self._last_report = report
         self._backup_out = ""
+        self._backup_drive = None
+        self._clone_source = None
+        self._clone_target = None
         self._update_controls_state()
         if not ok:
             dialogs.completion(
@@ -5738,6 +5870,7 @@ class MainWindow(QMainWindow):
         target = self._active_write_drive or self._current_drive
 
         boot: str | None = None
+        boot_status: str | None = None
         if (
             succeeded
             and target is not None
@@ -5745,19 +5878,22 @@ class MainWindow(QMainWindow):
         ):
             try:
                 probe = probe_bootability(self._drive_path_for(target) or "")
+                boot_status = str(probe.get("status") or "warning")
                 if probe.get("gpt") and probe.get("mbr_signature"):
-                    boot = "GPT + MBR"
+                    layout = "GPT + MBR"
                 elif probe.get("gpt"):
-                    boot = "GPT (UEFI)"
+                    layout = "GPT (UEFI)"
                 elif probe.get("mbr_signature"):
-                    boot = "MBR (legacy)"
+                    layout = "MBR (legacy)"
                 elif probe.get("efi_partition"):
-                    boot = "MBR (bootable)"
+                    layout = "MBR (bootable)"
                 else:
-                    boot = "no boot signature"
+                    layout = "no boot signature"
+                boot = layout
             except Exception:
                 logger.exception("probe_bootability failed")
                 boot = "unknown"
+                boot_status = "failed"
 
         if succeeded:
             self._progress.set_done()
@@ -5826,9 +5962,10 @@ class MainWindow(QMainWindow):
                 written_sha256=verified_sha if succeeded else None,
                 drive_serial=target.get("serial"),
                 bootable=boot,
+                boot_status=boot_status,
                 avg_mbps=avg_mbps,
             )
-            append_history(report)
+            append_audited_history(report)
         self._last_report = report
         self._active_write_drive = None
         if self._tray is not None:

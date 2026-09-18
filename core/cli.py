@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from typing import Any
 
 from PyQt6.QtCore import QCoreApplication, QEventLoop
@@ -71,6 +72,9 @@ _VALUE_OPTS = {
     "partition-scheme",
     "filesystem",
     "write-mode",
+    "parallel",
+    "job",
+    "format",
 }
 _FLAG_OPTS = {
     "verify",
@@ -85,6 +89,11 @@ _FLAG_OPTS = {
     "resume",
     "bypass-tpm",
     "check-fake",
+    "integrity",
+    "status",
+    "cancel",
+    "retry",
+    "run",
 }
 
 _METHODS = ("zero", "random", "nist", "dod")
@@ -387,7 +396,7 @@ _COMMAND_HELP: dict[str, str] = {
     "flash-all": (
         "flint flash-all --image <file> [--image <file> ...]\n"
         "                [--confirm ARM | --yes] [--timeout <seconds>]\n"
-        "                [--skip-flashed] [--quiet]\n"
+        "                [--skip-flashed] [--parallel <1-8>] [--quiet]\n"
         "  Fleet mode for scripts: flash every queued image to every drive\n"
         "  that is (or becomes) plugged in, one drive after another, until\n"
         "  the budget expires. A drive is skipped if any image does not fit;\n"
@@ -399,8 +408,20 @@ _COMMAND_HELP: dict[str, str] = {
         "  --timeout <seconds>    total budget; stop watching after this\n"
         "                         (default 3600); interrupt earlier with Ctrl+C\n"
         "  --skip-flashed         skip drives already flashed with the same image\n"
+        "  --parallel <1-8>      concurrent targets for one-image fleets (default 1)\n"
         "  --quiet                suppress progress and informational messages\n"
         "  Example: flint flash-all --image C:\\img\\agent.iso --confirm ARM\n"
+    ),
+    "deploy": (
+        "flint deploy --image <file> --drive <serial|letter|path> [--drive ...]\n"
+        "             [--confirm ARM | --yes] [--parallel <1-8>]\n"
+        "  Deploy one image to explicit target drives concurrently.\n"
+        "  Each target is tracked independently and failures do not erase\n"
+        "  the result of other targets. Default concurrency is 2.\n"
+        "  --status               list persisted deployment jobs\n"
+        "  --cancel --job <id>    cancel a queued/resumable job\n"
+        "  --retry --job <id>     return a failed job to queued state\n"
+        "  --run --job <id>       execute or resume a persisted job\n"
     ),
     "doctor": (
         "flint doctor\n"
@@ -409,6 +430,12 @@ _COMMAND_HELP: dict[str, str] = {
         "  drive list.\n"
         "  Options: --json\n"
         "  Example: flint doctor\n"
+    ),
+    "report": (
+        "flint report [--out <file>] [--format json|csv|markdown] [--integrity]\n"
+        "  Export local operation history or verify its hash-chain integrity.\n"
+        "  --out <file>  copy the history JSON to a destination path\n"
+        "  --integrity   fail if an audited record was changed or reordered\n"
     ),
     "completions": (
         "flint completions [--shell powershell|bash|zsh]\n"
@@ -1000,6 +1027,9 @@ def _cmd_flash(opts: dict[str, object]) -> int:
         verify_after_write=bool(opts.get("verify")) or _env_flag("FLINT_VERIFY"),
         resume=bool(opts.get("resume")),
         bypass_tpm=bool(opts.get("bypass-tpm")),
+        target_fingerprint=str(
+            drive.get("serial") or drive.get("physical_path")
+        ),
     )
     ok, message = _run_worker(worker, "flash")
     if not ok:
@@ -1182,6 +1212,20 @@ def _cmd_backup(opts: dict[str, object]) -> int:
     )
     worker = BackupWorker(drive["physical_path"], out, letters=letters)
     ok, message = _run_worker(worker, "backup")
+    from core.history import append_audited_history
+
+    append_audited_history(
+        {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "operation": "backup",
+            "success": bool(ok),
+            "iso": os.path.basename(out),
+            "drive_serial": _serial_of(drive),
+            "duration": None,
+            "verified": bool(ok),
+            "error": None if ok else message,
+        }
+    )
     if not ok:
         return _result(
             "canceled" if message == "cancelled" else "fail",
@@ -1241,6 +1285,20 @@ def _cmd_clone(opts: dict[str, object]) -> int:
         target_letters=target.get("letters") or [],
     )
     ok, message = _run_worker(worker, "clone")
+    from core.history import append_audited_history
+
+    append_audited_history(
+        {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "operation": "clone",
+            "success": bool(ok),
+            "source_drive_serial": _serial_of(source),
+            "drive_serial": _serial_of(target),
+            "verified": bool(ok),
+            "duration": None,
+            "error": None if ok else message,
+        }
+    )
     if not ok:
         return _result(
             "canceled" if message == "cancelled" else "fail",
@@ -1385,6 +1443,12 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
         return _result("fail", "--timeout must be a number of seconds", EXIT_USAGE)
     if budget <= 0:
         return _result("fail", "--timeout must be positive", EXIT_USAGE)
+    try:
+        parallel = int(str(opts.get("parallel", "1")))
+    except ValueError:
+        return _result("fail", "--parallel must be a number from 1 to 8", EXIT_USAGE)
+    if not 1 <= parallel <= 8:
+        return _result("fail", "--parallel must be a number from 1 to 8", EXIT_USAGE)
 
     session = FleetSession(images=images)
     skip = bool(opts.get("skip-flashed"))
@@ -1396,6 +1460,7 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
             _eprint(f"    {i}. {img}")
         _eprint(f"  timeout: {budget}s")
         _eprint(f"  skip-flashed: {skip}")
+        _eprint(f"  parallel: {parallel}")
         _eprint(f"  verify: {verify}")
         return _result("ok", "dry run — no changes made", EXIT_OK)
     _eprint(
@@ -1409,15 +1474,118 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
     try:
         while time.monotonic() < end:
             drives = _detect_drives(detector)
-            drive = pick_candidate(
+            if parallel > 1 and len(session.images) == 1:
+                from core.campaigns import Campaign, CampaignJob, CampaignRunner
+                from core.fleet import drive_fingerprint
+                from core.history import _APP_DIR
+                from core.jobs import JobManifest, save_manifest, source_sha256
+
+                candidates: list[dict[str, Any]] = []
+                available = list(drives)
+                while len(candidates) < parallel:
+                    candidate = pick_candidate(
+                        available,
+                        session,
+                        now=time.monotonic(),
+                        skip_flashed=skip,
+                    )
+                    if candidate is None:
+                        break
+                    candidates.append(candidate)
+                    fingerprint = drive_fingerprint(candidate)
+                    available = [
+                        drive
+                        for drive in available
+                        if drive_fingerprint(drive) != fingerprint
+                    ]
+                if candidates:
+                    image = session.images[0]
+                    image_size = os.path.getsize(image)
+                    digest = source_sha256(image)
+                    jobs: list[CampaignJob] = []
+                    for drive in candidates:
+                        capacity = int(
+                            drive.get("size_bytes")
+                            or drive.get("size_gb", 0) * 1_000_000_000
+                        )
+                        fingerprint = str(
+                            drive.get("serial") or drive.get("physical_path")
+                        )
+                        manifest = JobManifest(
+                            source_path=image,
+                            source_size=image_size,
+                            source_sha256=digest,
+                            target_fingerprint=fingerprint,
+                            target_size=capacity,
+                            options={
+                                "chunk_size": 8 * 1024 * 1024,
+                                "verify_after_write": verify,
+                                "verify_sha256": True,
+                                "bad_block_scan": False,
+                            },
+                            state="queued",
+                        )
+                        path = _APP_DIR / "jobs" / f"{manifest.job_id}.json"
+                        save_manifest(path, manifest)
+                        jobs.append(CampaignJob(manifest, str(path)))
+
+                    def run_campaign_job(
+                        job: CampaignJob,
+                        batch_candidates: list[dict[str, Any]] = candidates,
+                        batch_image: str = image,
+                    ) -> None:
+                        drive = next(
+                            item
+                            for item in batch_candidates
+                            if str(
+                                item.get("serial") or item.get("physical_path")
+                            )
+                            == job.manifest.target_fingerprint
+                        )
+                        letters = drive.get("letters") or (
+                            [drive["letter"]] if drive.get("letter") else []
+                        )
+                        worker = UsbWriter(
+                            batch_image,
+                            str(drive["physical_path"]),
+                            letters=letters,
+                            verify_after_write=verify,
+                            bypass_tpm=bool(opts.get("bypass-tpm")),
+                            target_fingerprint=job.manifest.target_fingerprint,
+                            manifest_path=job.manifest_path,
+                            cancel_event=job.cancel_event,
+                        )
+                        ok, message = _run_worker(worker, "flash-all")
+                        if not ok:
+                            raise RuntimeError(message)
+
+                    campaign = Campaign(jobs, max_workers=parallel)
+                    counts = CampaignRunner(campaign, run_campaign_job).run()
+                    if counts["failed"] or counts["cancelled"]:
+                        return _result(
+                            "fail",
+                            f"fleet campaign stopped: {counts['passed']} passed, "
+                            f"{counts['failed']} failed, "
+                            f"{counts['cancelled']} cancelled",
+                            EXIT_FAIL,
+                        )
+                    for drive in candidates:
+                        session.mark_flashed(drive)
+                    _eprint(
+                        f"--- {session.done_count} drive(s) flashed, "
+                        "waiting for more\u2026"
+                    )
+                    continue
+            drive_candidate = pick_candidate(
                 drives,
                 session,
                 now=time.monotonic(),
                 skip_flashed=skip,
             )
-            if drive is None:
+            if drive_candidate is None:
                 time.sleep(2)
                 continue
+            drive = drive_candidate
             name = drive.get("model") or drive.get("name") or "a drive"
             serial = _serial_of(drive)
             _eprint(f"--- flashing {name} (serial={serial!r})")
@@ -1453,6 +1621,251 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
     return _result(
         "ok", f"fleet complete: {session.done_count} drive(s) flashed", EXIT_OK
     )
+
+
+def _cmd_deploy(opts: dict[str, object]) -> int:
+    """Deploy the selected images to explicit drives as one campaign."""
+    from core.campaigns import Campaign, CampaignJob, CampaignRunner
+    from core.history import _APP_DIR
+    from core.jobs import JobManifest, load_manifest, save_manifest, source_sha256
+
+    jobs_dir = _APP_DIR / "jobs"
+    manifest_paths = sorted(jobs_dir.glob("*.json")) if jobs_dir.is_dir() else []
+    if opts.get("status"):
+        records = []
+        for path in manifest_paths:
+            try:
+                manifest = load_manifest(path)
+            except (OSError, TypeError, ValueError):
+                continue
+            records.append(
+                {
+                    "job": manifest.job_id,
+                    "target": manifest.target_fingerprint,
+                    "source": manifest.source_path,
+                    "state": manifest.state,
+                    "checkpoint": manifest.checkpoint_bytes,
+                    "error": manifest.error,
+                }
+            )
+        if _JSON:
+            _emit_json(type="deployment_jobs", jobs=records)
+        else:
+            for record in records:
+                _print(
+                    f"JOB {record['job']} {record['state']} "
+                    f"target={record['target']} checkpoint={record['checkpoint']}"
+                )
+        return _result("ok", f"{len(records)} deployment job(s)", EXIT_OK)
+
+    if opts.get("cancel") or opts.get("retry") or opts.get("run"):
+        job_id = str(opts.get("job", "")).strip()
+        if not job_id:
+            return _result("fail", "--job is required for --cancel/--retry", EXIT_USAGE)
+        path = jobs_dir / f"{job_id}.json"
+        try:
+            manifest = load_manifest(path)
+        except (OSError, TypeError, ValueError):
+            return _result("fail", f"deployment job not found: {job_id}", EXIT_USAGE)
+        if opts.get("cancel"):
+            if manifest.state in {"passed", "failed", "cancelled"}:
+                return _result("fail", f"job is already {manifest.state}", EXIT_USAGE)
+            manifest.state = "cancelled"
+            manifest.error = "cancelled by operator"
+            save_manifest(path, manifest)
+            return _result("ok", f"deployment job cancelled: {job_id}", EXIT_OK)
+        if opts.get("run"):
+            if not os.path.isfile(manifest.source_path):
+                return _result("fail", "job source image is missing", EXIT_USAGE)
+            drives = _detect_drives()
+            drive = next(
+                (
+                    item
+                    for item in drives
+                    if str(item.get("serial") or item.get("physical_path"))
+                    == manifest.target_fingerprint
+                ),
+                None,
+            )
+            if drive is None:
+                return _result("fail", "job target drive is not connected", EXIT_USAGE)
+            if _is_system_disk(drive):
+                return _result("fail", "refusing to run on the system disk", EXIT_USAGE)
+            from core.writer import UsbWriter
+
+            letters = drive.get("letters") or (
+                [drive["letter"]] if drive.get("letter") else []
+            )
+            options = dict(manifest.options)
+            worker = UsbWriter(
+                manifest.source_path,
+                str(drive["physical_path"]),
+                letters=letters,
+                chunk_size=int(options.get("chunk_size", 8 * 1024 * 1024)),
+                verify_after_write=bool(options.get("verify_after_write", False)),
+                verify_sha256=bool(options.get("verify_sha256", True)),
+                bad_block_scan=bool(options.get("bad_block_scan", False)),
+                resume=True,
+                target_fingerprint=manifest.target_fingerprint,
+                manifest_path=str(path),
+            )
+            manifest.state = "writing"
+            manifest.error = None
+            save_manifest(path, manifest)
+            ok, message = _run_worker(worker, "deploy")
+            if ok:
+                manifest.state = "passed"
+                manifest.error = None
+            else:
+                manifest.state = "resumable" if message != "cancelled" else "cancelled"
+                manifest.error = message
+            save_manifest(path, manifest)
+            return _result(
+                "ok" if ok else ("canceled" if message == "cancelled" else "fail"),
+                f"deployment job {'completed' if ok else 'failed'}: {job_id}"
+                if ok
+                else message,
+                EXIT_OK if ok else (EXIT_CANCELLED if message == "cancelled" else EXIT_FAIL),
+            )
+        if manifest.state not in {"failed", "cancelled", "resumable"}:
+            return _result("fail", f"job is not retryable: {manifest.state}", EXIT_USAGE)
+        manifest.state = "queued"
+        manifest.error = None
+        save_manifest(path, manifest)
+        return _result("ok", f"deployment job queued: {job_id}", EXIT_OK)
+
+    raw_images = opts.get("images")
+    raw_drives = opts.get("drives")
+    images = [str(item) for item in raw_images] if isinstance(raw_images, list) else []
+    drive_specs = [str(item) for item in raw_drives] if isinstance(raw_drives, list) else []
+    if not images:
+        return _result("fail", "deploy requires at least one --image <file>", EXIT_USAGE)
+    if len(images) != 1:
+        return _result(
+            "fail",
+            "deploy accepts exactly one --image; use queue for multiple images",
+            EXIT_USAGE,
+        )
+    if not drive_specs:
+        return _result("fail", "deploy requires at least one --drive <serial|letter|path>", EXIT_USAGE)
+    for image in images:
+        if not os.path.isfile(image):
+            return _result("fail", f"--image file not found: {image}", EXIT_USAGE)
+    issue = _arm_fleet_confirmation(
+        str(opts.get("confirm", "")) if opts.get("confirm") else None,
+        image_count=len(images),
+        assume_yes=bool(opts.get("yes")),
+    )
+    if issue:
+        return _result("fail", issue, EXIT_USAGE)
+    try:
+        parallel = int(str(opts.get("parallel", "2")))
+    except ValueError:
+        return _result("fail", "--parallel must be a number from 1 to 8", EXIT_USAGE)
+    if not 1 <= parallel <= 8:
+        return _result("fail", "--parallel must be a number from 1 to 8", EXIT_USAGE)
+
+    drives = _detect_drives()
+    selected: list[dict[str, Any]] = []
+    for spec in drive_specs:
+        drive = _resolve_drive(spec, drives)
+        if drive is None:
+            return _result("fail", f"drive not found: {spec}", EXIT_USAGE)
+        if _is_system_disk(drive):
+            return _result("fail", "refusing to deploy to the system disk", EXIT_USAGE)
+        if any(d.get("physical_path") == drive.get("physical_path") for d in selected):
+            return _result("fail", f"duplicate target drive: {spec}", EXIT_USAGE)
+        selected.append(drive)
+
+    verify = bool(opts.get("verify")) or _env_flag("FLINT_VERIFY")
+    if opts.get("dry-run"):
+        _eprint("DRY RUN - would deploy:")
+        _eprint(f"  images: {len(images)}")
+        _eprint(f"  drives: {len(selected)}")
+        _eprint(f"  parallel: {parallel}")
+        _eprint(f"  verify: {verify}")
+        return _result("ok", "dry run - no changes made", EXIT_OK)
+
+    from core.writer import DEFAULT_CHUNK_SIZE, UsbWriter
+
+    image = images[0]
+    image_size = os.path.getsize(image)
+    image_digest = source_sha256(image)
+    options = {
+        "chunk_size": DEFAULT_CHUNK_SIZE,
+        "verify_after_write": verify,
+        "verify_sha256": True,
+        "bad_block_scan": False,
+    }
+    jobs: list[CampaignJob] = []
+    for drive in selected:
+        capacity = int(drive.get("size_bytes") or drive.get("size_gb", 0) * 1_000_000_000)
+        if capacity < image_size:
+            return _result("fail", f"image is larger than target {_serial_of(drive)}", EXIT_USAGE)
+        fingerprint = str(drive.get("serial") or drive.get("physical_path"))
+        manifest = JobManifest(
+            source_path=image,
+            source_size=image_size,
+            source_sha256=image_digest,
+            target_fingerprint=fingerprint,
+            target_size=capacity,
+            options=options,
+            state="queued",
+        )
+        path = _APP_DIR / "jobs" / f"{manifest.job_id}.json"
+        save_manifest(path, manifest)
+        jobs.append(CampaignJob(manifest, str(path)))
+
+    def run_job(job: CampaignJob) -> None:
+        drive = next(
+            item for item in selected
+            if str(item.get("serial") or item.get("physical_path"))
+            == job.manifest.target_fingerprint
+        )
+        letters = drive.get("letters") or ([drive["letter"]] if drive.get("letter") else [])
+        worker = UsbWriter(
+            image,
+            str(drive["physical_path"]),
+            letters=letters,
+            verify_after_write=verify,
+            bypass_tpm=bool(opts.get("bypass-tpm")),
+            target_fingerprint=job.manifest.target_fingerprint,
+            manifest_path=job.manifest_path,
+            cancel_event=job.cancel_event,
+        )
+        ok, message = _run_worker(worker, "deploy")
+        if not ok:
+            raise RuntimeError(message)
+
+    def publish(job: CampaignJob) -> None:
+        if _JSON:
+            _emit_json(
+                type="campaign_job",
+                campaign=campaign.campaign_id,
+                job=job.manifest.job_id,
+                target=job.manifest.target_fingerprint,
+                state=job.manifest.state,
+                error=job.manifest.error,
+            )
+        else:
+            _eprint(
+                f"deploy {job.manifest.target_fingerprint}: {job.manifest.state}"
+            )
+
+    campaign = Campaign(jobs, max_workers=parallel)
+    _eprint(
+        f"deploy campaign {campaign.campaign_id}: {len(jobs)} target(s), "
+        f"parallel={parallel}"
+    )
+    counts = CampaignRunner(campaign, run_job, on_state=publish).run()
+    if counts["failed"] or counts["cancelled"]:
+        return _result(
+            "fail",
+            f"deploy complete: {counts['passed']} passed, "
+            f"{counts['failed']} failed, {counts['cancelled']} cancelled",
+            EXIT_FAIL,
+        )
+    return _result("ok", f"deploy complete: {counts['passed']} target(s) passed", EXIT_OK)
 
 
 def _cmd_doctor(opts: dict[str, object]) -> int:
@@ -1522,12 +1935,60 @@ def _cmd_doctor(opts: dict[str, object]) -> int:
     )
 
 
+def _cmd_report(opts: dict[str, object]) -> int:
+    from core.history import (
+        export_history,
+        export_history_csv,
+        export_history_markdown,
+        load_history,
+        verify_history_integrity,
+    )
+
+    if opts.get("integrity"):
+        valid, index = verify_history_integrity()
+        if not valid:
+            message = f"history integrity failed at record {index}"
+            if _JSON:
+                _emit_json(type="report", integrity=False, record=index)
+            return _result("fail", message, EXIT_FAIL)
+        count = len(load_history())
+        if _JSON:
+            _emit_json(type="report", integrity=True, records=count)
+        else:
+            _print(f"history integrity: valid ({count} record(s))")
+
+    output = str(opts.get("out", "")).strip()
+    if output:
+        format_name = str(opts.get("format", "json")).lower()
+        exporters = {
+            "json": export_history,
+            "csv": export_history_csv,
+            "markdown": export_history_markdown,
+        }
+        exporter = exporters.get(format_name)
+        if exporter is None:
+            return _result("fail", "--format must be json, csv, or markdown", EXIT_USAGE)
+        if not exporter(output):
+            return _result("fail", f"could not export history to {output}", EXIT_FAIL)
+        if _JSON:
+            _emit_json(type="report_export", path=output)
+        else:
+            _print(f"history exported: {output}")
+    elif not opts.get("integrity"):
+        entries = load_history()
+        if _JSON:
+            _emit_json(type="report", records=entries)
+        else:
+            _print(json.dumps(entries, indent=2))
+    return _result("ok", "report complete", EXIT_OK)
+
+
 _POWERSHELL_COMPLETION = """# flint PowerShell completion
 # Save to $PROFILE:  flint completions | Out-File -Append $PROFILE
 Register-ArgumentCompleter -CommandName flint -Native -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','doctor','completions','help','scan','--version')
-    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--resume','--json','--quiet','--help','--version','--retries','--yes')
+    $commands = @('list','flash','verify','wipe','backup','clone','queue','flash-all','deploy','doctor','report','completions','help','scan','--version')
+    $options  = @('--image','--drive','--confirm','--verify','--out','--file','--method','--from','--to','--sha256','--timeout','--parallel','--resume','--json','--quiet','--integrity','--help','--version','--retries','--yes')
     try {
         $raw = & flint list --json 2>$null
         $drives = @()
@@ -1573,8 +2034,8 @@ _flint_completions() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands='list flash verify wipe backup clone queue flash-all doctor completions help scan'
-    options='--image --drive --confirm --verify --out --file --method --from --to --sha256 --timeout --resume --json --quiet --help --version --retries --yes --dry-run --skip-flashed --copy-report'
+    commands='list flash verify wipe backup clone queue flash-all deploy doctor report completions help scan'
+    options='--image --drive --confirm --verify --out --file --method --from --to --sha256 --timeout --parallel --resume --json --quiet --integrity --help --version --retries --yes --dry-run --skip-flashed --copy-report'
 
     if [[ ${cur} == -* ]]; then
         COMPREPLY=( $(compgen -W "${options}" -- ${cur}) )
@@ -1607,7 +2068,9 @@ _flint() {
         'clone:Copy one drive to another'
         'queue:Flash multiple images from a file'
         'flash-all:Fleet mode - flash every queued image to every drive'
+        'deploy:Deploy one image to explicit drives concurrently'
         'doctor:Print diagnostic report'
+        'report:Export or verify operation history'
         'completions:Print shell completion script'
         'scan:Read every sector to find unreadable media'
         'help:Show help'
@@ -1624,8 +2087,10 @@ _flint() {
         '--to[target drive serial or letter]:'
         '--sha256[expected SHA-256 digest]:'
         '--timeout[timeout in seconds]:'
+        '--parallel[concurrent deployment targets]:'
         '--json[NDJSON machine-readable output]'
         '--quiet[suppress progress messages]'
+        '--integrity[verify audited history records]'
         '--help[show help]'
         '--version[show version]'
         '--retries[retries per failed read]:'
@@ -1785,7 +2250,9 @@ _COMMANDS = {
     "clone": _cmd_clone,
     "queue": _cmd_queue,
     "flash-all": _cmd_flash_all,
+    "deploy": _cmd_deploy,
     "doctor": _cmd_doctor,
+    "report": _cmd_report,
     "completions": _cmd_completions,
     "scan": _cmd_scan,
 }
@@ -1831,6 +2298,7 @@ _COMMAND_OPTS: dict[str, frozenset[str]] = {
             "confirm",
             "yes",
             "timeout",
+            "parallel",
             "skip-flashed",
             "verify",
             "bypass-tpm",
@@ -1838,7 +2306,26 @@ _COMMAND_OPTS: dict[str, frozenset[str]] = {
             "quiet",
         }
     ),
+    "deploy": frozenset(
+        {
+            "image",
+            "drive",
+            "confirm",
+            "yes",
+            "parallel",
+            "job",
+            "status",
+            "cancel",
+            "retry",
+            "run",
+            "verify",
+            "bypass-tpm",
+            "dry-run",
+            "quiet",
+        }
+    ),
     "doctor": frozenset({"quiet"}),
+    "report": frozenset({"out", "format", "integrity", "quiet"}),
     "completions": frozenset({"shell", "quiet"}),
     "scan": frozenset({"drive", "retries", "verbose", "quiet"}),
 }
@@ -1935,17 +2422,26 @@ def main(argv: list[str] | None = None) -> int:
         _eprint(_usage())
         return EXIT_USAGE
 
-    if command in ("list", "doctor", "completions"):
+    if command in ("list", "doctor", "report", "completions") or (
+        command == "deploy"
+        and any(opts.get(name) for name in ("status", "cancel", "retry", "run"))
+    ):
         # No privileges needed: skip the UAC relaunch.
         return _COMMANDS[command](opts)
 
-    if command == "flash-all":
+    if command in ("flash-all", "deploy"):
         images = [
             rest[i + 1]
             for i in range(len(rest) - 1)
             if rest[i] == "--image"
         ]
         opts["images"] = images
+        if command == "deploy":
+            opts["drives"] = [
+                rest[i + 1]
+                for i in range(len(rest) - 1)
+                if rest[i] == "--drive"
+            ]
 
     # When running from a pip console-script launcher or frozen .exe,
     # sys.argv[0] is the launcher exe itself — pass it directly.
@@ -1958,7 +2454,7 @@ def main(argv: list[str] | None = None) -> int:
         return elevated
 
     _app = QCoreApplication.instance() or QCoreApplication([])
-    _DESTRUCTIVE = {"flash", "wipe", "clone", "backup", "queue", "flash-all"}
+    _DESTRUCTIVE = {"flash", "wipe", "clone", "backup", "queue", "flash-all", "deploy"}
     try:
         rc = _COMMANDS[command](opts)
         if rc == EXIT_OK and command in _DESTRUCTIVE:

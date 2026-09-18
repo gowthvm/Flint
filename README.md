@@ -2,6 +2,10 @@
 
 Write disk images to USB drives on Windows 10/11, then verify that every byte was written correctly.
 
+**Current release: 2.0.0** — durable deployment campaigns, safe resumable
+writes, bounded multi-drive deployment, audit reports, clone read-back
+verification, and structured boot-confidence diagnostics.
+
 [![Release](https://img.shields.io/github/v/release/gowthvm/Flint)](https://github.com/gowthvm/Flint/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/gowthvm/Flint/total)](https://github.com/gowthvm/Flint/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
@@ -62,6 +66,7 @@ by typing its serial, and the drive is read back after the write.*
 - **Flash history** — every operation is logged with an exportable report.
 - **Headless mode** — every feature is also a CLI command — `list`, `flash`,
   `verify`, `scan`, `wipe`, `backup`, `clone`, `queue`, `flash-all`,
+  `deploy`, `report`,
   `doctor`, `completions` — with machine-readable output and documented exit
   codes for scripts and CI.
 - **Portable or pip** — run `flint.exe` with no install, or
@@ -264,6 +269,8 @@ flint backup --drive E: --out backup.img [--confirm <serial>]
 flint clone  --from E: --to F: --confirm <serial of --to>
 flint queue  --file list.txt --drive E: --confirm <serial>
 flint flash-all --image image.iso [--image image2.iso ...] --confirm ARM [--timeout <seconds>]
+flint deploy --image image.iso --drive E: --drive F: --confirm ARM [--parallel 2]
+flint report --integrity
 flint doctor
 flint completions | Out-File -Append $PROFILE
 flint help [<command>]
@@ -278,6 +285,21 @@ flint help [<command>]
 - `flash-all` is fleet mode: it writes every `--image` to every drive that is —
   or becomes — plugged in, until the time budget expires (default 3600 s).
   Arming requires the literal word `ARM`.
+- `deploy` writes one image to explicit target drives as a durable campaign.
+  Targets run with bounded concurrency (default 2), are tracked independently,
+  and produce per-target NDJSON state records with `--json`. Use `--parallel`
+  to set concurrency from 1 to 8; use `queue` when writing multiple images to
+  one drive.
+- `report --integrity` verifies the tamper-evident chain for audited operation
+  records; `report --out history.json` exports the local history store.
+- Audit records use a stable operation schema: `timestamp`, `operation`,
+  `success`, `verified`, target identity, duration, source/image digest when
+  available, error details, and optional boot or wipe evidence. Audited records
+  also carry `integrity_prev` and `integrity_sha256`; `report --integrity`
+  detects edits and reordering.
+- Boot checks report layout evidence with an explicit `valid`, `warning`, or
+  `failed` status. They are diagnostics, not a guarantee that every firmware
+  implementation will boot the drive.
 - `flash` also accepts `--resume` (continue an interrupted write from where it
   left off), `--check-fake` (probe for counterfeit capacity), `--bypass-tpm`,
   `--dry-run` (preview without writing), and `--quiet`. See `flint flash --help`
@@ -297,6 +319,11 @@ flint help [<command>]
   stderr, so scripts capture stdout as pure data without `2>&1` noise.
 - Exit codes: `0` OK, `1` failure, `2` cancelled, `3` usage/validation error,
   `4` elevation denied.
+- Persistent deployment jobs can be inspected and controlled after a restart:
+  `flint deploy --status`, `flint deploy --cancel --job <id>`, and
+  `flint deploy --retry --job <id>`. Run or resume a job with
+  `flint deploy --run --job <id>`. Retry is allowed only for failed,
+  cancelled, or resumable jobs and never bypasses target identity checks.
 - `flint completions --shell powershell|bash|zsh` prints a shell completion
   script (commands, options, and live drive serials); for example
   `flint completions --shell bash | tee ~/.bashrc`.

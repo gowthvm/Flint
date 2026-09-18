@@ -5,11 +5,12 @@ import os
 import time
 from collections import deque
 from collections.abc import Callable
+from threading import Event
 from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core import diskpart, persistence
+from core import diskpart, jobs, persistence
 from core import iso as iso_mod
 from core import verify as verify_mod
 from core.deviceio import (
@@ -138,6 +139,9 @@ class UsbWriter(QThread):
         bad_block_retries: int = 3,
         resume: bool = False,
         bypass_tpm: bool = False,
+        target_fingerprint: str | None = None,
+        manifest_path: str | None = None,
+        cancel_event: Event | None = None,
     ) -> None:
         super().__init__()
         self.iso_path = iso_path
@@ -161,11 +165,19 @@ class UsbWriter(QThread):
         self.bad_block_retries = max(0, int(bad_block_retries))
         self.resume = resume
         self.bypass_tpm = bypass_tpm
+        self.target_fingerprint = target_fingerprint or drive_path
+        self.manifest_path = manifest_path or (self.iso_path + ".flint_job.json")
+        self.cancel_event = cancel_event
         self._canceled = False
         self._finished = False
 
     def cancel(self) -> None:
         self._canceled = True
+
+    def _cancel_requested(self) -> bool:
+        return self._canceled or (
+            self.cancel_event is not None and self.cancel_event.is_set()
+        )
 
     def _open_drive(self) -> int:
         k32 = kernel32()
@@ -205,6 +217,13 @@ class UsbWriter(QThread):
         if not ok:
             raise OSError("failed to query drive size")
         return size.value
+
+    def _seek_drive(self, handle: int, offset: int) -> None:
+        position = ctypes.c_longlong()
+        if not kernel32().SetFilePointerEx(
+            handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
+        ):
+            raise OSError(f"failed to seek target to byte {offset:,}")
 
     def _write_chunk(self, handle: int, data: bytes) -> None:
         k32 = kernel32()
@@ -361,7 +380,7 @@ class UsbWriter(QThread):
 
     def _run_filecopy(self) -> None:
         """Repartition the drive, format it, then copy ISO contents."""
-        if self._canceled:
+        if self._cancel_requested():
             self._finish_cancelled()
             return
         self.phase.emit("Preparing partition")
@@ -371,7 +390,7 @@ class UsbWriter(QThread):
             self.filesystem,
         )
         self.progress.emit(10.0)
-        if self._canceled:
+        if self._cancel_requested():
             self._finish_cancelled()
             return
         if self.windows_to_go:
@@ -380,7 +399,7 @@ class UsbWriter(QThread):
         else:
             self.phase.emit("Copying files")
             diskpart.copy_iso_files(self.iso_path, letter)
-        if self._canceled:
+        if self._cancel_requested():
             self._finish_cancelled()
             return
         if self.persistence and not self.windows_to_go:
@@ -438,7 +457,7 @@ class UsbWriter(QThread):
 
         self.total_bytes.emit(total)
 
-        if self.use_native:
+        if self.use_native and not self.resume:
             native_mod = _load_native_writer()
             if native_mod is not None:
                 try:
@@ -452,24 +471,51 @@ class UsbWriter(QThread):
 
         written = 0
         source_written = 0
+        manifest: jobs.JobManifest | None = None
         durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
         sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
         try:
             with open(self.iso_path, "rb") as source:
-                # Resume from saved state
-                state_path = self.iso_path + ".flint_state"
-                if self.resume and os.path.isfile(state_path):
-                    try:
-                        with open(state_path, "r") as f:
-                            saved = int(f.read().strip())
-                        if 0 < saved < total:
-                            source.seek(saved)
-                            source_written = saved
-                            self.note.emit(f"Resuming from byte {saved:,}")
-                    except (OSError, ValueError):
-                        pass
+                if self.resume:
+                    source_digest = jobs.source_sha256(self.iso_path)
+                    options = {
+                        "chunk_size": self.chunk_size,
+                        "verify_after_write": self.verify_after_write,
+                        "verify_sha256": self.verify_sha256,
+                        "bad_block_scan": self.bad_block_scan,
+                    }
+                    if os.path.isfile(self.manifest_path):
+                        manifest = jobs.load_manifest(self.manifest_path)
+                        manifest.validate_resume(
+                            source_path=self.iso_path,
+                            source_size=total,
+                            source_sha256=source_digest,
+                            target_fingerprint=self.target_fingerprint,
+                            target_size=drive_size,
+                            options=options,
+                        )
+                    else:
+                        manifest = jobs.JobManifest(
+                            source_path=self.iso_path,
+                            source_size=total,
+                            source_sha256=source_digest,
+                            target_fingerprint=self.target_fingerprint,
+                            target_size=drive_size,
+                            options=options,
+                            state="writing",
+                        )
+                        jobs.save_manifest(self.manifest_path, manifest)
+                    saved = manifest.checkpoint_bytes
+                    if 0 < saved < total:
+                        self._seek_drive(handle, saved)
+                        source.seek(saved)
+                        source_written = saved
+                        self.note.emit(f"Resuming from byte {saved:,}")
+                    elif saved == total:
+                        raise ValueError("cannot resume: job is already complete")
+
                 while chunk := source.read(self.chunk_size):
-                    if self._canceled:
+                    if self._cancel_requested():
                         break
                     # FILE_FLAG_NO_BUFFERING requires sector-aligned writes.
                     # Pad the final partial chunk with zeros (like dd).
@@ -483,13 +529,11 @@ class UsbWriter(QThread):
                     sizes.append(len(chunk))
                     written += len(chunk)
                     source_written += source_chunk_len
-                    # Persist resume state (source file offset, not padded)
-                    if self.resume and source_written % (10 * 1024 * 1024) < self.chunk_size:
-                        try:
-                            with open(self.iso_path + ".flint_state", "w") as f:
-                                f.write(str(source_written))
-                        except OSError:
-                            pass
+                    if manifest is not None and (
+                        source_written % (10 * 1024 * 1024) < self.chunk_size
+                    ):
+                        manifest.checkpoint_bytes = source_written
+                        jobs.save_manifest(self.manifest_path, manifest)
 
                     window_bytes = sum(sizes)
                     window_time = sum(durations)
@@ -505,17 +549,30 @@ class UsbWriter(QThread):
                     self.speed_mbps.emit(speed)
                     self.written_bytes.emit(source_written)
                     self.eta_seconds.emit(int(remaining))
-            if not self._canceled:
+            if not self._cancel_requested():
                 self.phase.emit("Flushing")
                 self._flush(handle)
-                # Clean up resume state file
-                if self.resume:
+                if manifest is not None:
+                    manifest.checkpoint_bytes = total
+                    manifest.state = "written"
+                    jobs.save_manifest(self.manifest_path, manifest)
                     try:
-                        os.unlink(self.iso_path + ".flint_state")
+                        os.unlink(self.manifest_path)
                     except OSError:
                         pass
+            elif manifest is not None:
+                manifest.state = "resumable"
+                manifest.error = "write cancelled"
+                jobs.save_manifest(self.manifest_path, manifest)
         except OSError as exc:
             logger.exception("UsbWriter._run_inner: IO error")
+            if manifest is not None:
+                manifest.state = "resumable"
+                manifest.error = str(exc)
+                try:
+                    jobs.save_manifest(self.manifest_path, manifest)
+                except OSError:
+                    logger.exception("failed to save resumable job manifest")
             self._finished = True
             self.finished.emit(False, str(exc))
             return
@@ -523,7 +580,7 @@ class UsbWriter(QThread):
             if handle is not None:
                 kernel32().CloseHandle(handle)
 
-        if self._canceled:
+        if self._cancel_requested():
             self._finished = True
             self.finished.emit(False, "cancelled")
             return
@@ -543,7 +600,7 @@ class UsbWriter(QThread):
 
         def on_progress(done: int, size: int) -> None:
             nonlocal written, last_done, last_time
-            if self._canceled:
+            if self._cancel_requested():
                 raise _NativeCancel("cancelled")
             now = time.perf_counter()
             if last_time is not None:
@@ -621,10 +678,10 @@ class UsbWriter(QThread):
             chunk_size=self.chunk_size,
             retries=self.bad_block_retries,
             progress=on_progress,
-            is_cancelled=lambda: self._canceled,
+            is_cancelled=self._cancel_requested,
             scan_full_drive=self.bad_block_scan,
         )
-        if result["error"] == "cancelled" or self._canceled:
+        if result["error"] == "cancelled" or self._cancel_requested():
             # The write itself completed; only the verification was
             # cancelled. Report it as cancelled so the UI does not present
             # a false success and does not write a "verified" history entry.

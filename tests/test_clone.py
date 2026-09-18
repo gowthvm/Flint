@@ -11,6 +11,7 @@ class _FakeCopy:
         self.payload = payload
         self.target_size = target_size if target_size is not None else len(payload)
         self.read_offset = 0
+        self.target_read_offset = 0
         self.written: list[bytes] = []
         self.fail_at: int | None = None
 
@@ -42,6 +43,20 @@ class _FakeCopy:
     def _write_chunk(self, handle, data: bytes) -> None:
         self.written.append(data)
 
+    def _read_target_chunk(self, handle, count: int) -> bytes:
+        payload = b"".join(self.written)
+        chunk = payload[
+            self.target_read_offset : self.target_read_offset + count
+        ]
+        self.target_read_offset += len(chunk)
+        return chunk
+
+    def _seek(self, handle, offset: int) -> None:
+        if int(getattr(handle, "value", handle)) == 2001:
+            self.read_offset = offset
+        else:
+            self.target_read_offset = offset
+
 
 def _make_worker(fake, target_size: int | None = None) -> CloneWorker:
     worker = CloneWorker(
@@ -59,6 +74,8 @@ def _make_worker(fake, target_size: int | None = None) -> CloneWorker:
     worker._lock_volumes = fake._lock_volumes  # type: ignore[method-assign]
     worker._unlock_volumes = fake._unlock_volumes  # type: ignore[method-assign]
     worker._read_chunk = fake._read_chunk  # type: ignore[method-assign]
+    worker._read_target_chunk = fake._read_target_chunk  # type: ignore[method-assign]
+    worker._seek = fake._seek  # type: ignore[method-assign]
     worker._write_chunk = fake._write_chunk  # type: ignore[method-assign]
     worker.CHUNK_SIZE = 64 * 1024
     return worker
@@ -174,3 +191,25 @@ def test_clone_reports_target_open_failure(monkeypatch):
 
     assert events["finished"] == [(False, r"could not open \\.\PHYSICALDRIVE6 for write")]
     assert 2001 in closed
+
+
+def test_clone_reports_readback_mismatch(monkeypatch):
+    payload = b"source-data" * 10_000
+    fake = _FakeCopy(payload)
+    worker = _make_worker(fake)
+    closed = _patch_kernel(monkeypatch)
+
+    original_readback = fake._read_target_chunk
+
+    def corrupt_readback(handle, count):
+        data = bytearray(original_readback(handle, count))
+        if data:
+            data[0] ^= 0xFF
+        return bytes(data)
+
+    worker._read_target_chunk = corrupt_readback  # type: ignore[method-assign]
+    events = _run(worker)
+
+    assert events["finished"][0][0] is False
+    assert "clone verification failed at byte 0" in events["finished"][0][1]
+    assert 2001 in closed and 2002 in closed

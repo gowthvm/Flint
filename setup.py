@@ -13,6 +13,8 @@ import sys
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
+from core.version import APP_VERSION
+
 
 class optional_build_ext(build_ext):
     """Build extension that tolerates compiler failures."""
@@ -40,7 +42,7 @@ class optional_build_ext(build_ext):
 
 setup(
     name="flint-native",
-    version="1.9.0",
+    version=APP_VERSION,
     description="Optional native writer extension for Flint",
     ext_modules=[
         Extension(

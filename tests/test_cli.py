@@ -642,6 +642,167 @@ def test_flash_all_interrupt_cancels(tmp_path, monkeypatch, capsys):
     assert "interrupted after 0 drive(s) flashed" in capsys.readouterr().out
 
 
+def test_flash_all_parallel_uses_campaign_batches(
+    tmp_path, monkeypatch, capsys
+):
+    image = tmp_path / "agent.iso"
+    image.write_bytes(b"data")
+    first = _fake_drives()[0]
+    second = dict(first)
+    second.update(
+        physical_path=r"\\.\PHYSICALDRIVE4",
+        serial="DEF5678",
+        letter="F",
+        letters=["F"],
+    )
+    monkeypatch.setattr(cli, "_detect_drives", lambda *_: [first, second])
+    monkeypatch.setattr("core.history._APP_DIR", tmp_path / "app")
+    started: list[str] = []
+
+    def _fake_run(worker, label):
+        started.append(worker.target_fingerprint)
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _fake_run)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    rc = cli._cmd_flash_all(
+        {
+            "images": [str(image)],
+            "confirm": "ARM",
+            "timeout": "1",
+            "parallel": "2",
+        }
+    )
+
+    assert rc == cli.EXIT_OK
+    assert sorted(started) == ["ABC1234", "DEF5678"]
+    assert len(list((tmp_path / "app" / "jobs").glob("*.json"))) == 2
+    assert "2 drive(s) flashed" in capsys.readouterr().out
+
+
+def test_flash_all_rejects_invalid_parallelism(tmp_path, capsys):
+    image = tmp_path / "agent.iso"
+    image.write_bytes(b"data")
+
+    rc = cli._cmd_flash_all(
+        {
+            "images": [str(image)],
+            "confirm": "ARM",
+            "timeout": "1",
+            "parallel": "9",
+        }
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "--parallel must be a number" in capsys.readouterr().out
+
+
+def test_deploy_runs_one_image_to_multiple_targets(
+    tmp_path, monkeypatch, capsys
+):
+    image = tmp_path / "agent.iso"
+    image.write_bytes(b"image")
+    first = _fake_drives()[0]
+    second = dict(first)
+    second.update(
+        physical_path=r"\\.\PHYSICALDRIVE4",
+        serial="DEF5678",
+        letter="F",
+        letters=["F"],
+    )
+    monkeypatch.setattr(cli, "_detect_drives", lambda: [first, second])
+    monkeypatch.setattr("core.history._APP_DIR", tmp_path / "app")
+    started: list[str] = []
+
+    def _fake_run(worker, label):
+        started.append(worker.target_fingerprint)
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _fake_run)
+
+    rc = cli.main(
+        [
+            "deploy",
+            "--image",
+            str(image),
+            "--drive",
+            "ABC1234",
+            "--drive",
+            "DEF5678",
+            "--confirm",
+            "ARM",
+            "--parallel",
+            "2",
+        ]
+    )
+
+    assert rc == cli.EXIT_OK
+    assert sorted(started) == ["ABC1234", "DEF5678"]
+    assert "deploy complete: 2 target(s) passed" in capsys.readouterr().out
+    manifests = list((tmp_path / "app" / "jobs").glob("*.json"))
+    assert len(manifests) == 2
+
+
+def test_deploy_rejects_multiple_images(tmp_path, capsys):
+    first = tmp_path / "one.iso"
+    second = tmp_path / "two.iso"
+    first.write_bytes(b"1")
+    second.write_bytes(b"2")
+
+    rc = cli._cmd_deploy(
+        {
+            "images": [str(first), str(second)],
+            "drives": ["E"],
+            "confirm": "ARM",
+        }
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "exactly one --image" in capsys.readouterr().out
+
+
+def test_deploy_rejects_invalid_parallelism(tmp_path, capsys):
+    image = tmp_path / "one.iso"
+    image.write_bytes(b"1")
+
+    rc = cli._cmd_deploy(
+        {
+            "images": [str(image)],
+            "drives": ["E"],
+            "confirm": "ARM",
+            "parallel": "9",
+        }
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "--parallel must be a number" in capsys.readouterr().out
+
+
+def test_deploy_status_cancel_and_retry(tmp_path, monkeypatch, capsys):
+    from core import history
+    from core.jobs import JobManifest, save_manifest
+
+    history._APP_DIR = tmp_path / "app"
+    manifest = JobManifest(
+        source_path="image.iso",
+        source_size=10,
+        source_sha256="a" * 64,
+        target_fingerprint="serial:ONE",
+        target_size=100,
+        state="resumable",
+    )
+    path = history._APP_DIR / "jobs" / f"{manifest.job_id}.json"
+    save_manifest(path, manifest)
+
+    assert cli.main(["deploy", "--status"]) == cli.EXIT_OK
+    assert manifest.job_id in capsys.readouterr().out
+    assert cli.main(["deploy", "--cancel", "--job", manifest.job_id]) == cli.EXIT_OK
+    assert "cancelled" in capsys.readouterr().out
+    assert cli.main(["deploy", "--retry", "--job", manifest.job_id]) == cli.EXIT_OK
+    assert "queued" in capsys.readouterr().out
+
+
 # --- verify --------------------------------------------------------------
 
 
@@ -711,6 +872,33 @@ def test_doctor_json_shape(monkeypatch, capsys):
     assert len(report["drives"]) == 1
     assert report["drives"][0]["serial"] == "ABC1234"
     assert any(o["type"] == "result" for o in objects)
+
+
+def test_report_integrity_and_export(tmp_path, monkeypatch, capsys):
+    from core import history
+
+    history.HISTORY_PATH = tmp_path / "history.json"
+    history.append_audited_history({"job_id": "one", "state": "passed"})
+    output = tmp_path / "export.json"
+
+    assert cli.main(
+        ["report", "--integrity", "--out", str(output)]
+    ) == cli.EXIT_OK
+    assert output.exists()
+    assert "history integrity: valid" in capsys.readouterr().out
+
+
+def test_report_integrity_rejects_tampering(tmp_path, monkeypatch, capsys):
+    from core import history
+
+    history.HISTORY_PATH = tmp_path / "history.json"
+    history.append_audited_history({"job_id": "one", "state": "passed"})
+    entries = history.load_history()
+    entries[0]["state"] = "failed"
+    history.save_history(entries)
+
+    assert cli.main(["report", "--integrity"]) == cli.EXIT_FAIL
+    assert "history integrity failed" in capsys.readouterr().out
 
 
 def test_completions_prints_powershell_script(capsys):
