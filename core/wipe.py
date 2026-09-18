@@ -10,15 +10,16 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.deviceio import (
     ES_CONTINUOUS,
     ES_SYSTEM_REQUIRED,
-    FSCTL_DISMOUNT_VOLUME,
-    FSCTL_LOCK_VOLUME,
-    FSCTL_UNLOCK_VOLUME,
-    GENERIC_READ,
-    GENERIC_WRITE,
-    IOCTL_DISK_GET_LENGTH_INFO,
-    OPEN_EXISTING,
     TRANSIENT_ERRORS,
+    drive_size,
+    flush,
     kernel32,
+    lock_volumes,
+    open_drive,
+    read_bytes,
+    seek,
+    unlock_volumes,
+    write_bytes_retry,
 )
 
 logger = logging.getLogger("flint")
@@ -82,149 +83,26 @@ class WipeWorker(QThread):
     def cancel(self) -> None:
         self._canceled = True
 
-    def _open_drive(self) -> ctypes.c_void_p:
-        k32 = kernel32()
-        handle = k32.CreateFileW(
-            self.drive_path,
-            GENERIC_READ | GENERIC_WRITE,
-            0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
-            None,
-            OPEN_EXISTING,
-            0,
-            None,
-        )
-        if not handle or handle == self._INVALID_HANDLE_VALUE:
-            raise OSError(f"drive not writable: {self.drive_path}")
-        return ctypes.c_void_p(handle)
+    def _open_drive(self) -> int:
+        return int(open_drive(self.drive_path, write=True))
 
-    def _drive_size(self, handle: ctypes.c_void_p) -> int:
-        k32 = kernel32()
-        size = ctypes.c_ulonglong()
-        returned = ctypes.c_ulong()
-        ok = k32.DeviceIoControl(
-            handle,
-            IOCTL_DISK_GET_LENGTH_INFO,
-            None,
-            0,
-            ctypes.byref(size),
-            ctypes.sizeof(size),
-            ctypes.byref(returned),
-            None,
-        )
-        if not ok:
-            raise OSError("failed to query drive size")
-        return size.value
+    def _drive_size(self, handle: int) -> int:
+        return drive_size(ctypes.c_void_p(handle))
 
-    def _device_control(self, handle: ctypes.c_void_p, code: int) -> bool:
-        k32 = kernel32()
-        returned = ctypes.c_ulong()
-        return bool(
-            k32.DeviceIoControl(
-                handle,
-                code,
-                None,
-                0,
-                None,
-                0,
-                ctypes.byref(returned),
-                None,
-            )
-        )
+    def _lock_volumes(self) -> list[int]:
+        return [int(h) for h in lock_volumes(self.letters)]
 
-    def _lock_volumes(self) -> list[ctypes.c_void_p]:
-        k32 = kernel32()
-        held: list[ctypes.c_void_p] = []
-        for letter in self.letters:
-            path = f"\\\\.\\{letter}:"
-            handle = k32.CreateFileW(
-                path,
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                None,
-                OPEN_EXISTING,
-                0,
-                None,
-            )
-            if not handle or handle == self._INVALID_HANDLE_VALUE:
-                self._unlock_volumes(held)
-                raise OSError(
-                    f"Volume {letter}: could not be opened for locking."
-                )
-            self._device_control(handle, FSCTL_DISMOUNT_VOLUME)
-            locked = False
-            for _ in range(5):
-                if self._device_control(handle, FSCTL_LOCK_VOLUME):
-                    locked = True
-                    break
-                time.sleep(0.2)
-            if not locked:
-                k32.CloseHandle(handle)
-                self._unlock_volumes(held)
-                raise OSError(
-                    f"Volume {letter}: is in use by another program. "
-                    "Close it and try again."
-                )
-            held.append(handle)
-        return held
+    def _unlock_volumes(self, held: list[int]) -> None:
+        unlock_volumes([ctypes.c_void_p(h) for h in held])
 
-    def _unlock_volumes(self, held: list[ctypes.c_void_p]) -> None:
-        k32 = kernel32()
-        for handle in held:
-            self._device_control(handle, FSCTL_UNLOCK_VOLUME)
-            k32.CloseHandle(handle)
+    def _write_chunk(self, handle: int, data: bytes) -> None:
+        write_bytes_retry(handle, data, max_retries=3)
 
-    def _write_chunk(self, handle: ctypes.c_void_p, data: bytes) -> None:
-        k32 = kernel32()
-        max_retries = 3
-        last_err = 0
-        for attempt in range(max_retries + 1):
-            buffer = ctypes.create_string_buffer(data)
-            written = ctypes.c_ulong()
-            ok = k32.WriteFile(
-                handle,
-                buffer,
-                len(data),
-                ctypes.byref(written),
-                None,
-            )
-            if ok and written.value == len(data):
-                return
-            if ok and written.value < len(data):
-                last_err = 0
-            else:
-                last_err = k32.GetLastError()
-            if attempt < max_retries and (
-                last_err in TRANSIENT_ERRORS or (ok and written.value < len(data))
-            ):
-                time.sleep(0.5 * (2 ** attempt))
-                continue
-            break
-        if last_err in TRANSIENT_ERRORS:
-            raise OSError(
-                f"write failed: {last_err} (USB device became unresponsive "
-                f"after {max_retries} retries — check cable/port)"
-            )
-        if not ok:
-            raise OSError(f"write failed: {last_err}")
-        raise OSError("short write on drive")
+    def _seek_start(self, handle: int) -> None:
+        seek(ctypes.c_void_p(handle), 0)
 
-    def _seek_start(self, handle: ctypes.c_void_p) -> None:
-        kernel32().SetFilePointer(handle, 0, None, 0)
-
-    def _read_chunk(self, handle: ctypes.c_void_p, size: int) -> bytes:
-        k32 = kernel32()
-        buffer = ctypes.create_string_buffer(size)
-        read = ctypes.c_ulong()
-        ok = k32.ReadFile(
-            handle,
-            buffer,
-            size,
-            ctypes.byref(read),
-            None,
-        )
-        if not ok:
-            raise OSError(f"read failed: {k32.GetLastError()}")
-        return buffer.raw[: read.value]
+    def _read_chunk(self, handle: int, size: int) -> bytes:
+        return read_bytes(ctypes.c_void_p(handle), size)
 
     def _pass_chunk(self, pattern: str, size: int, offset: int) -> bytes:
         if pattern == "zero":
@@ -251,10 +129,7 @@ class WipeWorker(QThread):
 
     def run(self) -> None:
         k32 = kernel32()
-        k32.SetThreadExecutionState(
-            ES_CONTINUOUS
-            | ES_SYSTEM_REQUIRED
-        )
+        k32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
         try:
             self.phase.emit("Locking drive")
             volumes = self._lock_volumes()
@@ -317,10 +192,7 @@ class WipeWorker(QThread):
                     )
             if not self._canceled:
                 self.phase.emit("Flushing")
-                if not kernel32().FlushFileBuffers(handle):
-                    raise OSError(
-                        "flush failed: data may not have reached the drive"
-                    )
+                flush(ctypes.c_void_p(handle))
             if not self._canceled and self.verify:
                 self._verify_pass(
                     handle,
@@ -348,7 +220,7 @@ class WipeWorker(QThread):
 
     def _verify_pass(
         self,
-        handle: ctypes.c_void_p,
+        handle: int,
         total: int,
         final_pattern: str,
         base_processed: int,

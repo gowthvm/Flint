@@ -1477,8 +1477,8 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
             if parallel > 1 and len(session.images) == 1:
                 from core.campaigns import Campaign, CampaignJob, CampaignRunner
                 from core.fleet import drive_fingerprint
-                from core.history import _APP_DIR
                 from core.jobs import JobManifest, save_manifest, source_sha256
+                from core.paths import APP_DIR
 
                 candidates: list[dict[str, Any]] = []
                 available = list(drives)
@@ -1525,7 +1525,7 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
                             },
                             state="queued",
                         )
-                        path = _APP_DIR / "jobs" / f"{manifest.job_id}.json"
+                        path = APP_DIR / "jobs" / f"{manifest.job_id}.json"
                         save_manifest(path, manifest)
                         jobs.append(CampaignJob(manifest, str(path)))
 
@@ -1626,10 +1626,10 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
 def _cmd_deploy(opts: dict[str, object]) -> int:
     """Deploy the selected images to explicit drives as one campaign."""
     from core.campaigns import Campaign, CampaignJob, CampaignRunner
-    from core.history import _APP_DIR
     from core.jobs import JobManifest, load_manifest, save_manifest, source_sha256
+    from core.paths import APP_DIR
 
-    jobs_dir = _APP_DIR / "jobs"
+    jobs_dir = APP_DIR / "jobs"
     manifest_paths = sorted(jobs_dir.glob("*.json")) if jobs_dir.is_dir() else []
     if opts.get("status"):
         records = []
@@ -1787,6 +1787,7 @@ def _cmd_deploy(opts: dict[str, object]) -> int:
         return _result("ok", "dry run - no changes made", EXIT_OK)
 
     from core.writer import DEFAULT_CHUNK_SIZE, UsbWriter
+    from core.paths import APP_DIR
 
     image = images[0]
     image_size = os.path.getsize(image)
@@ -1812,7 +1813,7 @@ def _cmd_deploy(opts: dict[str, object]) -> int:
             options=options,
             state="queued",
         )
-        path = _APP_DIR / "jobs" / f"{manifest.job_id}.json"
+        path = APP_DIR / "jobs" / f"{manifest.job_id}.json"
         save_manifest(path, manifest)
         jobs.append(CampaignJob(manifest, str(path)))
 

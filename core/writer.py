@@ -16,15 +16,17 @@ from core import verify as verify_mod
 from core.deviceio import (
     ES_CONTINUOUS,
     ES_SYSTEM_REQUIRED,
-    FSCTL_DISMOUNT_VOLUME,
-    FSCTL_LOCK_VOLUME,
-    FSCTL_UNLOCK_VOLUME,
-    GENERIC_READ,
-    GENERIC_WRITE,
-    IOCTL_DISK_GET_LENGTH_INFO,
-    OPEN_EXISTING,
+    FILE_FLAG_NO_BUFFERING,
+    FILE_FLAG_WRITE_THROUGH,
     TRANSIENT_ERRORS,
+    drive_size,
+    flush,
     kernel32,
+    lock_volumes,
+    open_drive,
+    seek,
+    unlock_volumes,
+    write_bytes_retry,
 )
 
 logger = logging.getLogger("flint")
@@ -112,12 +114,7 @@ class UsbWriter(QThread):
     finished = pyqtSignal(bool, str)
 
     SPEED_WINDOW = 5
-
-    _FILE_FLAG_NO_BUFFERING = 0x20000000
-    _FILE_FLAG_WRITE_THROUGH = 0x80000000
     _SECTOR_SIZE = 4096
-
-    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
     def __init__(
         self,
@@ -180,154 +177,25 @@ class UsbWriter(QThread):
         )
 
     def _open_drive(self) -> int:
-        k32 = kernel32()
-        handle = k32.CreateFileW(
-            self.drive_path,
-            GENERIC_READ | GENERIC_WRITE,
-            0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
-            None,
-            OPEN_EXISTING,
-            self._FILE_FLAG_NO_BUFFERING | self._FILE_FLAG_WRITE_THROUGH,
-            None,
-        )
-        if not handle or handle == self._INVALID_HANDLE_VALUE:
-            err = k32.GetLastError()
-            if err == 5:  # ERROR_ACCESS_DENIED
-                raise OSError(
-                    f"access denied: {self.drive_path} — run Flint as "
-                    "administrator to write to raw drives"
-                )
-            raise OSError(f"drive not writable: {self.drive_path} (error {err})")
-        return int(handle)
+        return int(open_drive(self.drive_path, write=True, flags=FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH))
 
     def _drive_size(self, handle: int) -> int:
-        k32 = kernel32()
-        size = ctypes.c_ulonglong()
-        returned = ctypes.c_ulong()
-        ok = k32.DeviceIoControl(
-            handle,
-            IOCTL_DISK_GET_LENGTH_INFO,
-            None,
-            0,
-            ctypes.byref(size),
-            ctypes.sizeof(size),
-            ctypes.byref(returned),
-            None,
-        )
-        if not ok:
-            raise OSError("failed to query drive size")
-        return size.value
+        return drive_size(handle)
 
     def _seek_drive(self, handle: int, offset: int) -> None:
-        position = ctypes.c_longlong()
-        if not kernel32().SetFilePointerEx(
-            handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
-        ):
-            raise OSError(f"failed to seek target to byte {offset:,}")
+        seek(handle, offset)
 
     def _write_chunk(self, handle: int, data: bytes) -> None:
-        k32 = kernel32()
-        max_retries = 3
-        last_err = 0
-        for attempt in range(max_retries + 1):  # 0, 1, 2, 3
-            buffer = ctypes.create_string_buffer(data)
-            written = ctypes.c_ulong()
-            ok = k32.WriteFile(
-                handle,
-                buffer,
-                len(data),
-                ctypes.byref(written),
-                None,
-            )
-            if ok and written.value == len(data):
-                return
-            # Short write is also transient — device may recover on retry.
-            if ok and written.value < len(data):
-                last_err = 0  # no Win32 error, but treat as transient
-            else:
-                last_err = k32.GetLastError()
-            if attempt < max_retries and (
-                last_err in TRANSIENT_ERRORS or (ok and written.value < len(data))
-            ):
-                time.sleep(0.5 * (2 ** attempt))  # 0.5, 1, 2s backoff
-                continue
-            break
-        if last_err in TRANSIENT_ERRORS:
-            raise OSError(
-                f"write failed: {last_err} (USB device became unresponsive "
-                f"after {max_retries} retries — check cable/port or disable "
-                f"USB selective suspend in Power Options)"
-            )
-        if not ok:
-            raise OSError(f"write failed: {last_err}")
-        raise OSError("short write on drive")
+        write_bytes_retry(handle, data, max_retries=3)
 
     def _flush(self, handle: int) -> None:
-        if not kernel32().FlushFileBuffers(handle):
-            raise OSError(
-                "flush failed: data may not have reached the drive"
-            )
-
-    def _device_control(self, handle: int, code: int) -> bool:
-        k32 = kernel32()
-        returned = ctypes.c_ulong()
-        return bool(
-            k32.DeviceIoControl(
-                handle,
-                code,
-                None,
-                0,
-                None,
-                0,
-                ctypes.byref(returned),
-                None,
-            )
-        )
+        flush(handle)
 
     def _lock_volumes(self) -> list[int]:
-        k32 = kernel32()
-        held: list[int] = []
-        for letter in self.letters:
-            path = f"\\\\.\\{letter}:"
-            handle = k32.CreateFileW(
-                path,
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                None,
-                OPEN_EXISTING,
-                0,
-                None,
-            )
-            if not handle or handle == self._INVALID_HANDLE_VALUE:
-                self._unlock_volumes(held)
-                raise OSError(
-                    f"Volume {letter}: could not be opened for locking."
-                )
-            self._device_control(int(handle), FSCTL_DISMOUNT_VOLUME)
-            locked = False
-            for _ in range(5):
-                if self._device_control(
-                    int(handle), FSCTL_LOCK_VOLUME
-                ):
-                    locked = True
-                    break
-                time.sleep(0.2)
-            if not locked:
-                k32.CloseHandle(handle)
-                self._unlock_volumes(held)
-                raise OSError(
-                    f"Volume {letter}: is in use by another program. "
-                    "Close Explorer windows, antivirus real-time scanning, "
-                    "or other tools accessing the drive, then try again."
-                )
-            held.append(int(handle))
-        return held
+        return [int(h) for h in lock_volumes(self.letters)]
 
     def _unlock_volumes(self, held: list[int]) -> None:
-        k32 = kernel32()
-        for handle in held:
-            self._device_control(handle, FSCTL_UNLOCK_VOLUME)
-            k32.CloseHandle(handle)
+        unlock_volumes([ctypes.c_void_p(h) for h in held])
 
     def run(self) -> None:
         k32 = kernel32()

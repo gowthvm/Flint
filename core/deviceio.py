@@ -7,6 +7,7 @@ and bootcheck modules.
 
 import ctypes
 import time
+from collections.abc import Callable
 from typing import Any
 
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -23,11 +24,18 @@ FILE_SHARE_READ = 0x1
 FILE_SHARE_WRITE = 0x2
 OPEN_EXISTING = 3
 
+FILE_FLAG_NO_BUFFERING = 0x20000000
+FILE_FLAG_WRITE_THROUGH = 0x80000000
+
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 
 TRANSIENT_ERRORS = frozenset({1117, 21, 31, 5, 1167})
 TRANSIENT_SEEK_ERRORS = frozenset({21, 31, 5, 1167})
+
+
+class _Cancelled(Exception):
+    """Raised by ``read_bytes_retry`` when the cancel callback fires."""
 
 
 def _configure_kernel32() -> Any:
@@ -94,8 +102,20 @@ def kernel32() -> Any:
     return _K32
 
 
-def open_drive(path: str, *, write: bool) -> Any:
-    """Open a raw disk (or volume) handle; raise OSError when it fails."""
+def open_drive(path: str, *, write: bool, flags: int = 0) -> Any:
+    """Open a raw disk (or volume) handle; raise OSError when it fails.
+
+    Parameters
+    ----------
+    path:
+        Device path such as ``\\\\.\\E:`` or ``\\\\.\\PHYSICALDRIVE0``.
+    write:
+        Open for write access (``GENERIC_WRITE``).
+    flags:
+        Additional ``CreateFileW`` flags.  Pass
+        ``FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH`` for direct
+        sector-aligned I/O.
+    """
     k32 = kernel32()
     access = GENERIC_READ | (GENERIC_WRITE if write else 0)
     handle = k32.CreateFileW(
@@ -104,15 +124,24 @@ def open_drive(path: str, *, write: bool) -> Any:
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         None,
         OPEN_EXISTING,
-        0,
+        flags,
         None,
     )
     if not handle or handle == _INVALID_HANDLE_VALUE:
-        raise OSError(f"could not open {path} for {'write' if write else 'read'}")
+        err = k32.GetLastError()
+        if write and err == 5:  # ERROR_ACCESS_DENIED
+            raise OSError(
+                f"access denied: {path} -- run Flint as "
+                "administrator to write to raw drives"
+            )
+        raise OSError(
+            f"could not open {path} for {'write' if write else 'read'} (error {err})"
+        )
     return handle
 
 
 def drive_size(handle: Any) -> int:
+    """Return the drive capacity in bytes; raise OSError on failure."""
     k32 = kernel32()
     length = ctypes.c_ulonglong()
     returned = ctypes.c_ulong()
@@ -147,9 +176,36 @@ def _ioctl(handle: Any, code: int) -> bool:
     )
 
 
+def seek(handle: Any, offset: int) -> None:
+    """Position *handle* at *offset*; raise OSError on failure."""
+    position = ctypes.c_longlong()
+    if not kernel32().SetFilePointerEx(
+        handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
+    ):
+        raise OSError(f"failed to seek to byte {offset:,}")
+
+
+def seek_retry(handle: Any, offset: int, retries: int = 3) -> bool:
+    """Seek to *offset*, retrying on transient errors.
+
+    Returns ``True`` on success, ``False`` if all attempts fail.
+    """
+    for _ in range(retries + 1):
+        position = ctypes.c_longlong()
+        if kernel32().SetFilePointerEx(
+            handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
+        ):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def lock_volumes(letters: list[str]) -> list[Any]:
     """Dismount and lock every volume on a drive so its filesystem does not
-    fight a raw read/write. Returns the held handles (unlock first)."""
+    fight a raw read/write. Returns the held handles (unlock first).
+
+    Raises OSError if any volume cannot be opened or locked.
+    """
     held: list[Any] = []
     for letter in letters:
         handle = kernel32().CreateFileW(
@@ -162,7 +218,10 @@ def lock_volumes(letters: list[str]) -> list[Any]:
             None,
         )
         if not handle or handle == _INVALID_HANDLE_VALUE:
-            continue
+            unlock_volumes(held)
+            raise OSError(
+                f"Volume {letter}: could not be opened for locking."
+            )
         _ioctl(handle, FSCTL_DISMOUNT_VOLUME)
         locked = False
         for _ in range(5):
@@ -195,20 +254,88 @@ def read_bytes(handle: Any, count: int) -> bytes:
     buffer = ctypes.create_string_buffer(count)
     read = ctypes.c_ulong()
     if not k32.ReadFile(handle, buffer, count, ctypes.byref(read), None):
-        raise OSError(f"read failed: {ctypes.windll.kernel32.GetLastError()}")
+        raise OSError(f"read failed: {k32.GetLastError()}")
     return buffer.raw[: read.value]
 
 
+def read_bytes_retry(
+    handle: Any,
+    count: int,
+    retries: int = 3,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> bytes | None:
+    """Read up to *count* bytes, retrying on transient errors.
+
+    Returns the bytes read (possibly fewer than *count* at end-of-device),
+    ``None`` when every attempt fails, or raises ``_Cancelled`` when the
+    cancel callback fires.
+    """
+    k32 = kernel32()
+    for attempt in range(retries + 1):
+        if is_cancelled is not None and is_cancelled():
+            raise _Cancelled()
+        buffer = ctypes.create_string_buffer(count)
+        read = ctypes.c_ulong()
+        if k32.ReadFile(handle, buffer, count, ctypes.byref(read), None):
+            return buffer.raw[: read.value]
+        if attempt < retries:
+            time.sleep(0.05)
+    return None
+
+
 def write_bytes(handle: Any, data: bytes) -> None:
+    """Write all of *data*; raise OSError on failure or short write."""
     k32 = kernel32()
     buffer = ctypes.create_string_buffer(data)
     written = ctypes.c_ulong()
     if not k32.WriteFile(handle, buffer, len(data), ctypes.byref(written), None):
-        raise OSError(f"write failed: {ctypes.windll.kernel32.GetLastError()}")
+        raise OSError(f"write failed: {k32.GetLastError()}")
     if written.value != len(data):
         raise OSError("short write on drive")
 
 
+def write_bytes_retry(
+    handle: Any,
+    data: bytes,
+    max_retries: int = 3,
+    error_suffix: str = "",
+) -> None:
+    """Write *data* with automatic retries for transient errors and short writes."""
+    k32 = kernel32()
+    last_err = 0
+    for attempt in range(max_retries + 1):
+        buffer = ctypes.create_string_buffer(data)
+        written = ctypes.c_ulong()
+        ok = k32.WriteFile(
+            handle,
+            buffer,
+            len(data),
+            ctypes.byref(written),
+            None,
+        )
+        if ok and written.value == len(data):
+            return
+        if ok and written.value < len(data):
+            last_err = 0  # short write, no Win32 error
+        else:
+            last_err = k32.GetLastError()
+        if attempt < max_retries and (
+            last_err in TRANSIENT_ERRORS or (ok and written.value < len(data))
+        ):
+            time.sleep(0.5 * (2 ** attempt))
+            continue
+        break
+    if last_err in TRANSIENT_ERRORS:
+        raise OSError(
+            f"write failed: {last_err} (USB device became unresponsive "
+            f"after {max_retries} retries{error_suffix})"
+        )
+    if not ok:
+        raise OSError(f"write failed: {last_err}")
+    raise OSError("short write on drive")
+
+
 def flush(handle: Any) -> None:
+    """Flush write cache to physical media; raise OSError on failure."""
     if not kernel32().FlushFileBuffers(handle):
         raise OSError("flush failed: data may not have reached the drive")

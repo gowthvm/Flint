@@ -64,6 +64,7 @@ flint-dist/
 
 # Local planning docs (not for the public repo)
 TODO.md
+PLAN.md
 
 # Website (separate repo, deployed separately to Vercel)
 flint-web/

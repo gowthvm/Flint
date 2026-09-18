@@ -1,13 +1,16 @@
 import json
 import logging
 import os
-from pathlib import Path
+import threading
 from typing import Any
+
+from core.paths import APP_DIR, file_lock
 
 logger = logging.getLogger("flint")
 
-_APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Flint"
-SETTINGS_PATH = _APP_DIR / "settings.json"
+SETTINGS_PATH = APP_DIR / "settings.json"
+_LOCK_PATH = SETTINGS_PATH.with_suffix(".lock")
+_lock = threading.Lock()
 
 _DEFAULTS: dict[str, Any] = {
     "theme": "dark",
@@ -30,6 +33,7 @@ _DEFAULTS: dict[str, Any] = {
     "bad_block_retries": 3,
     "log_level": "INFO",
     "auto_eject": False,
+    "max_history_entries": 10_000,
 }
 
 # Settings whose values must have a specific type. Corrupted or hand-edited
@@ -56,6 +60,16 @@ _TYPE_CHECK: dict[str, type] = {
     "bad_block_retries": int,
     "log_level": str,
     "auto_eject": bool,
+    "max_history_entries": int,
+}
+
+# Range / semantic validators.  Each callable receives the proposed value
+# and returns True if acceptable.  Validators run *after* type checking.
+_VALIDATORS: dict[str, Any] = {
+    "chunk_size_mb": lambda v: isinstance(v, int) and 1 <= v <= 1024,
+    "bad_block_retries": lambda v: isinstance(v, int) and 0 <= v <= 100,
+    "crash_report_seen_bytes": lambda v: isinstance(v, int) and v >= 0,
+    "max_history_entries": lambda v: isinstance(v, int) and 100 <= v <= 100_000,
 }
 
 
@@ -69,10 +83,14 @@ def _load() -> dict[str, Any]:
             for key, typ in _TYPE_CHECK.items():
                 if key in merged and not isinstance(merged[key], typ):
                     merged[key] = _DEFAULTS.get(key)
+            for key, validator in _VALIDATORS.items():
+                if key in merged and not validator(merged[key]):
+                    merged[key] = _DEFAULTS.get(key)
             return merged
     except (OSError, json.JSONDecodeError):
         pass
     return dict(_DEFAULTS)
+
 
 # In-memory cache to avoid repeated disk reads.
 _CACHE: dict[str, Any] | None = None
@@ -80,32 +98,69 @@ _CACHE: dict[str, Any] | None = None
 
 def _ensure_loaded() -> dict[str, Any]:
     global _CACHE
-    if _CACHE is None:
-        _CACHE = _load()
-    return _CACHE
+    if _CACHE is not None:
+        return _CACHE
+    with _lock:
+        if _CACHE is None:
+            _CACHE = _load()
+        return _CACHE
 
 
 def get(key: str) -> Any:
-    data = _ensure_loaded()
-    return data.get(key, _DEFAULTS.get(key))
+    with _lock:
+        data = _ensure_loaded()
+        return data.get(key, _DEFAULTS.get(key))
 
 
 def set_many(**values: Any) -> None:
     """Update settings in-memory and persist atomically to disk.
 
-    Persistence failures (read-only appdata dir, missing permissions, disk
-    errors) are logged and swallowed: the in-memory values still apply for
-    this session, and a later save may succeed. Callers never crash or
-    block close on a settings write.
+    Uses a threading lock for in-process safety and a file lock for
+    inter-process (multi-instance) safety. Invalid values are rejected.
+    Persistence failures are logged and swallowed.
     """
-    data = _ensure_loaded()
-    data.update(values)
+    with _lock:
+        data = _ensure_loaded()
+        clean: dict[str, Any] = {}
+        for key, val in values.items():
+            expected = _TYPE_CHECK.get(key)
+            if expected is not None and not isinstance(val, expected):
+                logger.warning(
+                    "settings: rejecting %s = %r (expected %s)",
+                    key,
+                    val,
+                    expected.__name__,
+                )
+                continue
+            validator = _VALIDATORS.get(key)
+            if validator is not None and not validator(val):
+                logger.warning(
+                    "settings: rejecting %s = %r (out of valid range)",
+                    key,
+                    val,
+                )
+                continue
+            clean[key] = val
+        if not clean:
+            return
+        data.update(clean)
+        snapshot = dict(data)
     try:
-        _APP_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = SETTINGS_PATH.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        tmp.replace(SETTINGS_PATH)
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with file_lock(_LOCK_PATH):
+            # Re-read from disk under file lock to merge with any
+            # changes written by another process since our last load.
+            disk_data = _load()
+            disk_data.update(snapshot)
+            with _lock:
+                global _CACHE
+                _CACHE = disk_data
+            tmp = SETTINGS_PATH.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(disk_data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp.replace(SETTINGS_PATH)
     except OSError:
         logger.exception("failed to persist settings")
 
@@ -113,9 +168,11 @@ def set_many(**values: Any) -> None:
 def export_settings(target_path: str | Path) -> bool:
     """Export current settings to a JSON file."""
     try:
-        data = _ensure_loaded()
+        with _lock:
+            data = _ensure_loaded()
+            snapshot = dict(data)
         with open(target_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            json.dump(snapshot, f, indent=2)
         return True
     except OSError:
         return False

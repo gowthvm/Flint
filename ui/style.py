@@ -16,6 +16,26 @@ _PALETTES = {
         "success": "#2ecc71",
         "warning": "#ffb300",
         "menuHover": "#2d2d2d",
+        # Gradient stops
+        "winTop": "#0c0c0c",
+        "winBottom": "#090909",
+        "surfaceTop": "#141414",
+        "surfaceBottom": "#0f0f0f",
+        "hoverTop": "#222222",
+        "hoverBottom": "#191919",
+        "activeTop": "#222222",
+        "activeBottom": "#1a1a1a",
+        "pressedTop": "#111111",
+        "pressedBottom": "#0d0d0d",
+        "primaryTop": "#ffffff",
+        "primaryBottom": "#e6e6e6",
+        "primaryHoverTop": "#f4f4f4",
+        "primaryHoverBottom": "#dedede",
+        "primaryPressedTop": "#e4e4e4",
+        "primaryPressedBottom": "#d7d7d7",
+        "dangerHover": "#e63c3c",
+        "dangerPressed": "#cc3333",
+        "borderHighlight": "rgba(255, 255, 255, 0.04)",
     },
     "light": {
         "bg": "#f2f2f2",
@@ -31,6 +51,26 @@ _PALETTES = {
         "success": "#1e8e3e",
         "warning": "#b26a00",
         "menuHover": "#eaeaea",
+        # Gradient stops
+        "winTop": "#f4f4f4",
+        "winBottom": "#ebebeb",
+        "surfaceTop": "#ffffff",
+        "surfaceBottom": "#f8f8f8",
+        "hoverTop": "#eaeaea",
+        "hoverBottom": "#e0e0e0",
+        "activeTop": "#e0e0e0",
+        "activeBottom": "#d6d6d6",
+        "pressedTop": "#d8d8d8",
+        "pressedBottom": "#d0d0d0",
+        "primaryTop": "#333333",
+        "primaryBottom": "#111111",
+        "primaryHoverTop": "#444444",
+        "primaryHoverBottom": "#222222",
+        "primaryPressedTop": "#222222",
+        "primaryPressedBottom": "#111111",
+        "dangerHover": "#d32f2f",
+        "dangerPressed": "#b71c1c",
+        "borderHighlight": "rgba(0, 0, 0, 0.06)",
     },
     "high-contrast": {
         "bg": "#000000",
@@ -46,6 +86,26 @@ _PALETTES = {
         "success": "#4cd964",
         "warning": "#ffd54f",
         "menuHover": "#1c1c1c",
+        # Gradient stops
+        "winTop": "#000000",
+        "winBottom": "#000000",
+        "surfaceTop": "#111111",
+        "surfaceBottom": "#0a0a0a",
+        "hoverTop": "#222222",
+        "hoverBottom": "#1a1a1a",
+        "activeTop": "#333333",
+        "activeBottom": "#282828",
+        "pressedTop": "#0a0a0a",
+        "pressedBottom": "#050505",
+        "primaryTop": "#ffffff",
+        "primaryBottom": "#e6e6e6",
+        "primaryHoverTop": "#f4f4f4",
+        "primaryHoverBottom": "#dedede",
+        "primaryPressedTop": "#e4e4e4",
+        "primaryPressedBottom": "#d7d7d7",
+        "dangerHover": "#ff6666",
+        "dangerPressed": "#cc3333",
+        "borderHighlight": "rgba(255, 255, 255, 0.08)",
     },
 }
 
@@ -93,8 +153,8 @@ QMainWindow {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #0c0c0c,
-        stop:1 #090909
+        stop:0 @winTop,
+        stop:1 @winBottom
     );
 }
 
@@ -113,8 +173,8 @@ QWidget#sidebar {
         spread:pad,
         x1:0, y1:0,
         x2:1, y2:0,
-        stop:0 #0d0d0d,
-        stop:1 #0a0a0a
+        stop:0 @winTop,
+        stop:1 @winBottom
     );
     border-right: 1px solid @border;
 }
@@ -124,8 +184,8 @@ QFrame {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #141414,
-        stop:1 #0f0f0f
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: 10px;
@@ -192,8 +252,8 @@ QPushButton {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1a1a1a,
-        stop:1 #121212
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: $radius_btn;
@@ -207,8 +267,8 @@ QPushButton:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #242424,
-        stop:1 #1b1b1b
+        stop:0 @hoverTop,
+        stop:1 @hoverBottom
     );
     border-color: @faded;
     color: @text;
@@ -219,8 +279,8 @@ QPushButton:pressed {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #111111,
-        stop:1 #0d0d0d
+        stop:0 @pressedTop,
+        stop:1 @pressedBottom
     );
     border-color: @faded;
 }
@@ -236,8 +296,8 @@ QPushButton#primary {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #ffffff,
-        stop:1 #e6e6e6
+        stop:0 @primaryTop,
+        stop:1 @primaryBottom
     );
     border: none;
     color: @onPrimary;
@@ -255,8 +315,8 @@ QPushButton#primary:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #f4f4f4,
-        stop:1 #dedede
+        stop:0 @primaryHoverTop,
+        stop:1 @primaryHoverBottom
     );
     color: @onPrimary;
 }
@@ -266,8 +326,8 @@ QPushButton#primary:pressed {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #e4e4e4,
-        stop:1 #d7d7d7
+        stop:0 @primaryPressedTop,
+        stop:1 @primaryPressedBottom
     );
     color: @onPrimary;
 }
@@ -289,12 +349,12 @@ QPushButton#danger {
 }
 
 QPushButton#danger:hover {
-    background: #e63c3c;
+    background: @dangerHover;
     color: @onPrimary;
 }
 
 QPushButton#danger:pressed {
-    background: #cc3333;
+    background: @dangerPressed;
     color: @onPrimary;
 }
 
@@ -338,8 +398,8 @@ QComboBox {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1d1d1d,
-        stop:1 #121212
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: $radius_md;
@@ -355,8 +415,8 @@ QComboBox:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #242424,
-        stop:1 #171717
+        stop:0 @hoverTop,
+        stop:1 @hoverBottom
     );
 }
 
@@ -369,8 +429,8 @@ QComboBox:pressed {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #111111,
-        stop:1 #0f0f0f
+        stop:0 @pressedTop,
+        stop:1 @pressedBottom
     );
 }
 
@@ -410,8 +470,8 @@ QAbstractItemView::item:selected:focus {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1f1f1f,
-        stop:1 #171717
+        stop:0 @activeTop,
+        stop:1 @activeBottom
     );
     color: @text;
     border: none;
@@ -437,8 +497,8 @@ QListWidget::item:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1b1b1b,
-        stop:1 #161616
+        stop:0 @hoverTop,
+        stop:1 @hoverBottom
     );
     color: @text;
 }
@@ -448,8 +508,8 @@ QListWidget::item:selected {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #242424,
-        stop:1 #1a1a1a
+        stop:0 @activeTop,
+        stop:1 @activeBottom
     );
     color: @text;
 }
@@ -459,8 +519,8 @@ QListWidget::item:selected:!active {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1f1f1f,
-        stop:1 #171717
+        stop:0 @activeTop,
+        stop:1 @activeBottom
     );
     color: @text;
 }
@@ -503,8 +563,8 @@ QFrame#navItem:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1a1a1a,
-        stop:1 #141414
+        stop:0 @hoverTop,
+        stop:1 @hoverBottom
     );
     border: 1px solid @border;
 }
@@ -514,8 +574,8 @@ QFrame#navItem[on="true"] {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1d1d1d,
-        stop:1 #181818
+        stop:0 @activeTop,
+        stop:1 @activeBottom
     );
     border: 1px solid @border;
 }
@@ -554,8 +614,8 @@ QFrame#driveChip {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #171717,
-        stop:1 #101010
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: $radius_md;
@@ -566,8 +626,8 @@ QFrame#driveChip:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1f1f1f,
-        stop:1 #161616
+        stop:0 @hoverTop,
+        stop:1 @hoverBottom
     );
 }
 
@@ -576,8 +636,8 @@ QFrame#driveCard {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #171717,
-        stop:1 #101010
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: 8px;
@@ -643,8 +703,8 @@ QPushButton#iconBtn {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #1c1c1c,
-        stop:1 #0f0f0f
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: 6px;
@@ -658,8 +718,8 @@ QPushButton#iconBtn:hover {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #242424,
-        stop:1 #141414
+        stop:0 @hoverTop,
+        stop:1 @hoverBottom
     );
     border-color: @faded;
     color: @text;
@@ -670,8 +730,8 @@ QPushButton#iconBtn:pressed {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #111111,
-        stop:1 #0b0b0b
+        stop:0 @pressedTop,
+        stop:1 @pressedBottom
     );
     color: @text;
 }
@@ -692,8 +752,8 @@ QFrame#isoDropZone {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #121212,
-        stop:1 #0d0d0d
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px dashed @border;
     border-radius: $radius_lg;
@@ -775,11 +835,11 @@ QFrame#block {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #151515,
-        stop:1 #0f0f0f
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    border-top: 1px solid @borderHighlight;
     border-radius: $radius_lg;
 }
 
@@ -788,8 +848,8 @@ QFrame#recessed {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #101010,
-        stop:1 #0b0b0b
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: $radius_md;
@@ -861,11 +921,11 @@ QFrame#progressArea {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #171717,
-        stop:1 #101010
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    border-top: 1px solid @borderHighlight;
     border-radius: $radius_lg;
 }
 
@@ -1003,8 +1063,8 @@ QMenu {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #161616,
-        stop:1 #0f0f0f
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     color: @text;
@@ -1021,8 +1081,8 @@ QMenu::item:selected {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #2a2a2a,
-        stop:1 #1d1d1d
+        stop:0 @activeTop,
+        stop:1 @activeBottom
     );
 }
 
@@ -1041,8 +1101,8 @@ QLineEdit {
         spread:pad,
         x1:0, y1:0,
         x2:0, y2:1,
-        stop:0 #171717,
-        stop:1 #0f0f0f
+        stop:0 @surfaceTop,
+        stop:1 @surfaceBottom
     );
     border: 1px solid @border;
     border-radius: $radius_btn;

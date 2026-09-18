@@ -656,7 +656,7 @@ def test_flash_all_parallel_uses_campaign_batches(
         letters=["F"],
     )
     monkeypatch.setattr(cli, "_detect_drives", lambda *_: [first, second])
-    monkeypatch.setattr("core.history._APP_DIR", tmp_path / "app")
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
     started: list[str] = []
 
     def _fake_run(worker, label):
@@ -712,7 +712,7 @@ def test_deploy_runs_one_image_to_multiple_targets(
         letters=["F"],
     )
     monkeypatch.setattr(cli, "_detect_drives", lambda: [first, second])
-    monkeypatch.setattr("core.history._APP_DIR", tmp_path / "app")
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
     started: list[str] = []
 
     def _fake_run(worker, label):
@@ -780,10 +780,10 @@ def test_deploy_rejects_invalid_parallelism(tmp_path, capsys):
 
 
 def test_deploy_status_cancel_and_retry(tmp_path, monkeypatch, capsys):
-    from core import history
+    from core import paths
     from core.jobs import JobManifest, save_manifest
 
-    history._APP_DIR = tmp_path / "app"
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
     manifest = JobManifest(
         source_path="image.iso",
         source_size=10,
@@ -792,7 +792,7 @@ def test_deploy_status_cancel_and_retry(tmp_path, monkeypatch, capsys):
         target_size=100,
         state="resumable",
     )
-    path = history._APP_DIR / "jobs" / f"{manifest.job_id}.json"
+    path = paths.APP_DIR / "jobs" / f"{manifest.job_id}.json"
     save_manifest(path, manifest)
 
     assert cli.main(["deploy", "--status"]) == cli.EXIT_OK

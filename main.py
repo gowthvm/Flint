@@ -106,12 +106,13 @@ def _ensure_admin(settings: Any) -> None:
         # may not exist yet.
         try:
             MB_YESNO = 0x04
+            MB_TOPMOST = 0x40000
             IDYES = 6
             res = ctypes.windll.user32.MessageBoxW(
                 None,
                 "Flint requires administrator privileges to access raw disks.\n\nElevate now?",
                 "Flint — elevation required",
-                MB_YESNO,
+                MB_YESNO | MB_TOPMOST,
             )
             if res != IDYES:
                 _log("user declined elevation; continuing without admin")

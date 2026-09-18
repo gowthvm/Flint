@@ -7,11 +7,43 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paths import APP_DIR, file_lock
+
 logger = logging.getLogger("flint")
 
-_APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Flint"
-HISTORY_PATH = _APP_DIR / "history.json"
+HISTORY_PATH = APP_DIR / "history.json"
+_HISTORY_LOCK_PATH = HISTORY_PATH.with_suffix(".lock")
 SCHEMA_VERSION = 2
+_MAX_HISTORY_ENTRIES = 10_000
+
+
+def _truncate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Trim non-audited entries if history exceeds the size limit.
+
+    Audited entries (containing ``integrity_sha256``) are always kept
+    because removing one would break the hash chain.
+    """
+    from core.settings import get
+
+    max_entries = get("max_history_entries") or _MAX_HISTORY_ENTRIES
+    if len(entries) <= max_entries:
+        return entries
+
+    audited = [e for e in entries if e.get("integrity_sha256")]
+    non_audited = [e for e in entries if not e.get("integrity_sha256")]
+    headroom = max(0, max_entries - len(audited))
+    trimmed_non_audited = (
+        non_audited[-headroom:] if headroom < len(non_audited) else non_audited
+    )
+    trimmed = trimmed_non_audited + audited
+    if len(trimmed) < len(entries):
+        logger.info(
+            "history truncated: %d -> %d entries (dropped %d non-audited)",
+            len(entries),
+            len(trimmed),
+            len(entries) - len(trimmed),
+        )
+    return trimmed
 
 
 def load_history() -> list[dict[str, Any]]:
@@ -27,18 +59,28 @@ def load_history() -> list[dict[str, Any]]:
     return []
 
 
+def _save_history_unlocked(entries: list[dict[str, Any]]) -> None:
+    """Write history to disk. Caller must already hold the file lock."""
+    entries = _truncate_entries(entries)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "entries": entries,
+    }
+    tmp = HISTORY_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(HISTORY_PATH)
+
+
 def save_history(entries: list[dict[str, Any]]) -> None:
+    """Persist history entries atomically, protected by a file lock."""
     try:
-        _APP_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "entries": entries,
-        }
-        tmp = HISTORY_PATH.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        tmp.replace(HISTORY_PATH)
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with file_lock(_HISTORY_LOCK_PATH):
+            _save_history_unlocked(entries)
     except OSError:
         # A history write must never crash a flash flow or block close:
         # log and continue with the in-memory entry.
@@ -46,9 +88,15 @@ def save_history(entries: list[dict[str, Any]]) -> None:
 
 
 def append_history(entry: dict[str, Any]) -> None:
-    entries = load_history()
-    entries.append(entry)
-    save_history(entries)
+    """Append a single entry to history, protected by a file lock."""
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with file_lock(_HISTORY_LOCK_PATH):
+            entries = load_history()
+            entries.append(entry)
+            _save_history_unlocked(entries)
+    except OSError:
+        logger.exception("failed to append history")
 
 
 def _integrity_payload(entry: dict[str, Any]) -> str:
@@ -69,22 +117,28 @@ def history_entry_digest(entry: dict[str, Any]) -> str:
 
 def append_audited_history(entry: dict[str, Any]) -> dict[str, Any]:
     """Append a hash-chained operation record and return the stored record."""
-    entries = load_history()
-    record = dict(entry)
-    previous = next(
-        (
-            str(item["integrity_sha256"])
-            for item in reversed(entries)
-            if item.get("integrity_sha256")
-        ),
-        None,
-    )
-    if previous is not None:
-        record["integrity_prev"] = previous
-    record["integrity_sha256"] = history_entry_digest(record)
-    entries.append(record)
-    save_history(entries)
-    return record
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with file_lock(_HISTORY_LOCK_PATH):
+            entries = load_history()
+            record = dict(entry)
+            previous = next(
+                (
+                    str(item["integrity_sha256"])
+                    for item in reversed(entries)
+                    if item.get("integrity_sha256")
+                ),
+                None,
+            )
+            if previous is not None:
+                record["integrity_prev"] = previous
+            record["integrity_sha256"] = history_entry_digest(record)
+            entries.append(record)
+            _save_history_unlocked(entries)
+            return record
+    except OSError:
+        logger.exception("failed to append audited history")
+        return entry
 
 
 def verify_history_integrity() -> tuple[bool, int | None]:
@@ -124,8 +178,6 @@ def export_history_csv(target_path: str | Path) -> bool:
         if not entries:
             return False
         with open(target_path, "w", newline="", encoding="utf-8") as f:
-            if not entries:
-                return True
             writer = csv.DictWriter(f, fieldnames=list(entries[0].keys()))
             writer.writeheader()
             writer.writerows(entries)
@@ -141,12 +193,20 @@ def export_history_markdown(target_path: str | Path) -> bool:
         keys = sorted({key for entry in entries for key in entry})
         if not keys:
             return False
+
         def cell(value: Any) -> str:
-            return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+            return (
+                str(value if value is not None else "")
+                .replace("|", "\\|")
+                .replace("\n", " ")
+            )
+
         lines = ["# Flint Operation History", "", "| " + " | ".join(keys) + " |"]
         lines.append("| " + " | ".join("---" for _ in keys) + " |")
         for entry in entries:
-            lines.append("| " + " | ".join(cell(entry.get(key)) for key in keys) + " |")
+            lines.append(
+                "| " + " | ".join(cell(entry.get(key)) for key in keys) + " |"
+            )
         Path(target_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
         return True
     except OSError:

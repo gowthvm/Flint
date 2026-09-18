@@ -10,10 +10,12 @@ from typing import Any
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.deviceio import (
-    GENERIC_READ,
-    IOCTL_DISK_GET_LENGTH_INFO,
     TRANSIENT_SEEK_ERRORS,
+    drive_size,
     kernel32,
+    open_drive,
+    read_bytes_retry,
+    seek_retry,
 )
 
 logger = logging.getLogger("flint")
@@ -32,82 +34,11 @@ class _Cancelled(Exception):
     """Raised internally when the caller's cancel callback fires."""
 
 
-def _open_reader(path: str) -> Any:
-    """Open a file or raw device for reading; return the handle or None."""
-    k32 = kernel32()
-    handle = k32.CreateFileW(
-        path,
-        GENERIC_READ,
-        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
-        None,
-        3,  # OPEN_EXISTING
-        0,
-        None,
-    )
-    if not handle or handle == ctypes.c_void_p(-1).value:
-        return None
-    return handle
-
-
 def _device_size(handle: Any) -> int:
-    k32 = kernel32()
-    length = ctypes.c_ulonglong()
-    returned = ctypes.c_ulong()
-    ok = k32.DeviceIoControl(
-        handle,
-        IOCTL_DISK_GET_LENGTH_INFO,
-        None,
-        0,
-        ctypes.byref(length),
-        ctypes.sizeof(length),
-        ctypes.byref(returned),
-        None,
-    )
-    if not ok or length.value <= 0:
+    try:
+        return drive_size(handle)
+    except OSError:
         return 0
-    return length.value
-
-
-def _seek(handle: Any, offset: int, retries: int) -> bool:
-    """Position ``handle`` at ``offset``, retrying failed calls.
-
-    Returns False when every attempt failed (``_Cancelled`` is not raised;
-    callers keep the cancel check in the read loop).
-    """
-    k32 = kernel32()
-    for _ in range(retries + 1):
-        position = ctypes.c_longlong()
-        if k32.SetFilePointerEx(
-            handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
-        ):
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def _read_chunk(
-    handle: Any,
-    buffer: Any,
-    count: int,
-    retries: int,
-    is_cancelled: Callable[[], bool] | None,
-) -> int | None:
-    """Read up to ``count`` bytes, retrying failed reads ``retries`` times.
-
-    Returns the number of bytes read (0 = end of device) or ``None`` when
-    every attempt failed. Raises ``_Cancelled`` when the cancel callback
-    fires between attempts.
-    """
-    k32 = kernel32()
-    read = ctypes.c_ulong()
-    for attempt in range(retries + 1):
-        if is_cancelled is not None and is_cancelled():
-            raise _Cancelled()
-        if k32.ReadFile(handle, buffer, count, ctypes.byref(read), None):
-            return read.value
-        if attempt < retries:
-            time.sleep(0.05)
-    return None
 
 
 def compute_sha256(
@@ -121,8 +52,9 @@ def compute_sha256(
     Returns ``(True, hexdigest)`` on success or ``(False, message)`` on
     failure. ``progress`` is called with ``(bytes_done, bytes_total)``.
     """
-    handle = _open_reader(path)
-    if handle is None:
+    try:
+        handle = open_drive(path, write=False)
+    except OSError:
         return False, f"could not open {path} for reading"
     try:
         if path.startswith("\\\\.\\"):
@@ -135,15 +67,14 @@ def compute_sha256(
         done = 0
         while done < size:
             count = min(chunk_size, size - done)
-            buffer = ctypes.create_string_buffer(count)
             try:
-                nread = _read_chunk(handle, buffer, count, 0, is_cancelled)
-            except _Cancelled:
+                data = read_bytes_retry(handle, count, retries=0, is_cancelled=is_cancelled)
+            except Exception:
                 return False, "cancelled"
-            if nread is None or nread == 0:
+            if data is None or len(data) == 0:
                 return False, "read failed before the end of the device"
-            digest.update(buffer.raw[:nread])
-            done += nread
+            digest.update(data)
+            done += len(data)
             if progress is not None:
                 progress(done, size)
         return True, digest.hexdigest()
@@ -193,8 +124,9 @@ def verify_device(
         "drive_size": 0,
         "error": "",
     }
-    handle = _open_reader(device_path)
-    if handle is None:
+    try:
+        handle = open_drive(device_path, write=False)
+    except OSError:
         result["error"] = f"could not open device for read-back: {device_path}"
         return result
     iso_file = None
@@ -235,15 +167,14 @@ def verify_device(
             t_start = time.perf_counter()
             while done < verify_size:
                 count = min(chunk_size, verify_size - done)
-                buffer = ctypes.create_string_buffer(count)
                 try:
-                    nread = _read_chunk(
-                        handle, buffer, count, retries, is_cancelled
+                    data = read_bytes_retry(
+                        handle, count, retries=retries, is_cancelled=is_cancelled
                     )
-                except _Cancelled:
+                except Exception:
                     result["error"] = "cancelled"
                     return result
-                if nread is None:
+                if data is None:
                     result["bad_sectors"].append(done - done % SECTOR_SIZE)
                     done += count
                     # Both the device and the source file stayed at the old
@@ -251,7 +182,7 @@ def verify_device(
                     # the image is still read, hashed and compared.
                     if iso_file is not None:
                         iso_file.seek(done)
-                    if not _seek(handle, done, retries):
+                    if not seek_retry(handle, done, retries):
                         result["error"] = (
                             "could not reposition the device for read-back"
                         )
@@ -259,10 +190,10 @@ def verify_device(
                     if progress is not None:
                         progress(done, verify_size)
                     continue
-                if nread == 0:
+                if len(data) == 0:
                     result["error"] = "read-back ended before the image"
                     return result
-                data = buffer.raw[:nread]
+                nread = len(data)
                 digest.update(data)
                 if iso_file is not None and (
                     not scan_full_drive
@@ -406,38 +337,18 @@ def hash_drive(
     `size` is None) and compare against the expected SHA-256 digest.
 
     Returns (ok, hexdigest) on success or (False, message) on failure."""
-    k32 = kernel32()
-    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
     CHUNK = 4 * 1024 * 1024
 
-    handle = k32.CreateFileW(
-        drive_path,
-        GENERIC_READ,
-        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
-        None,
-        3,  # OPEN_EXISTING
-        0,
-        None,
-    )
-    if not handle or handle == INVALID_HANDLE_VALUE:
+    try:
+        handle = open_drive(drive_path, write=False)
+    except OSError:
         return False, f"could not open drive for read-back: {drive_path}"
     try:
         if size is None:
-            length = ctypes.c_ulonglong()
-            returned = ctypes.c_ulong()
-            ok = k32.DeviceIoControl(
-                handle,
-                IOCTL_DISK_GET_LENGTH_INFO,
-                None,
-                0,
-                ctypes.byref(length),
-                ctypes.sizeof(length),
-                ctypes.byref(returned),
-                None,
-            )
-            if not ok or length.value <= 0:
+            try:
+                size = drive_size(handle)
+            except OSError:
                 return False, "could not determine drive size for verification"
-            size = length.value
         digest = hashlib.sha256()
         remaining = size
         done = 0
@@ -445,30 +356,12 @@ def hash_drive(
             if is_cancelled is not None and is_cancelled():
                 return False, "cancelled"
             count = min(CHUNK, remaining)
-            buffer = ctypes.create_string_buffer(count)
-            # Retry transient read failures like the writer does.
-            last_err = 0
-            for attempt in range(4):
-                read = ctypes.c_ulong()
-                ok = k32.ReadFile(
-                    handle,
-                    buffer,
-                    count,
-                    ctypes.byref(read),
-                    None,
-                )
-                if ok and read.value > 0:
-                    break
-                last_err = k32.GetLastError()
-                if attempt < 3 and last_err in TRANSIENT_SEEK_ERRORS:
-                    time.sleep(0.5 * (2 ** attempt))
-                    continue
-                break
-            if not ok or read.value == 0:
-                return False, f"drive read-back ended at byte {done:,} (error {last_err})"
-            digest.update(buffer.raw[: read.value])
-            remaining -= read.value
-            done += read.value
+            data = read_bytes_retry(handle, count, retries=3, is_cancelled=is_cancelled)
+            if data is None or len(data) == 0:
+                return False, f"drive read-back ended at byte {done:,}"
+            digest.update(data)
+            remaining -= len(data)
+            done += len(data)
             if progress is not None:
                 progress(done, size)
         result = digest.hexdigest()
@@ -478,7 +371,7 @@ def hash_drive(
             return False, "verification failed: hash mismatch"
         return True, result
     finally:
-        k32.CloseHandle(handle)
+        kernel32().CloseHandle(handle)
 
 
 class VerifyWorker(QThread):
