@@ -10,7 +10,7 @@ verification, and structured boot-confidence diagnostics.
 [![Downloads](https://img.shields.io/github/downloads/gowthvm/Flint/total)](https://github.com/gowthvm/Flint/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%2064--bit-0078d6)
-[![Docs](https://img.shields.io/badge/docs-flintusb.pages.dev-0078d6)](https://flintusb.pages.dev)
+[![Docs](https://img.shields.io/badge/docs-flintweb.vercel.app-0078d6)](https://flintweb.vercel.app)
 
 Flint writes disk images (ISO, IMG, DD) to USB drives on Windows 10/11, then
 reads the drive back and verifies that every byte was written correctly — so
@@ -19,7 +19,7 @@ you can trust the result before you boot from it. It needs no installation
 until you confirm the target by typing its serial number. The same engine is
 available as a fully scriptable command line for power users and IT teams.
 
-![Flint flashing an ISO to a USB drive](https://flintusb.pages.dev/assets/screenshot.png)
+![Flint flashing an ISO to a USB drive](https://flintweb.vercel.app/assets/screenshot.png)
 
 *Flashing an ISO: the image is hashed up front, the target drive is confirmed
 by typing its serial, and the drive is read back after the write.*
@@ -90,7 +90,7 @@ by typing its serial, and the drive is read back after the write.*
 
 Flint's edge is confidence: it reads the drive back after every write and
 verifies the result, where most tools stop at "wrote the file." The full
-walkthrough is on the [comparison page](https://flintusb.pages.dev/compare).
+walkthrough is on the [comparison page](https://flintweb.vercel.app/compare).
 
 ## Download & install
 
@@ -303,7 +303,7 @@ flint help [<command>]
 - `flash` also accepts `--resume` (continue an interrupted write from where it
   left off), `--check-fake` (probe for counterfeit capacity), `--bypass-tpm`,
   `--dry-run` (preview without writing), and `--quiet`. See `flint flash --help`
-  or the [CLI reference](https://flintusb.pages.dev/cli) for the full list.
+  or the [CLI reference](https://flintweb.vercel.app/cli) for the full list.
 - When `--confirm` is omitted on an interactive terminal, the serial is
   prompted for; a piped command without `--confirm` is refused, never guessed.
 - `verify` without a digest runs a read-only bad-block scan (equivalent to
@@ -341,7 +341,7 @@ flint help [<command>]
   counterfeit capacity; replace it.
 
 The complete symptom guide lives in the
-[manual's troubleshooting section](https://flintusb.pages.dev/docs#troubleshoot).
+[manual's troubleshooting section](https://flintweb.vercel.app/docs#troubleshoot).
 
 ## Development
 
@@ -474,7 +474,7 @@ Flint/
 ## Support
 
 - Full manual — user guide, CLI reference, and FAQ:
-  https://flintusb.pages.dev
+  https://flintweb.vercel.app
 - Report issues and open pull requests on GitHub:
   https://github.com/gowthvm/Flint
 

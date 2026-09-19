@@ -32,10 +32,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://flintusb.pages.dev"
+Homepage = "https://flintweb.vercel.app"
 Repository = "https://github.com/gowthvm/Flint"
 Issues = "https://github.com/gowthvm/Flint/issues"
-Documentation = "https://flintusb.pages.dev/docs"
+Documentation = "https://flintweb.vercel.app/docs"
 
 [project.scripts]
 flint = "main:main"
