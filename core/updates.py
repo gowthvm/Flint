@@ -180,6 +180,20 @@ class UpdateDownloadWorker(QThread):
         self.finished_download.emit(ok, result)
 
 
+class DigestFetchWorker(QThread):
+    """Fetch sidecar digest in a background thread."""
+
+    finished = pyqtSignal(str, str)  # (url, digest or "")
+
+    def __init__(self, url: str | None) -> None:
+        super().__init__()
+        self._url = url
+
+    def run(self) -> None:
+        digest = fetch_sidecar_digest(self._url)
+        self.finished.emit(self._url or "", digest or "")
+
+
 def default_download_path(version: str) -> str:
     """``~/Downloads/flint-<version>.exe`` (fall back to home)."""
     downloads = Path.home() / "Downloads"

@@ -299,6 +299,40 @@ class IsoDetectWorker(QThread):
             self.detected.emit(self._path, False, False, False)
 
 
+class DecompressWorker(QThread):
+    """Decompress an archive in a background thread."""
+
+    done = pyqtSignal(str, bool, str, str)  # (original_path, ok, extracted_path, tmp_dir)
+
+    def __init__(self, path: str, tmp_dir: str, fmt: str) -> None:
+        super().__init__()
+        self._path = path
+        self._tmp_dir = tmp_dir
+        self._fmt = fmt
+
+    def run(self) -> None:
+        from core.decompress import (
+            _decompress_gz,
+            _decompress_xz,
+            _decompress_zip,
+        )
+
+        try:
+            if self._fmt == ".zip":
+                extracted = _decompress_zip(self._path, self._tmp_dir)
+            elif self._fmt == ".gz":
+                extracted = _decompress_gz(self._path, self._tmp_dir)
+            elif self._fmt == ".xz":
+                extracted = _decompress_xz(self._path, self._tmp_dir)
+            else:
+                self.done.emit(self._path, False, "", "")
+                return
+            self.done.emit(self._path, True, extracted, self._tmp_dir)
+        except Exception:
+            logger.exception("DecompressWorker failed for %s", self._path)
+            self.done.emit(self._path, False, "", "")
+
+
 class IsoDropZone(QFrame):
     iso_selected = pyqtSignal(str)
     iso_analysis = pyqtSignal(str, bool, bool, bool)
@@ -314,6 +348,7 @@ class IsoDropZone(QFrame):
         self._decompressed_path: str | None = None
         self._worker: IsoWorker | None = None
         self._analyzer: IsoDetectWorker | None = None
+        self._decompress_worker: DecompressWorker | None = None
         self._digest: str | None = None
         self._hash_finished = False
         self._retired_workers: list[QThread] = []
@@ -515,6 +550,11 @@ class IsoDropZone(QFrame):
         if analyzer is not None:
             self._retired_workers.append(analyzer)
         self._analyzer = None
+        dc = self._decompress_worker
+        if dc is not None and dc.isRunning():
+            dc.terminate()
+            dc.wait(2000)
+        self._decompress_worker = None
         self._digest = None
         self._hash_finished = False
         self._path = None
@@ -543,48 +583,19 @@ class IsoDropZone(QFrame):
         self._digest = None
         self._hash_finished = False
         self._cleanup_decompressed()
+
+        dc = self._decompress_worker
+        if dc is not None and dc.isRunning():
+            dc.terminate()
+            dc.wait(2000)
+        self._decompress_worker = None
+
         from core.decompress import is_compressed
 
-        hash_path = path
-        if is_compressed(path):
-            try:
-                import tempfile
-
-                tmp_dir = tempfile.mkdtemp(prefix="flint-decompress-")
-                from core.decompress import (
-                    _decompress_gz,
-                    _decompress_xz,
-                    _decompress_zip,
-                    compressed_format,
-                )
-
-                fmt = compressed_format(path)
-                if fmt == ".zip":
-                    extracted = _decompress_zip(path, tmp_dir)
-                elif fmt == ".gz":
-                    extracted = _decompress_gz(path, tmp_dir)
-                elif fmt == ".xz":
-                    extracted = _decompress_xz(path, tmp_dir)
-                else:
-                    extracted = path
-                    tmp_dir = ""
-                self._decompressed_path = extracted
-                hash_path = extracted
-            except Exception:
-                logger.exception("failed to decompress %s", path)
-                self._decompressed_path = None
-                self._drop_error.setText(
-                    f"Failed to decompress {os.path.basename(path)}"
-                )
-                self._drop_error.setVisible(True)
-                self._drop_timer.start(5000)
-                return
         self._path = path
         size = DriveDetector.format_size(os.path.getsize(path))
         self._iso_name.setText(os.path.basename(path))
-        suffix = ""
-        if is_compressed(path):
-            suffix = " (compressed)"
+        suffix = " (compressed)" if is_compressed(path) else ""
         self._iso_meta.setText(f"{size}{suffix} \u00b7 Verifying\u2026")
         self._iso_meta.setProperty("error", False)
         _restyle(self._iso_meta)
@@ -594,6 +605,47 @@ class IsoDropZone(QFrame):
         _restyle(self)
         self.iso_selected.emit(path)
 
+        if is_compressed(path):
+            self._iso_meta.setText(f"{size} (compressed) \u00b7 Decompressing\u2026")
+            import tempfile
+
+            from core.decompress import compressed_format
+
+            tmp_dir = tempfile.mkdtemp(prefix="flint-decompress-")
+            fmt = compressed_format(path)
+            if fmt in (".zip", ".gz", ".xz"):
+                worker = DecompressWorker(path, tmp_dir, fmt)
+                self._decompress_worker = worker
+                worker.done.connect(self._on_decompress_done)
+                worker.start()
+            else:
+                self._drop_error.setText(
+                    f"Unsupported compression: {fmt}"
+                )
+                self._drop_error.setVisible(True)
+                self._drop_timer.start(5000)
+            return
+
+        self._start_hash_and_analyze(path, size)
+
+    def _on_decompress_done(
+        self, path: str, ok: bool, extracted: str, tmp_dir: str
+    ) -> None:
+        if path != self._path:
+            return
+        self._decompress_worker = None
+        if not ok:
+            self._drop_error.setText(
+                f"Failed to decompress {os.path.basename(path)}"
+            )
+            self._drop_error.setVisible(True)
+            self._drop_timer.start(5000)
+            return
+        self._decompressed_path = extracted
+        size = DriveDetector.format_size(os.path.getsize(path))
+        self._start_hash_and_analyze(extracted, size)
+
+    def _start_hash_and_analyze(self, hash_path: str, size: str) -> None:
         worker = IsoWorker(hash_path)
         self._worker = worker
         worker.hash_done.connect(self._on_hash_done)

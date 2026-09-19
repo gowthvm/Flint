@@ -75,11 +75,11 @@ from core.history import (
 )
 from core.paths import APP_DIR
 from core.updates import (
+    DigestFetchWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
     compare_version,
     default_download_path,
-    fetch_sidecar_digest,
     release_executable,
     sidecar_digest_url,
     version_from_tag,
@@ -164,6 +164,7 @@ class MainWindow(QMainWindow):
         self._fleet_drive: dict[str, Any] | None = None
         self._update_checker: UpdateCheckWorker | None = None
         self._update_downloader: UpdateDownloadWorker | None = None
+        self._digest_fetcher: DigestFetchWorker | None = None
         self._pending_update_path = ""
         self._sidecar_status = "missing"
         self._sidecar_detail = ""
@@ -1734,32 +1735,38 @@ class MainWindow(QMainWindow):
         self._tray.show()
 
     def _show_toast(self, title: str, message: str) -> None:
-        """Show a Windows toast notification using PowerShell."""
-        try:
-            ps_script = (
-                "[Windows.UI.Notifications.ToastNotificationManager, "
-                "Windows.UI.Notifications, ContentType = WindowsRuntime] "
-                "| Out-Null\n"
-                "[Windows.Data.Xml.Dom.XmlDocument, "
-                "Windows.Data.Xml.Dom, ContentType = WindowsRuntime] "
-                "| Out-Null\n"
-                f'$template = "<toast><visual><binding '
-                f"template='ToastGeneric'><text>{title}</text>"
-                f"<text>{message}</text></binding></visual></toast>\"\n"
-                "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
-                "$xml.LoadXml($template)\n"
-                "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n"
-                "[Windows.UI.Notifications.ToastNotificationManager]"
-                "::CreateToastNotifier('Flint').Show($toast)"
-            )
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True,
-                check=False,
-                timeout=5,
-            )
-        except Exception:
-            logger.debug("PowerShell completions install failed")
+        """Show a Windows toast notification using PowerShell (non-blocking)."""
+        import threading
+
+        ps_script = (
+            "[Windows.UI.Notifications.ToastNotificationManager, "
+            "Windows.UI.Notifications, ContentType = WindowsRuntime] "
+            "| Out-Null\n"
+            "[Windows.Data.Xml.Dom.XmlDocument, "
+            "Windows.Data.Xml.Dom, ContentType = WindowsRuntime] "
+            "| Out-Null\n"
+            f'$template = "<toast><visual><binding '
+            f"template='ToastGeneric'><text>{title}</text>"
+            f"<text>{message}</text></binding></visual></toast>\"\n"
+            "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
+            "$xml.LoadXml($template)\n"
+            "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)\n"
+            "[Windows.UI.Notifications.ToastNotificationManager]"
+            "::CreateToastNotifier('Flint').Show($toast)"
+        )
+
+        def _run() -> None:
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            except Exception:
+                logger.debug("toast notification failed")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_tray_quit(self) -> None:
         if self._busy() and not dialogs.confirm(
@@ -2983,11 +2990,10 @@ class MainWindow(QMainWindow):
             self._clone_worker.cancel()
 
     def _recheck_drive(self, drive: dict[str, Any]) -> dict[str, Any] | None:
-        drives = self._detector.list_removable_drives()
         current = next(
             (
                 d
-                for d in drives
+                for d in self._drives
                 if d.get("physical_path") == drive.get("physical_path")
             ),
             None,
@@ -3864,7 +3870,33 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self._update_downloader is not None:
             return
-        digest = fetch_sidecar_digest(sidecar_digest_url(release))
+        digest_url = sidecar_digest_url(release)
+        if digest_url:
+            self._pending_update_url = url
+            self._pending_update_dest = dest
+            self._pending_update_release = release
+            self._digest_fetcher = DigestFetchWorker(digest_url)
+            self._digest_fetcher.finished.connect(self._on_digest_fetched)
+            self._digest_fetcher.start()
+        else:
+            self._begin_update_download(url, dest, None)
+
+    def _on_digest_fetched(self, url: str, digest: str) -> None:
+        fetcher = self._digest_fetcher
+        self._digest_fetcher = None
+        if fetcher is not None:
+            self._retired_workers.append(fetcher)
+        self._begin_update_download(
+            self._pending_update_url,
+            self._pending_update_dest,
+            digest or None,
+        )
+
+    def _begin_update_download(
+        self, url: str, dest: str, digest: str | None
+    ) -> None:
+        if self._update_downloader is not None:
+            return
         worker = UpdateDownloadWorker(url, dest, digest)
         self._update_downloader = worker
         self._pending_update_path = dest
