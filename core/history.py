@@ -167,7 +167,10 @@ def clear_history() -> None:
 def export_history(target_path: str | Path) -> bool:
     try:
         load_history()  # validates the store is readable
-        shutil.copy2(HISTORY_PATH, target_path)
+        target = Path(target_path)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        shutil.copy2(HISTORY_PATH, tmp)
+        tmp.replace(target)
         return True
     except OSError:
         return False

@@ -95,6 +95,8 @@ def _decompress_zip(zip_path: str, tmp_dir: str) -> str:
     """Extract the first large file from a zip archive."""
     import zipfile
 
+    _MAX_EXTRACTED_SIZE = 16 * 1024 * 1024 * 1024  # 16 GiB safety limit
+
     with zipfile.ZipFile(zip_path, "r") as zf:
         candidates = [
             info for info in zf.infolist()
@@ -104,6 +106,12 @@ def _decompress_zip(zip_path: str, tmp_dir: str) -> str:
             raise ValueError(f"zip archive {zip_path} contains no files")
         candidates.sort(key=lambda info: info.file_size, reverse=True)
         target = candidates[0]
+        if target.file_size > _MAX_EXTRACTED_SIZE:
+            raise ValueError(
+                f"zip entry {target.filename!r} is "
+                f"{target.file_size / (1024**3):.1f} GiB — "
+                "extraction limit is 16 GiB (possible zip bomb)"
+            )
         extracted = os.path.join(tmp_dir, os.path.basename(target.filename))
         with zf.open(target) as src, open(extracted, "wb") as dst:
             shutil.copyfileobj(src, dst)

@@ -833,9 +833,9 @@ class MainWindow(QMainWindow):
         return entered.lower() == want.lower()
 
     def _on_drives_ready(self, drives: list[dict[str, Any]]) -> None:
+        self._drives = drives
         if self._busy():
             return
-        self._drives = drives
         self._fleet_tick()
         if self._current_drive is not None:
             selected = next(
@@ -4079,9 +4079,13 @@ class MainWindow(QMainWindow):
                     "use_native": self._native_toggle.isChecked(),
                 }
             )
+        drive_path = self._drive_path_for(selected)
+        if not drive_path:
+            self._fail_queue(f"could not resolve drive path for {selected.get('letter', '?')}")
+            return
         self._begin_write(
             image,
-            self._drive_path_for(selected) or "",
+            drive_path,
             letters,
             writer_kwargs,
             selected,

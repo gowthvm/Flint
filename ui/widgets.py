@@ -318,6 +318,8 @@ class DecompressWorker(QThread):
         )
 
         try:
+            if self.isInterruptionRequested():
+                return
             if self._fmt == ".zip":
                 extracted = _decompress_zip(self._path, self._tmp_dir)
             elif self._fmt == ".gz":
@@ -326,6 +328,8 @@ class DecompressWorker(QThread):
                 extracted = _decompress_xz(self._path, self._tmp_dir)
             else:
                 self.done.emit(self._path, False, "", "")
+                return
+            if self.isInterruptionRequested():
                 return
             self.done.emit(self._path, True, extracted, self._tmp_dir)
         except Exception:
@@ -552,8 +556,8 @@ class IsoDropZone(QFrame):
         self._analyzer = None
         dc = self._decompress_worker
         if dc is not None and dc.isRunning():
-            dc.terminate()
-            dc.wait(2000)
+            dc.requestInterruption()
+            dc.wait(3000)
         self._decompress_worker = None
         self._digest = None
         self._hash_finished = False
@@ -586,8 +590,8 @@ class IsoDropZone(QFrame):
 
         dc = self._decompress_worker
         if dc is not None and dc.isRunning():
-            dc.terminate()
-            dc.wait(2000)
+            dc.requestInterruption()
+            dc.wait(3000)
         self._decompress_worker = None
 
         from core.decompress import is_compressed

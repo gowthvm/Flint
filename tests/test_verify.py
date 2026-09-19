@@ -267,10 +267,11 @@ def test_verify_skips_bad_chunk_and_keeps_comparing_the_tail(tmp_path, monkeypat
     assert result["mismatches"] == []
     # The scan ran to the very end of the image (tail was not dropped).
     assert progress[-1] == (300_000, 300_000)
-    # The digest covers the real bytes read back: chunk 1 + the tail after
-    # the skipped chunk, in order. A desynced verifier would hash the bad
-    # chunk's bytes a second time instead of the tail.
-    expected_digest = hashlib.sha256(payload[:64 * 1024] + payload[128 * 1024:])
+    # The digest covers the real bytes read back plus zero-padded bad
+    # sectors, so the hash is complete even when some chunks are unreadable.
+    expected_digest = hashlib.sha256(
+        payload[:64 * 1024] + b"\x00" * 64 * 1024 + payload[128 * 1024:]
+    )
     assert result["digest"] == expected_digest.hexdigest()
 
 

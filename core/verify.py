@@ -170,6 +170,9 @@ def verify_device(
                     return result
                 if data is None:
                     result["bad_sectors"].append(done - done % SECTOR_SIZE)
+                    # Hash a zero buffer for bad sectors so the digest covers
+                    # the full image even when bad sectors exist.
+                    digest.update(b"\x00" * count)
                     done += count
                     # Both the device and the source file stayed at the old
                     # position; skip the chunk on both sides so the tail of

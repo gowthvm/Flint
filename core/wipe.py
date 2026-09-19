@@ -150,7 +150,7 @@ class WipeWorker(QThread):
             if total <= 0:
                 raise OSError("unable to determine drive size")
             patterns = _wipe_patterns(self.method)
-        except OSError as exc:
+        except Exception as exc:
             self.finished.emit(False, str(exc))
             kernel32().CloseHandle(handle)
             return

@@ -35,7 +35,7 @@ def file_lock(
 
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 break
-            except OSError:
+            except (OSError, ImportError):
                 if attempt == retries:
                     raise
                 _time.sleep(delay)

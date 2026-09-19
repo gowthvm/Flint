@@ -228,19 +228,17 @@ class UsbWriter(QThread):
             try:
                 self.phase.emit("Writing")
                 self._run_inner()
+                if self._finished:
+                    return
+                if self.verify_after_write and (
+                    self.verify_sha256 or self.bad_block_scan
+                ):
+                    self._verify_after_write()
+                if self._finished:
+                    return
+                self.finished.emit(True, "")
             finally:
                 self._unlock_volumes(volumes)
-            if self._finished:
-                return
-            if self.verify_after_write and (
-                self.verify_sha256 or self.bad_block_scan
-            ):
-                self._verify_after_write()
-            if self._finished:
-                # A cancelled verification already reported its outcome;
-                # never follow it with a (True, "") success signal.
-                return
-            self.finished.emit(True, "")
         except Exception as exc:
             logger.exception("UsbWriter.run failed")
             self.finished.emit(False, str(exc))
@@ -303,8 +301,8 @@ class UsbWriter(QThread):
             if total <= 0:
                 raise ValueError("ISO file is empty")
             handle = self._open_drive()
-            drive_size = self._drive_size(handle)
-            if drive_size < total:
+            target_capacity = self._drive_size(handle)
+            if target_capacity < total:
                 self._finished = True
                 self.finished.emit(
                     False, "drive is too small for this image"
@@ -322,7 +320,8 @@ class UsbWriter(QThread):
                 kernel32().CloseHandle(handle)
                 handle = None
 
-        assert handle is not None  # pre-flight failures returned above
+        if handle is None:
+            raise RuntimeError("UsbWriter: drive handle lost after pre-flight")
 
         self.total_bytes.emit(total)
 
@@ -338,7 +337,6 @@ class UsbWriter(QThread):
                     kernel32().CloseHandle(handle)
                 return
 
-        written = 0
         source_written = 0
         manifest: jobs.JobManifest | None = None
         durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
@@ -360,7 +358,7 @@ class UsbWriter(QThread):
                             source_size=total,
                             source_sha256=source_digest,
                             target_fingerprint=self.target_fingerprint,
-                            target_size=drive_size,
+                            target_size=target_capacity,
                             options=options,
                         )
                     else:
@@ -369,7 +367,7 @@ class UsbWriter(QThread):
                             source_size=total,
                             source_sha256=source_digest,
                             target_fingerprint=self.target_fingerprint,
-                            target_size=drive_size,
+                            target_size=target_capacity,
                             options=options,
                             state="writing",
                         )
@@ -400,7 +398,6 @@ class UsbWriter(QThread):
                     self._write_chunk(handle, chunk)
                     durations.append(time.perf_counter() - chunk_start)
                     sizes.append(len(chunk))
-                    written += len(chunk)
                     source_written += source_chunk_len
                     if manifest is not None and (
                         source_written % (10 * 1024 * 1024) < self.chunk_size

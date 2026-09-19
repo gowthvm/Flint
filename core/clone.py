@@ -14,6 +14,9 @@ from typing import Any
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.deviceio import (
+    ES_CONTINUOUS,
+    ES_DISPLAY_REQUIRED,
+    ES_SYSTEM_REQUIRED,
     drive_size,
     flush,
     kernel32,
@@ -41,10 +44,6 @@ class CloneWorker(QThread):
 
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
-
-    _ES_CONTINUOUS = 0x80000000
-    _ES_SYSTEM_REQUIRED = 0x00000001
-    _ES_DISPLAY_REQUIRED = 0x00000002
 
     def __init__(
         self,
@@ -122,9 +121,9 @@ class CloneWorker(QThread):
 
     def run(self) -> None:
         kernel32().SetThreadExecutionState(
-            self._ES_CONTINUOUS
-            | self._ES_SYSTEM_REQUIRED
-            | self._ES_DISPLAY_REQUIRED
+            ES_CONTINUOUS
+            | ES_SYSTEM_REQUIRED
+            | ES_DISPLAY_REQUIRED
         )
         try:
             self.phase.emit("Locking drives")
@@ -137,7 +136,7 @@ class CloneWorker(QThread):
             logger.exception("CloneWorker.run failed")
             self.finished.emit(False, str(exc))
         finally:
-            kernel32().SetThreadExecutionState(self._ES_CONTINUOUS)
+            kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
     def _run_inner(self) -> None:
         source = self._open_source()

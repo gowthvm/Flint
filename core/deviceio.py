@@ -29,6 +29,7 @@ FILE_FLAG_WRITE_THROUGH = 0x80000000
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
 
 TRANSIENT_ERRORS = frozenset({1117, 21, 31, 5, 1167})
 TRANSIENT_SEEK_ERRORS = frozenset({21, 31, 5, 1167})
@@ -121,7 +122,7 @@ def open_drive(path: str, *, write: bool, flags: int = 0) -> Any:
     handle = k32.CreateFileW(
         path,
         access,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_SHARE_READ,
         None,
         OPEN_EXISTING,
         flags,

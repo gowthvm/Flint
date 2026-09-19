@@ -15,12 +15,14 @@ from typing import Any
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.deviceio import (
+    ES_CONTINUOUS,
+    ES_DISPLAY_REQUIRED,
+    ES_SYSTEM_REQUIRED,
     drive_size,
     flush,
     kernel32,
     lock_volumes,
     open_drive,
-    read_bytes,
     unlock_volumes,
 )
 
@@ -42,10 +44,6 @@ class BackupWorker(QThread):
 
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
-
-    _ES_CONTINUOUS = 0x80000000
-    _ES_SYSTEM_REQUIRED = 0x00000001
-    _ES_DISPLAY_REQUIRED = 0x00000002
 
     def __init__(
         self,
@@ -77,7 +75,12 @@ class BackupWorker(QThread):
         unlock_volumes(held)
 
     def _read_chunk(self, handle: Any, count: int) -> bytes:
-        return read_bytes(handle, count)
+        from core.deviceio import read_bytes_retry
+
+        result = read_bytes_retry(handle, count, retries=3)
+        if result is None:
+            raise OSError("read failed after retries")
+        return result
 
     def _flush(self, handle: Any) -> None:
         flush(handle)
@@ -87,9 +90,9 @@ class BackupWorker(QThread):
 
     def run(self) -> None:
         kernel32().SetThreadExecutionState(
-            self._ES_CONTINUOUS
-            | self._ES_SYSTEM_REQUIRED
-            | self._ES_DISPLAY_REQUIRED
+            ES_CONTINUOUS
+            | ES_SYSTEM_REQUIRED
+            | ES_DISPLAY_REQUIRED
         )
         try:
             self.phase.emit("Locking drive")
@@ -102,7 +105,7 @@ class BackupWorker(QThread):
             logger.exception("BackupWorker.run failed")
             self.finished.emit(False, str(exc))
         finally:
-            kernel32().SetThreadExecutionState(self._ES_CONTINUOUS)
+            kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
     def _run_inner(self) -> None:
         handle = self._open_drive()
@@ -151,6 +154,11 @@ class BackupWorker(QThread):
             if not self._canceled:
                 self.phase.emit("Flushing")
                 self._flush(handle)
+                if out_file is not None:
+                    try:
+                        os.fsync(out_file.fileno())
+                    except OSError:
+                        pass
                 self.digest.emit(digest.hexdigest())
                 success = True
         except Exception as exc:

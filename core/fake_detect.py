@@ -45,7 +45,7 @@ def _open_for_read(path: str) -> Any:
         None,
     )
     if handle == _INVALID_HANDLE_VALUE:
-        raise OSError(ctypes.get_last_error(), f"cannot open {path} for reading")
+        raise OSError(kernel32().GetLastError(), f"cannot open {path} for reading")
     return handle
 
 
@@ -61,7 +61,7 @@ def _open_for_write(path: str) -> Any:
         None,
     )
     if handle == _INVALID_HANDLE_VALUE:
-        raise OSError(ctypes.get_last_error(), f"cannot open {path} for writing")
+        raise OSError(kernel32().GetLastError(), f"cannot open {path} for writing")
     return handle
 
 
@@ -72,7 +72,7 @@ def _seek(handle: Any, offset: int) -> None:
         handle, ctypes.c_longlong(offset), ctypes.byref(new_pos), 0
     )
     if not ok:
-        raise OSError(ctypes.get_last_error(), "SetFilePointerEx failed")
+        raise OSError(kernel32().GetLastError(), "SetFilePointerEx failed")
 
 
 def _read_chunk(handle: Any, size: int) -> bytes:
@@ -81,7 +81,7 @@ def _read_chunk(handle: Any, size: int) -> bytes:
     n_read = ctypes.c_ulong(0)
     ok = kernel32().ReadFile(handle, buf, size, ctypes.byref(n_read), None)
     if not ok:
-        raise OSError(ctypes.get_last_error(), "ReadFile failed")
+        raise OSError(kernel32().GetLastError(), "ReadFile failed")
     return buf.raw[: n_read.value]
 
 
@@ -91,7 +91,7 @@ def _write_chunk(handle: Any, data: bytes) -> int:
     n_written = ctypes.c_ulong(0)
     ok = kernel32().WriteFile(handle, buf, len(data), ctypes.byref(n_written), None)
     if not ok:
-        raise OSError(ctypes.get_last_error(), "WriteFile failed")
+        raise OSError(kernel32().GetLastError(), "WriteFile failed")
     return n_written.value
 
 
