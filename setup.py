@@ -8,12 +8,15 @@ The extension is optional: when it cannot be built, Flint falls back to
 pure-Python buffered writes (see ``core/writer.write_stream``).
 """
 
+import re
 import sys
+from pathlib import Path
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
-from core.version import APP_VERSION
+_version_file = Path(__file__).parent / "core" / "version.py"
+APP_VERSION = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', _version_file.read_text()).group(1)
 
 
 class optional_build_ext(build_ext):
