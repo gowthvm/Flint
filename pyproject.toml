@@ -7,7 +7,7 @@ name = "flint-usb"
 dynamic = ["version"]
 description = "Windows-native bootable USB & disk image writer with byte-level verification"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "PyQt6>=6.6",
