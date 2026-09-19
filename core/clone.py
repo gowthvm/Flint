@@ -19,9 +19,9 @@ from core.deviceio import (
     kernel32,
     lock_volumes,
     open_drive,
-    read_bytes,
+    read_bytes_retry,
     unlock_volumes,
-    write_bytes,
+    write_bytes_retry,
 )
 
 logger = logging.getLogger("flint")
@@ -96,10 +96,16 @@ class CloneWorker(QThread):
         unlock_volumes(held)
 
     def _read_chunk(self, handle: Any, count: int) -> bytes:
-        return read_bytes(handle, count)
+        result = read_bytes_retry(handle, count, retries=3)
+        if result is None:
+            raise OSError("read failed after retries")
+        return result
 
     def _read_target_chunk(self, handle: Any, count: int) -> bytes:
-        return read_bytes(handle, count)
+        result = read_bytes_retry(handle, count, retries=3)
+        if result is None:
+            raise OSError("read failed after retries")
+        return result
 
     def _seek(self, handle: Any, offset: int) -> None:
         position = ctypes.c_longlong()
@@ -109,7 +115,7 @@ class CloneWorker(QThread):
             raise OSError(f"could not seek clone handle to byte {offset:,}")
 
     def _write_chunk(self, handle: Any, data: bytes) -> None:
-        write_bytes(handle, data)
+        write_bytes_retry(handle, data, max_retries=3)
 
     def _flush(self, handle: Any) -> None:
         flush(handle)

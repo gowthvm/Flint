@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self._drives: list[dict[str, Any]] = []
         self._writer: UsbWriter | None = None
         self._verifier: VerifyWorker | None = None
+        self._iso_sha256_cache: dict[str, str] = {}
         self._page_verifier: VerifyWorker | None = None
         self._wipe_worker: WipeWorker | None = None
         self._wipe_verify: tuple[bool, str] | None = None
@@ -870,6 +871,8 @@ class MainWindow(QMainWindow):
         # The drop zone finished hashing the image: re-evaluate any sidecar.
         if path != getattr(self._iso_zone, "path", None):
             return
+        if ok and digest:
+            self._iso_sha256_cache[path] = digest
         self._sidecar_status, self._sidecar_detail = checksum_mod.check_sidecar(
             path, digest if ok else None
         )
@@ -3220,7 +3223,12 @@ class MainWindow(QMainWindow):
                 if chunk_size < 4096:
                     chunk_size = DEFAULT_CHUNK_SIZE
                 chunk_size -= chunk_size % 4096
-                source_digest = jobs.source_sha256(iso)
+                # Use cached hash from background computation when ISO was
+                # selected; compute synchronously only as a last resort.
+                source_digest = self._iso_sha256_cache.get(iso)
+                if not source_digest:
+                    source_digest = jobs.source_sha256(iso)
+                    self._iso_sha256_cache[iso] = source_digest
                 options = {
                     "chunk_size": chunk_size,
                     "verify_after_write": bool(
@@ -4115,6 +4123,8 @@ class MainWindow(QMainWindow):
         if checked:
             self._arm_fleet()
         else:
+            if self._fleet_busy:
+                self._on_cancel_clicked()
             self._disarm_fleet()
 
     def _on_fleet_stop_clicked(self) -> None:

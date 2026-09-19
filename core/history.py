@@ -21,7 +21,8 @@ def _truncate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Trim non-audited entries if history exceeds the size limit.
 
     Audited entries (containing ``integrity_sha256``) are always kept
-    because removing one would break the hash chain.
+    because removing one would break the hash chain.  Chronological
+    order is preserved.
     """
     from core.settings import get
 
@@ -29,13 +30,16 @@ def _truncate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(entries) <= max_entries:
         return entries
 
-    audited = [e for e in entries if e.get("integrity_sha256")]
-    non_audited = [e for e in entries if not e.get("integrity_sha256")]
-    headroom = max(0, max_entries - len(audited))
-    trimmed_non_audited = (
-        non_audited[-headroom:] if headroom < len(non_audited) else non_audited
-    )
-    trimmed = trimmed_non_audited + audited
+    audited_indices = {i for i, e in enumerate(entries) if e.get("integrity_sha256")}
+    excess = len(entries) - max_entries
+    # Drop the oldest non-audited entries first (indices from the start).
+    drop: set[int] = set()
+    for i in range(len(entries)):
+        if len(drop) >= excess:
+            break
+        if i not in audited_indices:
+            drop.add(i)
+    trimmed = [e for i, e in enumerate(entries) if i not in drop]
     if len(trimmed) < len(entries):
         logger.info(
             "history truncated: %d -> %d entries (dropped %d non-audited)",
@@ -228,6 +232,15 @@ def import_history(source_path: str | Path) -> tuple[bool, int]:
         # Guard against hand-edited imports: non-dict entries would crash
         # rendering, so drop them rather than import the whole file.
         entries = [e for e in entries if isinstance(e, dict)]
+        # Back up existing history before replacing.
+        if HISTORY_PATH.is_file():
+            backup = HISTORY_PATH.with_suffix(".json.import-backup")
+            try:
+                import shutil
+
+                shutil.copy2(HISTORY_PATH, backup)
+            except OSError:
+                pass
         save_history(entries)
         return True, len(entries)
     except (OSError, json.JSONDecodeError):

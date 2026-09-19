@@ -57,8 +57,6 @@ class WipeWorker(QThread):
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
 
-    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
     def __init__(
         self,
         drive_path: str,
@@ -95,7 +93,9 @@ class WipeWorker(QThread):
         unlock_volumes([ctypes.c_void_p(h) for h in held])
 
     def _write_chunk(self, handle: int, data: bytes) -> None:
-        write_bytes_retry(handle, data, max_retries=3)
+        write_bytes_retry(
+            handle, data, max_retries=3, is_cancelled=lambda: self._canceled
+        )
 
     def _seek_start(self, handle: int) -> None:
         seek(ctypes.c_void_p(handle), 0)

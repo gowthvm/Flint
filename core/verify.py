@@ -28,10 +28,6 @@ MAX_MISMATCHES = 20
 MISMATCH_SAMPLE_SIZE = SECTOR_SIZE
 
 
-class _Cancelled(Exception):
-    """Raised internally when the caller's cancel callback fires."""
-
-
 def _device_size(handle: Any) -> int:
     try:
         return drive_size(handle)

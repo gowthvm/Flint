@@ -299,11 +299,14 @@ def write_bytes_retry(
     data: bytes,
     max_retries: int = 3,
     error_suffix: str = "",
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Write *data* with automatic retries for transient errors and short writes."""
     k32 = kernel32()
     last_err = 0
     for attempt in range(max_retries + 1):
+        if is_cancelled is not None and is_cancelled():
+            raise _Cancelled()
         buffer = ctypes.create_string_buffer(data)
         written = ctypes.c_ulong()
         ok = k32.WriteFile(

@@ -125,7 +125,16 @@ def eject_drive(drive_path: str) -> tuple[bool, str]:
             )
             if config_ret == _CR_SUCCESS:
                 return True, "ejected"
-            return False, "eject refused by Windows (device in use)"
+            _CR_MESSAGES = {
+                0x16: "device in use — close programs accessing the drive",
+                0x17: "access denied — run as administrator",
+                0x0D: "device not found",
+                0x0E: "invalid device",
+            }
+            msg = _CR_MESSAGES.get(
+                config_ret, f"eject failed (error 0x{config_ret:X})"
+            )
+            return False, msg
         return False, "drive not found in device list"
     finally:
         setupapi.SetupDiDestroyDeviceInfoList(device_set)

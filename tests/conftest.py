@@ -8,11 +8,14 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolated_settings(tmp_path, monkeypatch):
     """Redirect APP_DIR to a temp directory so tests never touch real settings."""
-    from core import paths
+    from core import paths, settings
 
     app_dir = tmp_path / "app"
     app_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(paths, "APP_DIR", app_dir)
+    monkeypatch.setattr(settings, "SETTINGS_PATH", app_dir / "settings.json")
+    monkeypatch.setattr(settings, "_LOCK_PATH", app_dir / "settings.lock")
+    settings._CACHE = None
     return app_dir
 
 

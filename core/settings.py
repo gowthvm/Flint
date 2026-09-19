@@ -167,13 +167,18 @@ def set_many(**values: Any) -> None:
 
 
 def export_settings(target_path: str | Path) -> bool:
-    """Export current settings to a JSON file."""
+    """Export current settings to a JSON file atomically."""
     try:
         with _lock:
             data = _ensure_loaded()
             snapshot = dict(data)
-        with open(target_path, "w", encoding="utf-8") as f:
+        target = Path(target_path)
+        tmp = target.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(target)
         return True
     except OSError:
         return False

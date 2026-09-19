@@ -19,13 +19,12 @@ import struct
 from typing import Any
 
 from core.deviceio import (
+    _INVALID_HANDLE_VALUE,
     GENERIC_READ,
     GENERIC_WRITE,
     OPEN_EXISTING,
     kernel32,
 )
-
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 logger = logging.getLogger("flint")
 

@@ -103,7 +103,7 @@ def test_backup_cancel_midway(tmp_path, monkeypatch):
     out = tmp_path / "backup.img"
     worker = _make_worker(fake, out)
     _patch_kernel(monkeypatch)
-    worker._cancelled = False
+    worker._canceled = False
 
     def ticking_cancel() -> None:
         if fake.offset >= 70 * 1024:

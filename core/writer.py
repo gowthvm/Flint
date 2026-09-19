@@ -185,7 +185,9 @@ class UsbWriter(QThread):
         seek(handle, offset)
 
     def _write_chunk(self, handle: int, data: bytes) -> None:
-        write_bytes_retry(handle, data, max_retries=3)
+        write_bytes_retry(
+            handle, data, max_retries=3, is_cancelled=self._cancel_requested
+        )
 
     def _flush(self, handle: int) -> None:
         flush(handle)
@@ -374,7 +376,11 @@ class UsbWriter(QThread):
                         jobs.save_manifest(self.manifest_path, manifest)
                     saved = manifest.checkpoint_bytes
                     if 0 < saved < total:
-                        self._seek_drive(handle, saved)
+                        # Align to sector boundary for FILE_FLAG_NO_BUFFERING.
+                        aligned = saved + (-saved % self._SECTOR_SIZE)
+                        if aligned > total:
+                            aligned = saved
+                        self._seek_drive(handle, aligned)
                         source.seek(saved)
                         source_written = saved
                         self.note.emit(f"Resuming from byte {saved:,}")
