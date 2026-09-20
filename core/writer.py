@@ -228,7 +228,7 @@ class UsbWriter(QThread):
             try:
                 self.phase.emit("Writing")
                 self._run_inner()
-                if self._finished:
+                if self._finished or self._cancel_requested():
                     return
                 if self.verify_after_write and (
                     self.verify_sha256 or self.bad_block_scan
@@ -374,9 +374,9 @@ class UsbWriter(QThread):
                         jobs.save_manifest(self.manifest_path, manifest)
                     saved = manifest.checkpoint_bytes
                     if 0 < saved < total:
-                        # Align to sector boundary for FILE_FLAG_NO_BUFFERING.
-                        aligned = saved + (-saved % self._SECTOR_SIZE)
-                        if aligned > total:
+                        # Align DOWN to sector boundary for FILE_FLAG_NO_BUFFERING.
+                        aligned = saved - (saved % self._SECTOR_SIZE)
+                        if aligned <= 0:
                             aligned = saved
                         self._seek_drive(handle, aligned)
                         source.seek(saved)

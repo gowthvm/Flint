@@ -159,6 +159,14 @@ class BackupWorker(QThread):
                         os.fsync(out_file.fileno())
                     except OSError:
                         pass
+                # Verify the backup file matches what we read from the drive
+                self.phase.emit("Verifying backup")
+                verify_digest = hashlib.sha256()
+                with open(self.out_path, "rb") as vf:
+                    while vchunk := vf.read(self.CHUNK_SIZE):
+                        verify_digest.update(vchunk)
+                if verify_digest.hexdigest() != digest.hexdigest():
+                    raise OSError("backup verification failed: file does not match drive contents")
                 self.digest.emit(digest.hexdigest())
                 success = True
         except Exception as exc:

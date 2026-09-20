@@ -1204,7 +1204,7 @@ def build_style(theme: str = "dark") -> str:
     _CURRENT_THEME = theme
     palette = _PALETTES.get(theme, _PALETTES["dark"])
     qss = _QSS_TEMPLATE
-    for key, value in palette.items():
+    for key, value in sorted(palette.items(), key=lambda kv: len(kv[0]), reverse=True):
         qss = qss.replace(f"@{key}", value)
     # replace design token placeholders like $space_md with px values
     for key, val in DESIGN_TOKENS.items():

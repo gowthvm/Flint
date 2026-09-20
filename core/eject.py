@@ -85,7 +85,8 @@ def eject_drive(drive_path: str) -> tuple[bool, str]:
         None,
         _DIGCF_PRESENT,
     )
-    if device_set == wintypes.HANDLE(-1).value:
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    if device_set == _INVALID_HANDLE_VALUE:
         return False, "could not enumerate disk devices"
     try:
         index = 0

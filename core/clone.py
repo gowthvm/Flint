@@ -95,13 +95,13 @@ class CloneWorker(QThread):
         unlock_volumes(held)
 
     def _read_chunk(self, handle: Any, count: int) -> bytes:
-        result = read_bytes_retry(handle, count, retries=3)
+        result = read_bytes_retry(handle, count, retries=3, is_cancelled=self._cancel_requested)
         if result is None:
             raise OSError("read failed after retries")
         return result
 
     def _read_target_chunk(self, handle: Any, count: int) -> bytes:
-        result = read_bytes_retry(handle, count, retries=3)
+        result = read_bytes_retry(handle, count, retries=3, is_cancelled=self._cancel_requested)
         if result is None:
             raise OSError("read failed after retries")
         return result

@@ -62,7 +62,7 @@ def compute_sha256(
         while done < size:
             count = min(chunk_size, size - done)
             try:
-                data = read_bytes_retry(handle, count, retries=0, is_cancelled=is_cancelled)
+                data = read_bytes_retry(handle, count, retries=3, is_cancelled=is_cancelled)
             except Exception:
                 return False, "cancelled"
             if data is None or len(data) == 0:

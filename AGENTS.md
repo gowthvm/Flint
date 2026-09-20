@@ -70,13 +70,13 @@ Run these commands before committing:
 
 ```powershell
 # Should return exactly 4 hits (one per file):
-rg "APP_VERSION|1\.3\.0" core/version.py setup.py version_info.txt
+rg "APP_VERSION|2\.0\.0" core/version.py setup.py version_info.txt
 
 # Should return 0 hits (no stale versions anywhere):
-rg "1\.2\.[0-2]" --include "*.py" --include "*.txt" --include "*.html"
+rg "1\.[0-9]\.[0-9]" --include "*.py" --include "*.txt" --include "*.html"
 
 # Verify footers — every HTML file should show the new version:
-rg "v1\.3\.0" flint-web/*.html
+rg "v2\.0\.0" flint-web/*.html
 ```
 
 ---
@@ -194,14 +194,14 @@ Vercel auto-deploys on push to `main`.
 
 | File | Field | Format |
 |---|---|---|
-| `core/version.py` | `APP_VERSION` | `"1.3.0"` |
-| `version_info.txt` | `filevers` / `prodvers` | `(1, 3, 0, 0)` |
-| `version_info.txt` | `FileVersion` / `ProductVersion` | `"1.3.0"` |
-| `setup.py` | `version` | `"1.3.0"` |
-| `flint-web/index.html` | JSON-LD | `"softwareVersion": "1.3.0"` |
-| `flint-web/index.html` | hero badge | `v1.3.0` |
-| `flint-web/index.html` | status strip | `v1.3.0` |
-| `flint-web/*.html` | footer | `v1.3.0` |
-| `flint-web/download.html` | hero text | `Flint v1.3.0` |
-| `flint-web/about.html` | technology section | `v1.3.0` |
-| `flint-web/changelog.html` | latest entry header | `v1.3.0` |
+| `core/version.py` | `APP_VERSION` | `"2.0.0"` |
+| `version_info.txt` | `filevers` / `prodvers` | `(2, 0, 0, 0)` |
+| `version_info.txt` | `FileVersion` / `ProductVersion` | `"2.0.0"` |
+| `setup.py` | `version` | `"2.0.0"` |
+| `flint-web/index.html` | JSON-LD | `"softwareVersion": "2.0.0"` |
+| `flint-web/index.html` | hero badge | `v2.0.0` |
+| `flint-web/index.html` | status strip | `v2.0.0` |
+| `flint-web/*.html` | footer | `v2.0.0` |
+| `flint-web/download.html` | hero text | `Flint v2.0.0` |
+| `flint-web/about.html` | technology section | `v2.0.0` |
+| `flint-web/changelog.html` | latest entry header | `v2.0.0` |

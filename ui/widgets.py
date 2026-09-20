@@ -255,6 +255,7 @@ class IsoWorker(QThread):
             with open(self._path, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     if self.isInterruptionRequested():
+                        self.hash_done.emit(self._path, False, "")
                         return
                     digest.update(chunk)
                     read_bytes += len(chunk)
