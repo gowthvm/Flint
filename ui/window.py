@@ -2112,7 +2112,13 @@ class MainWindow(QMainWindow):
         self._tray.show()
 
     def _show_toast(self, title: str, message: str) -> None:
-        """Show a Windows toast notification using PowerShell (non-blocking)."""
+        """Show a Windows toast notification using PowerShell (non-blocking).
+
+        Not called by production code: it fired *in addition to* the tray
+        notification on every flash, so completion feedback is tray-only
+        now (U04). Kept because it is still a useful seam for tests that
+        need to prove a notification would have been raised.
+        """
         import threading
 
         ps_script = (
@@ -5151,9 +5157,11 @@ class MainWindow(QMainWindow):
             self._fleet_toggle.setChecked(False)
         # Always surface why the pass stopped: this is the only feedback
         # a mid-pass failure gets (the banner that carried the context is
-        # gone by the time we get here).
+        # gone by the time we get here). Run it through _friendly_error so
+        # a fleet failure reads exactly like the same failure outside a
+        # fleet pass.
         if reason:
-            self._progress.set_error(reason)
+            self._progress.set_error(self._friendly_error(reason))
 
     def _fleet_tick(self) -> None:
         session = self._fleet
