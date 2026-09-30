@@ -1478,15 +1478,19 @@ def _cmd_flash(opts: dict[str, object]) -> int:
     return _result("ok", "flashed and verified", EXIT_OK)
 
 
-def _cmd_verify_raw(
-    path: str, size: int, expected: str, letters: list[str]
-) -> int:
+def _cmd_verify_raw(path: str, size: int, expected: str) -> int:
     from core.verify import VerifyWorker
 
     worker = VerifyWorker(path, expected, size)
     ok, message = _run_worker(worker)
     if not ok:
-        return _result("fail", message, EXIT_FAIL)
+        # Same mapping as flash/wipe/backup/clone: a user cancel is exit 2
+        # ("canceled"), everything else is a failure (exit 1).
+        return _result(
+            "canceled" if message == "cancelled" else "fail",
+            message,
+            EXIT_CANCELLED if message == "cancelled" else EXIT_FAIL,
+        )
     return _result("ok", "verification passed", EXIT_OK)
 
 
@@ -1536,8 +1540,7 @@ def _cmd_verify(opts: dict[str, object]) -> int:
             )
         return _result("ok", "no bad sectors", EXIT_OK)
     return _cmd_verify_raw(
-        drive["physical_path"], size, expected.lower(),
-        drive.get("letters") or [],
+        drive["physical_path"], size, expected.lower()
     )
 
 

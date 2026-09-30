@@ -177,6 +177,18 @@ class UsbWriter(QThread):
     def cancel(self) -> None:
         self._canceled = True
 
+    def _emit_done(self, ok: bool, message: str) -> None:
+        """L04: exactly one ``done`` per run.
+
+        ``_run_inner``/``_run_native``/``_verify_after_write`` report for
+        themselves, so ``run``'s tail and its catch-all must not fire a
+        second signal after one of them already did.
+        """
+        if self._finished:
+            return
+        self._finished = True
+        self.done.emit(ok, message)
+
     def _cancel_requested(self) -> bool:
         return self._canceled or (
             self.cancel_event is not None and self.cancel_event.is_set()
@@ -242,6 +254,9 @@ class UsbWriter(QThread):
                 self._run_filecopy()
                 if self._finished:
                     return
+                if self._cancel_requested():
+                    self._emit_done(False, "cancelled")
+                    return
                 if self.verify_after_write and (
                     self.verify_sha256 or self.bad_block_scan
                 ):
@@ -250,14 +265,20 @@ class UsbWriter(QThread):
                     self._verify_after_write(skip_source_iso=True)
                 if self._finished:
                     return
-                self.done.emit(True, "")
+                self._emit_done(True, "")
                 return
             self.phase.emit("Locking drive")
             volumes = self._lock_volumes()
             try:
                 self.phase.emit("Writing")
                 self._run_inner()
-                if self._finished or self._cancel_requested():
+                if self._finished:
+                    return
+                if self._cancel_requested():
+                    # The cancel landed after _run_inner's own final check
+                    # (the native path has none at all). Returning silently
+                    # here left the UI waiting on a `done` that never came.
+                    self._emit_done(False, "cancelled")
                     return
                 if self.verify_after_write and (
                     self.verify_sha256 or self.bad_block_scan
@@ -265,12 +286,12 @@ class UsbWriter(QThread):
                     self._verify_after_write()
                 if self._finished:
                     return
-                self.done.emit(True, "")
+                self._emit_done(True, "")
             finally:
                 self._unlock_volumes(volumes)
         except Exception as exc:
             logger.exception("UsbWriter.run failed")
-            self.done.emit(False, str(exc))
+            self._emit_done(False, str(exc) or type(exc).__name__)
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 

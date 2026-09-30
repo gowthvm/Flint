@@ -9,6 +9,7 @@ from typing import Any
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.deviceio import (
+    _Cancelled,
     drive_size,
     kernel32,
     open_drive,
@@ -63,8 +64,13 @@ def compute_sha256(
             count = min(chunk_size, size - done)
             try:
                 data = read_bytes_retry(handle, count, retries=3, is_cancelled=is_cancelled)
-            except Exception:
+            except _Cancelled:
                 return False, "cancelled"
+            except Exception as exc:
+                # A real read failure must not be reported as a cancel
+                # (that would exit 2 instead of failing).
+                logger.exception("compute_sha256 read failed")
+                return False, str(exc) or type(exc).__name__
             if data is None or len(data) == 0:
                 return False, "read failed before the end of the device"
             digest.update(data)
@@ -165,8 +171,11 @@ def verify_device(
                     data = read_bytes_retry(
                         handle, count, retries=retries, is_cancelled=is_cancelled
                     )
-                except Exception:
+                except _Cancelled:
                     result["error"] = "cancelled"
+                    return result
+                except Exception as exc:
+                    result["error"] = str(exc) or type(exc).__name__
                     return result
                 if data is None:
                     result["bad_sectors"].append(done - done % SECTOR_SIZE)
@@ -367,6 +376,11 @@ def hash_drive(
         if expected_sha256 is not None and result != expected_sha256:
             return False, "verification failed: hash mismatch"
         return True, result
+    except _Cancelled:
+        # B06: read_bytes_retry raises this at the top of an attempt once
+        # cancel is observed. Without a handler it escapes to VerifyWorker
+        # and a user cancel is reported as "verification failed".
+        return False, "cancelled"
     finally:
         kernel32().CloseHandle(handle)
 

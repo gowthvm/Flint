@@ -51,14 +51,19 @@ def benchmark_write(
         return 0.0
 
     pattern = os.urandom(chunk)
+    buf = ctypes.create_string_buffer(pattern)
+    chunk_len = len(pattern)
     written = 0
     start = time.perf_counter()
     try:
         while written < size:
-            buf = ctypes.create_string_buffer(pattern)
+            # Never write past the size the caller confirmed: a non
+            # multiple of `chunk` would otherwise overshoot by up to
+            # chunk-1 bytes.
+            count = min(chunk_len, size - written)
             n = ctypes.c_ulong()
-            ok = k32.WriteFile(handle, buf, len(pattern), ctypes.byref(n), None)
-            if not ok or n.value != len(pattern):
+            ok = k32.WriteFile(handle, buf, count, ctypes.byref(n), None)
+            if not ok or n.value != count:
                 break
             written += n.value
     finally:
@@ -84,8 +89,9 @@ def benchmark_read(drive_path: str, size: int = DEFAULT_BENCH_SIZE, chunk: int =
     start = time.perf_counter()
     try:
         while read_total < size:
+            count = min(chunk, size - read_total)
             n = ctypes.c_ulong()
-            ok = k32.ReadFile(handle, buf, chunk, ctypes.byref(n), None)
+            ok = k32.ReadFile(handle, buf, count, ctypes.byref(n), None)
             if not ok or n.value == 0:
                 break
             read_total += n.value

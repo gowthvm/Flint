@@ -116,6 +116,35 @@ def test_settings_save_always_stamps_current_schema_version(_isolated_settings):
         s._CACHE = None
 
 
+def test_settings_from_a_newer_flint_keep_their_version(_isolated_settings):
+    """Downgrading Flint must not fake the schema version.
+
+    A v2 file read by a v1 build used to be stamped 1 on load *and* on
+    every save, so upgrading again would run the 1->2 migration over data
+    that had already been migrated.
+    """
+    path = _isolated_settings / "settings.json"
+    path.write_text(
+        json.dumps(
+            {"schema_version": 99, "theme": "light", "future_key": "kept"}
+        ),
+        encoding="utf-8",
+    )
+    s._CACHE = None
+    try:
+        assert s.get("schema_version") == 99
+        assert s.get("future_key") == "kept"
+
+        s.set_many(theme="dark")
+
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["schema_version"] == 99
+        assert on_disk["future_key"] == "kept"
+        assert on_disk["theme"] == "dark"
+    finally:
+        s._CACHE = None
+
+
 def test_fleet_skip_flashed_defaults_false(_isolated_settings):
     """U21: the fleet skip toggle persists (support-only: the UI wires the
     read/write in a later phase)."""

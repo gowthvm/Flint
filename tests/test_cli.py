@@ -403,8 +403,8 @@ def test_verify_sha256_derives_size_from_image(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     calls: list[tuple] = []
 
-    def _fake_verify_raw(path, size, expected, letters):
-        calls.append((path, size, expected, letters))
+    def _fake_verify_raw(path, size, expected):
+        calls.append((path, size, expected))
         return cli.EXIT_OK
 
     monkeypatch.setattr(cli, "_cmd_verify_raw", _fake_verify_raw)
@@ -421,7 +421,7 @@ def test_verify_sha256_derives_size_from_image(tmp_path, monkeypatch):
         ]
     )
     assert rc == cli.EXIT_OK
-    assert calls == [(r"\\.\PHYSICALDRIVE3", 4096, "a" * 64, ["E"])]
+    assert calls == [(r"\\.\PHYSICALDRIVE3", 4096, "a" * 64)]
 
 
 # --- top-level dispatch and help -----------------------------------------

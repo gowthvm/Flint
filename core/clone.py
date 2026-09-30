@@ -17,6 +17,7 @@ from core.deviceio import (
     ES_CONTINUOUS,
     ES_DISPLAY_REQUIRED,
     ES_SYSTEM_REQUIRED,
+    _Cancelled,
     drive_size,
     flush,
     kernel32,
@@ -134,7 +135,12 @@ class CloneWorker(QThread):
             raise OSError(f"could not seek clone handle to byte {offset:,}")
 
     def _write_chunk(self, handle: Any, data: bytes) -> None:
-        write_bytes_retry(handle, data, max_retries=3)
+        write_bytes_retry(
+            handle,
+            data,
+            max_retries=3,
+            is_cancelled=self._cancel_requested,
+        )
 
     def _flush(self, handle: Any) -> None:
         flush(handle)
@@ -152,10 +158,16 @@ class CloneWorker(QThread):
                 self._run_inner()
             finally:
                 self._unlock_volumes(volumes)
+        except _Cancelled:
+            # B06: _Cancelled carries no message and is neither OSError nor
+            # ValueError; without this handler the CLI would report a blank
+            # failure (exit 1) instead of the "cancelled" sentinel (exit 2).
+            logger.info("CloneWorker.run: cancelled")
+            self._emit_finished(False, "cancelled")
         except Exception as exc:
             logger.exception("CloneWorker.run failed")
             # L04: guarded — _run_inner may already have emitted.
-            self._emit_finished(False, str(exc))
+            self._emit_finished(False, str(exc) or type(exc).__name__)
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
@@ -220,8 +232,15 @@ class CloneWorker(QThread):
                 # target_end == total + tail: when zero_tail is off the tail
                 # was never rewritten, so verification stops at the source size.
                 self._verify_clone(source, target, total, job_total)
+        except _Cancelled:
+            # B06: cancel fired inside read/write_bytes_retry's loop. Report
+            # the "cancelled" sentinel the CLI and GUI map to exit 2 / the
+            # cancelled state, never an empty message.
+            logger.info("CloneWorker._run_inner: cancelled mid-retry")
+            self._emit_finished(False, "cancelled")
+            return
         except Exception as exc:
-            self._emit_finished(False, str(exc))
+            self._emit_finished(False, str(exc) or type(exc).__name__)
             return
         finally:
             kernel32().CloseHandle(source)

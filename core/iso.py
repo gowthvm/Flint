@@ -4,7 +4,6 @@ import os
 from collections.abc import Iterator
 from typing import BinaryIO, TypedDict
 
-_SECTOR = 512
 _PVD_SECTOR_OFFSET = 32769  # ISO9660 primary volume descriptor (2048*16 + 1)
 _EL_TORITO_SECTOR_OFFSET = 17 * 2048  # boot record volume descriptor
 _ISO9660_MARKER = b"CD001"
@@ -276,23 +275,33 @@ def largest_iso_file_size(path: str) -> int:
 
 
 def _scan_raw(path: str, needles: list[bytes]) -> bool:
-    """Scan the first chunked region of the file for byte needles."""
+    """Scan the first ``_WINDOWS_SCAN_CAP`` bytes of the file for needles.
+
+    Two properties matter here: the read stops exactly at ``limit`` (the
+    cap is a cap), and consecutive chunks overlap by the longest needle so
+    a name such as UTF-16LE ``install.wim`` that straddles a 4 MiB
+    boundary is still seen.
+    """
     try:
         size = os.path.getsize(path)
     except OSError:
         return False
     limit = min(size, _WINDOWS_SCAN_CAP)
+    overlap = max((len(n) for n in needles), default=1) - 1
+    carry = b""
     try:
         with open(path, "rb") as f:
-            read = 0
-            while read < limit:
-                chunk = f.read(_SCAN_CHUNK)
+            done = 0
+            while done < limit:
+                chunk = f.read(min(_SCAN_CHUNK, limit - done))
                 if not chunk:
                     break
+                window = carry + chunk
                 for needle in needles:
-                    if needle in chunk:
+                    if needle in window:
                         return True
-                read += len(chunk)
+                carry = window[-overlap:] if overlap > 0 else b""
+                done += len(chunk)
     except OSError:
         return False
     return False

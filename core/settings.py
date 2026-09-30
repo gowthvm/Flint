@@ -102,12 +102,16 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     """Bring a stored settings dict up to ``SETTINGS_SCHEMA_VERSION``.
 
     Missing or hand-corrupted versions are treated as 0 (pre-versioned).
-    A dict from a *newer* Flint skips the loop and is stamped with the
-    current version; its unknown keys survive the defaults-merge that
-    follows, so loading stays backward- and forward-tolerant.
+    A dict from a *newer* Flint runs no migration and keeps its own
+    version marker - stamping it down to ours would make the next upgrade
+    re-run a migration over data that has already been migrated. Its
+    unknown keys survive the defaults-merge that follows, so loading stays
+    backward- and forward-tolerant.
     """
     raw = data.get("schema_version")
     version = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+    if version > SETTINGS_SCHEMA_VERSION:
+        return data
     while version < SETTINGS_SCHEMA_VERSION:
         step = _MIGRATIONS.get(version)
         if step is None:
@@ -219,8 +223,13 @@ def _persist_snapshot(snapshot: dict[str, Any]) -> None:
         # changes written by another process since our last load.
         disk_data = _load()
         disk_data.update(snapshot)
-        # C10: every save stamps the current schema version.
-        disk_data["schema_version"] = SETTINGS_SCHEMA_VERSION
+        # C10: every save stamps at least the current schema version -
+        # but never talks a file written by a *newer* Flint down, which
+        # would make that file's next upgrade re-run a migration over
+        # data that has already been migrated.
+        stored = disk_data.get("schema_version")
+        stored = stored if isinstance(stored, int) else SETTINGS_SCHEMA_VERSION
+        disk_data["schema_version"] = max(stored, SETTINGS_SCHEMA_VERSION)
         with _lock:
             global _CACHE
             _CACHE = disk_data
