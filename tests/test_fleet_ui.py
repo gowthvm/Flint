@@ -27,6 +27,19 @@ def _isolated_settings(tmp_path):
     s.SETTINGS_PATH = original
 
 
+@pytest.fixture(autouse=True)
+def _open_system_disk_guard():
+    # B02's fail-closed guard refuses every start when the host system disk
+    # cannot be identified; fleet tests assert the state machine, not the
+    # guard, so treat identification as clean here.
+    from unittest.mock import patch
+
+    from core.drives import DriveDetector
+
+    with patch.object(DriveDetector, "_system_disk_paths", return_value=set()):
+        yield
+
+
 def _make_window(qapp, tmp_path, seed: dict | None = None):
     import core.settings as s
 

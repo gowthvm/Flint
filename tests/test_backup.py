@@ -54,7 +54,7 @@ def _run(worker: BackupWorker) -> dict[str, list]:
         "eta_seconds",
         "phase",
         "digest",
-        "finished",
+        "done",
     ):
         events[name] = []
 
@@ -88,7 +88,7 @@ def test_backup_streams_drive_to_file(tmp_path, monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert out.read_bytes() == payload
     assert events["written_bytes"][-1] == (len(payload),)
     assert events["total_bytes"][-1] == (len(payload),)
@@ -116,7 +116,7 @@ def test_backup_cancel_midway(tmp_path, monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "cancelled")]
+    assert events["done"] == [(False, "cancelled")]
     assert not out.exists(), "partial file should be removed on cancel"
     assert not events["digest"], "no digest reported for a cancelled backup"
 
@@ -131,7 +131,7 @@ def test_backup_read_failure_reported(tmp_path, monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "simulated read failure")]
+    assert events["done"] == [(False, "simulated read failure")]
 
 
 def test_backup_reports_open_failure(tmp_path):
@@ -142,7 +142,7 @@ def test_backup_reports_open_failure(tmp_path):
 
     worker._open_drive = fail_open  # type: ignore[method-assign]
     events: list = []
-    worker.finished.connect(lambda ok, msg: events.append((ok, msg)))
+    worker.done.connect(lambda ok, msg: events.append((ok, msg)))
 
     worker.run()
 
@@ -166,5 +166,109 @@ def test_backup_flushes_and_closes_after_last_chunk(tmp_path, monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert flushed == [1001]
+
+def test_backup_opens_letterless_drive_exclusively(tmp_path, monkeypatch):
+    """B03: a drive with no mounted letters must be opened with
+    exclusive=True (the handle itself is the lock); with letters the handle
+    stays shareable because the volume locks do the locking."""
+    import core.backup as backup_mod
+
+    calls: list[dict] = []
+
+    def fake_open(path, *, write, flags=0, exclusive=False):
+        calls.append({"path": path, "write": write, "exclusive": exclusive})
+        return ctypes.c_void_p(1001)
+
+    monkeypatch.setattr(backup_mod, "open_drive", fake_open)
+
+    letterless = BackupWorker(r"\\.\PHYSICALDRIVE8", str(tmp_path / "a.img"))
+    letterless._open_drive()
+    assert calls[-1]["exclusive"] is True
+    assert calls[-1]["write"] is False
+
+    lettered = BackupWorker(
+        r"\\.\PHYSICALDRIVE8", str(tmp_path / "b.img"), letters=["E"]
+    )
+    lettered._open_drive()
+    assert calls[-1]["exclusive"] is False
+
+
+def test_backup_success_replaces_existing_file(tmp_path, monkeypatch):
+    """B07: a completed backup publishes the image atomically over any
+    file already at out_path, leaving no .partial behind."""
+    payload = b"\x77" * (64 * 1024 + 3)
+    out = tmp_path / "backup.img"
+    out.write_bytes(b"previous image contents")
+    fake = _FakeReads(payload)
+    worker = _make_worker(fake, out)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["done"] == [(True, "")]
+    assert out.read_bytes() == payload
+    assert not (tmp_path / "backup.img.partial").exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_backup_failure_preserves_existing_file(tmp_path, monkeypatch):
+    """B07: the destination is never truncated up-front — a failure mid-way
+    removes only the .partial file and leaves out_path untouched."""
+    payload = b"\x5a" * (200 * 1024)
+    out = tmp_path / "backup.img"
+    previous = b"do not destroy me" * 100
+    out.write_bytes(previous)
+    fake = _FakeReads(payload)
+    fake.fail_at = 64 * 1024
+    worker = _make_worker(fake, out)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["done"] == [(False, "simulated read failure")]
+    assert out.read_bytes() == previous
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_backup_free_space_checked_before_touching_destination(
+    tmp_path, monkeypatch
+):
+    """B07: insufficient free space on the destination fails before any
+    file is created or modified."""
+    payload = b"\x00" * (128 * 1024)
+    out = tmp_path / "backup.img"
+    previous = b"keep this file"
+    out.write_bytes(previous)
+    fake = _FakeReads(payload)
+    worker = _make_worker(fake, out)
+    worker._free_space = lambda directory: 4096  # type: ignore[method-assign]
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["done"][0][0] is False
+    assert "not enough free space" in events["done"][0][1]
+    assert out.read_bytes() == previous
+    assert not list(tmp_path.glob("*.partial"))
+    assert fake.offset == 0, "no source bytes should be read before the check"
+
+
+def test_backup_emits_finished_once_when_unlock_raises(tmp_path, monkeypatch):
+    """L04: run()'s outer except must not re-emit after _run_inner already
+    reported success."""
+    payload = b"\x33" * (16 * 1024)
+    fake = _FakeReads(payload)
+    out = tmp_path / "backup.img"
+    worker = _make_worker(fake, out)
+    _patch_kernel(monkeypatch)
+
+    def angry_unlock(held) -> None:
+        raise OSError("volume unlock failed")
+
+    worker.unlock_volumes = angry_unlock  # type: ignore[method-assign]
+
+    events = _run(worker)
+
+    assert events["done"] == [(True, "")]

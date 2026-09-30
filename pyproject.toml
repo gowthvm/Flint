@@ -25,6 +25,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    # R13: CI publishes wheels for cp310–cp313 only (cibuildwheel 2.22 caps at
+    # 3.13, see .github/workflows/publish.yml). 3.14 is supported but served
+    # via the sdist — pip on 3.14 builds from source locally.
     "Programming Language :: Python :: 3.14",
     "Topic :: System :: Software Distribution",
     "Topic :: System :: Recovery Tools",

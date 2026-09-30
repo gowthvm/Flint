@@ -1,4 +1,5 @@
 import ctypes
+import json
 import logging
 import os
 import shutil
@@ -13,6 +14,7 @@ from PyQt6.QtCore import (
     QByteArray,
     QEvent,
     QPointF,
+    QSignalBlocker,
     Qt,
     QThread,
     QTimer,
@@ -57,7 +59,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core import checksum as checksum_mod
-from core import fleet, jobs, settings
+from core import decompress as decompress_mod
+from core import fleet, jobs, paths, settings, writeback
 from core import iso as iso_mod
 from core.backup import BackupWorker
 from core.bootcheck import probe_bootability
@@ -73,6 +76,7 @@ from core.history import (
     import_history,
     load_history,
 )
+from core.log import apply_log_level
 from core.paths import APP_DIR
 from core.updates import (
     DigestFetchWorker,
@@ -92,11 +96,14 @@ from ui import dialogs, style
 from ui.widgets import (
     _HELP_TIPS,
     DriveChip,
+    FakeCapacityWorker,
     HelpButton,
     IsoDropZone,
+    IsoWorker,
     NavItem,
     ProgressArea,
     ShaInput,
+    SidecarCheckWorker,
     TipBubble,
     ToggleSwitch,
     _restyle,
@@ -104,6 +111,61 @@ from ui.widgets import (
 )
 
 logger = logging.getLogger("flint")
+
+# U07: the same refusal text every time an action is blocked by a missing
+# prerequisite, so the status strip and the button tooltips never drift.
+_MSG_BUSY = "Wait for the current operation to finish"
+_MSG_NO_IMAGE = "Select an image first"
+_MSG_NO_DRIVE = "Select a target drive first"
+_MSG_NO_DRIVES = "No USB drive detected \u2014 plug one in first"
+_MSG_CONFIRM_FAILED = "Confirmation failed \u2014 aborting"
+_MSG_DECOMPRESSING = (
+    "The archive is still decompressing \u2014 wait for it to finish"
+)
+_MSG_ARCHIVE_FAILED = (
+    "The archive could not be decompressed \u2014 pick a different image"
+)
+# W12: "verify after write" was off, so nothing was verified — that is not
+# the same outcome as a verification the user cancelled.
+_MSG_VERIFY_NOT_REQUESTED = (
+    "Verification was not requested \u2014 the image was written but not "
+    "verified. Turn on \u201cVerify after write\u201d to check the drive."
+)
+
+# W3: queue rows are decorated with a state prefix ("done \u00b7 C:\x.iso")
+# for readability, so every reader of a row must strip it again. A second
+# run used to try to flash the decorated label as if it were a filename,
+# and `_persist_queue` stored the prefixes too (so a restart dropped them).
+_QUEUE_STATES = (
+    "pending",
+    "queued",
+    "writing",
+    "flashing",
+    "done",
+    "failed",
+    "skipped",
+)
+_QUEUE_SEP = " \u00b7 "
+
+
+def _clean_queue_path(text: str) -> str:
+    """Strip one leading ``"<state> \u00b7 "`` decoration from a queue row."""
+    for state in _QUEUE_STATES:
+        prefix = f"{state}{_QUEUE_SEP}"
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+# C15: the sidebar rows and the stacked pages are ordered differently
+# (nav: write/verify/history/settings, pages: content/history/verify/settings)f
+# One table, defined once, instead of a fresh inline dict every click.
+_NAV_PAGE = {0: 0, 1: 2, 2: 1, 3: 3}
+_NAV_TITLES = {
+    0: "Write bootable USB",
+    1: "Verify a drive",
+    2: "Flash history",
+    3: "Settings",
+}
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -141,9 +203,9 @@ class MainWindow(QMainWindow):
         self._active_write_drive: dict[str, Any] | None = None
         self._drives: list[dict[str, Any]] = []
         self._writer: UsbWriter | None = None
-        self._verifier: VerifyWorker | None = None
         self._iso_sha256_cache: dict[str, str] = {}
         self._page_verifier: VerifyWorker | None = None
+        self._verifier: VerifyWorker | None = None
         self._wipe_worker: WipeWorker | None = None
         self._wipe_verify: tuple[bool, str] | None = None
         self._backup_worker: BackupWorker | None = None
@@ -166,8 +228,26 @@ class MainWindow(QMainWindow):
         self._update_downloader: UpdateDownloadWorker | None = None
         self._digest_fetcher: DigestFetchWorker | None = None
         self._pending_update_path = ""
+        # W4: the image the writer is actually flashing. Queue and fleet runs
+        # write images that were never loaded into the drop zone, so the
+        # report/history/copy-report must not name the drop-zone selection.
+        self._active_write_image: str = ""
         self._sidecar_status = "missing"
         self._sidecar_detail = ""
+        # U12/U14: image hashing and sidecar checks run on worker threads;
+        # these hold the in-flight one and the payload to resume with.
+        self._hash_worker: IsoWorker | None = None
+        self._hash_payload: tuple[Any, ...] | None = None
+        self._sidecar_worker: SidecarCheckWorker | None = None
+        self._queue_sidecar_index = 0
+        self._queue_sidecar_image = ""
+        self._queue_sidecar_drive: dict[str, Any] | None = None
+        # U20: non-destructive counterfeit-capacity probe.
+        self._fake_worker: FakeCapacityWorker | None = None
+        # U09: unfinished job manifests offered back to the queue.
+        self._unfinished_jobs: list[tuple[Path, Any]] = []
+        # U11: the first drive scan establishes the baseline, not an event.
+        self._drives_announced = False
         self._help_bubble: TipBubble | None = None
         self._retired_workers: list[QThread] = []
         # Threads that refused to stop within the shutdown grace period.
@@ -239,7 +319,11 @@ class MainWindow(QMainWindow):
             self._queue_clear_btn,
             self._flash_queue_btn,
             self._fleet_toggle,
-            self._fleet_stop_btn,
+            # W7: the wipe split-button was never part of _controls, so it
+            # stayed clickable while an operation was running.
+            self._wipe_menu_btn,
+            # U01: fleet Stop stays out of _controls so it survives
+            # _set_controls_enabled(False) during a write.
         ]
 
         # Keep primary action states in sync with selections and busy state
@@ -263,17 +347,39 @@ class MainWindow(QMainWindow):
         self._verify_toggle.setChecked(
             bool(settings.get("verify_after_write"))
         )
+        # C02: the configured log level only takes effect once applied.
+        try:
+            apply_log_level(str(settings.get("log_level") or "INFO"))
+        except ValueError:
+            logger.warning(
+                "invalid log_level setting: %r", settings.get("log_level")
+            )
         self._verify_toggle.toggled.connect(self._update_verify_controls)
         self._update_verify_controls()
+        # W5: a saved "auto" theme never applied its style or started the
+        # 5 s registry poll — the radios only connect `toggled`, and
+        # setChecked() ran before that connection was made, so nothing ever
+        # called _set_theme()/_start_theme_poll() at launch.
+        if str(settings.get("theme") or "") == "auto":
+            self._set_theme("auto")
         self._dots_btn.clicked.connect(self._show_dots_menu)
-        self._iso_zone._clear_guard = lambda: self._busy()
-        self._iso_zone._browse_guard = lambda: self._busy()
-        self._verify_zone._clear_guard = lambda: self._busy()
+        # C11: guards are installed through the widgets' declared API, and
+        # U08 gives the Verify-page zone the same browse guard the write
+        # zone already had (an image could be loaded there mid-write).
+        # Both use ``_op_busy``: a window-level operation refuses new
+        # selections, but the zone's own in-flight hash never does - it is
+        # cancelled by clear/load themselves.
+        self._iso_zone.set_guards(
+            clear=lambda: self._op_busy(), browse=lambda: self._op_busy()
+        )
+        self._verify_zone.set_guards(
+            clear=lambda: self._op_busy(), browse=lambda: self._op_busy()
+        )
         QShortcut(QKeySequence("F5"), self).activated.connect(
             self._request_scan
         )
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(
-            self._iso_zone._browse
+            self._iso_zone.browse
         )
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(
             self._on_flash_clicked
@@ -283,10 +389,18 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(self._make_flint_icon())
         self._setup_tray()
 
+        # U09: recent images and unfinished writes are surfaced up front —
+        # neither is reachable again once the session is gone otherwise.
+        self._load_recents()
+        self._scan_unfinished_jobs()
+        # U09(c): the queue itself is durable too — repopulated silently,
+        # minus entries whose files no longer exist.
+        self._restore_queue()
+
         # One-time onboarding modal to improve discoverability
         try:
             if not settings.get("onboarding_seen"):
-                dialogs.inform(
+                dlg = dialogs.inform(
                     self,
                     kind="info",
                     title="Welcome to Flint",
@@ -299,8 +413,10 @@ class MainWindow(QMainWindow):
                         "confirmation."
                     ),
                     check="Don't show this again",
+                    check_default=True,
                 )
-                settings.set_many(onboarding_seen=True)
+                if dlg.checked():
+                    settings.set_many(onboarding_seen=True)
         except Exception:
             logger.debug("onboarding dialog failed")
 
@@ -405,17 +521,72 @@ class MainWindow(QMainWindow):
         )
         self.move(x, y)
 
-    def _busy(self) -> bool:
+    def _zone_busy(self) -> bool:
+        """W2: True while either drop zone still owns running work.
+
+        The zones hash, analyze and decompress on their own workers; the
+        close guard needs to see an image being hashed or decompressed so
+        it can join those threads before the process exits.
+        """
+        for zone in (self._iso_zone, self._verify_zone):
+            check = getattr(zone, "busy", None)
+            if check is not None and check():
+                return True
+        return False
+
+    def _op_busy(self) -> bool:
+        """A window-level operation is in flight (drop-zone work excluded).
+
+        This is the ``_busy()`` of SOURCE_OF_TRUTH ux-flow.md 8.3: writes,
+        wipes, backups, clones, the queue/fleet pass, pre-flight hashing
+        and the sidecar/update/digest probes. The drop zones' own hash,
+        format detection and decompression are deliberately *not* counted
+        here: ``clear_iso``/``load_iso`` cancel and retire those workers
+        themselves, so their clear/browse guards must stay clickable -
+        otherwise the image zone's (X) and click-to-browse become dead
+        controls for the whole time a large image is being read.
+        """
         return bool(
             self._writing
             or self._writer is not None
-            or self._verifier is not None
             or self._page_verifier is not None
             or self._wipe_worker is not None
             or self._backup_worker is not None
             or self._clone_worker is not None
             or self._queue_active
+            # U12/U14: pre-flight hashing and sidecar checks are just as
+            # much "an operation in progress" as the write they precede.
+            or (self._hash_worker is not None and self._hash_worker.isRunning())
+            or (
+                self._sidecar_worker is not None
+                and self._sidecar_worker.isRunning()
+            )
+            # W2: the counterfeit-capacity probe and the update
+            # checker/downloader/digest fetcher are in-flight work too;
+            # _shutdown has to join them, so closing must be blocked on
+            # them as well.
+            or (self._fake_worker is not None and self._fake_worker.isRunning())
+            or (
+                self._update_checker is not None
+                and self._update_checker.isRunning()
+            )
+            or (
+                self._update_downloader is not None
+                and self._update_downloader.isRunning()
+            )
+            or (
+                self._digest_fetcher is not None
+                and self._digest_fetcher.isRunning()
+            )
         )
+
+    def _busy(self) -> bool:
+        """``_op_busy()`` plus whatever the drop zones are still reading.
+
+        Everything that must refuse input during an operation checks this;
+        the zones' own clear/browse guards check ``_op_busy()`` only.
+        """
+        return self._op_busy() or self._zone_busy()
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
@@ -443,18 +614,18 @@ class MainWindow(QMainWindow):
         logo_box.setLayout(logo_row)
 
         nav_items = [
-            ("Write", True, None),
-            ("Verify", False, None),
-            ("History", False, None),
-            ("Settings", False, None),
+            ("Write", True),
+            ("Verify", False),
+            ("History", False),
+            ("Settings", False),
         ]
 
         nav = QVBoxLayout()
         nav.setContentsMargins(8, 12, 8, 12)
         nav.setSpacing(1)
         self._nav_items: list[NavItem] = []
-        for index, (text, active, badge) in enumerate(nav_items):
-            item = NavItem(text, active, badge)
+        for index, (text, active) in enumerate(nav_items):
+            item = NavItem(text, active)
             item.clicked.connect(lambda i=index: self._on_nav_clicked(i))
             self._nav_items.append(item)
             nav.addWidget(item)
@@ -562,10 +733,87 @@ class MainWindow(QMainWindow):
         )
         clone_action.triggered.connect(self._on_clone_clicked)
         menu.addSeparator()
+        fake_action = menu.addAction("Check for counterfeit capacity\u2026")
+        assert fake_action is not None
+        fake_action.setEnabled(self._current_drive is not None)
+        fake_action.setToolTip(
+            "Read the last 1 MiB of the reported capacity (read-only)"
+        )
+        fake_action.triggered.connect(self._on_check_fake_clicked)
+        menu.addSeparator()
         refresh = menu.addAction("\u21bb Refresh")
         assert refresh is not None
         refresh.triggered.connect(self._request_scan)
         menu.exec(QCursor.pos())
+
+    def _on_check_fake_clicked(self) -> None:
+        """U20: GUI entry point for the non-destructive capacity probe.
+
+        The CLI has had ``--check-fake`` since the detector landed; this
+        is the same read-only probe behind a confirmation, so a wrong
+        click cannot touch the drive.
+        """
+        if self._busy() or self._fake_worker is not None:
+            return
+        drive = self._current_drive
+        if drive is None:
+            self._progress.set_error(_MSG_NO_DRIVE)
+            return
+        reported = int(drive.get("size_bytes") or 0)
+        if reported <= 0:
+            reported = int(float(drive.get("size_gb") or 0) * 1_000_000_000)
+        path = str(drive.get("physical_path") or "")
+        if reported <= 0 or not path:
+            self._progress.set_error(
+                "Drive capacity is unknown \u2014 nothing to probe"
+            )
+            return
+        name = drive.get("model") or drive.get("name") or "this drive"
+        if not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Check drive capacity?",
+            message=(
+                f"Read the last 1 MiB of {name}'s reported capacity to "
+                "look for a counterfeit (fake-capacity) stick.\n\n"
+                "Read-only: nothing on the drive is modified."
+            ),
+            accept="Probe drive",
+        ):
+            return
+        worker = FakeCapacityWorker(path, reported)
+        self._fake_worker = worker
+        worker.result.connect(self._on_fake_capacity_result)
+        worker.start()
+
+    def _on_fake_capacity_result(self, suspicious: bool, note: str) -> None:
+        worker = self._fake_worker
+        if worker is None:
+            return
+        self._fake_worker = None
+        self._retire(worker)
+        if suspicious:
+            dialogs.completion(
+                self,
+                kind="error",
+                title="Possible counterfeit drive",
+                message=(
+                    "The drive returned no usable data where its reported "
+                    f"capacity ends:\n\n{note}\n\n"
+                    "Sticks with forged capacity labels usually fail this "
+                    "read; large copies to them lose data silently."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+            return
+        dialogs.completion(
+            self,
+            kind="success",
+            title="Capacity probe passed",
+            message=note
+            or "The end of the reported capacity read back normally.",
+            buttons=[("Close", "primary", "close")],
+        )
 
     def _select_drive(self, drive: dict[str, Any]) -> None:
         if self._busy():
@@ -833,9 +1081,18 @@ class MainWindow(QMainWindow):
         return entered.lower() == want.lower()
 
     def _on_drives_ready(self, drives: list[dict[str, Any]]) -> None:
+        if not drives and self._detector.last_error:
+            # U18: a transient detection failure must not wipe a list that
+            # is still valid — keep the previous drives and selectionf An
+            # empty list with no error means everything really was
+            # unplugged and clears as usual.
+            drives = self._drives
+        previous = self._drives
         self._drives = drives
         if self._busy():
             return
+        # U11: drives used to appear and vanish silently on this tick.
+        self._announce_drives(previous, drives)
         self._fleet_tick()
         if self._current_drive is not None:
             selected = next(
@@ -852,6 +1109,44 @@ class MainWindow(QMainWindow):
         self._update_drive_ui()
         self._update_controls_state()
 
+    @staticmethod
+    def _drive_key(drive: dict[str, Any]) -> str:
+        return str(drive.get("physical_path") or drive.get("serial") or "")
+
+    def _announce_drives(
+        self, previous: list[dict[str, Any]], current: list[dict[str, Any]]
+    ) -> None:
+        """U11: one balloon for whatever changed since the last poll tick.
+
+        The first scan only establishes the baseline — announcing sticks
+        that were already plugged in at launch would be noise.
+        """
+        if not self._drives_announced:
+            self._drives_announced = True
+            return
+        before = {self._drive_key(d) for d in previous}
+        after = {self._drive_key(d) for d in current}
+        added = [d for d in current if self._drive_key(d) not in before]
+        removed = [d for d in previous if self._drive_key(d) not in after]
+        if not added and not removed:
+            return
+        messages: list[str] = []
+        for drive in added[:2]:
+            name = str(
+                drive.get("model") or drive.get("name") or "USB drive"
+            )
+            messages.append(f"{name} connected")
+        if len(added) > 2:
+            messages.append(f"{len(added) - 2} more connected")
+        for drive in removed[:2]:
+            name = str(
+                drive.get("model") or drive.get("name") or "USB drive"
+            )
+            messages.append(f"{name} removed")
+        if len(removed) > 2:
+            messages.append(f"{len(removed) - 2} more removed")
+        self._show_tray_notify("Drive change", ", ".join(messages))
+
     def _request_scan(self) -> None:
         if self._busy():
             return
@@ -859,10 +1154,17 @@ class MainWindow(QMainWindow):
 
     def _on_iso_selected(self, path: str) -> None:
         # Called when an ISO is selected; refresh control states
-        self._sidecar_status, self._sidecar_detail = checksum_mod.check_sidecar(
-            path, self._iso_zone.digest
-        )
-        self._update_sidecar_label()
+        if getattr(self._iso_zone, "compressed_source", False):
+            # B04: the sidecar belongs to the flashable image, not to the
+            # archive the user just picked — defer until the extracted
+            # file has been hashed (see _on_iso_hash_ready)f
+            self._sidecar_status, self._sidecar_detail = "missing", ""
+            self._update_sidecar_label()
+        else:
+            self._sidecar_status, self._sidecar_detail = (
+                checksum_mod.check_sidecar(path, self._iso_zone.digest)
+            )
+            self._update_sidecar_label()
         try:
             self._update_controls_state()
         except Exception:
@@ -874,8 +1176,17 @@ class MainWindow(QMainWindow):
             return
         if ok and digest:
             self._iso_sha256_cache[path] = digest
+        source = getattr(self._iso_zone, "source_path", None) or path
+        if ok and digest:
+            # U09: remember the selection the user actually made (the
+            # archive for a compressed pick, never the temp extract)f
+            self._remember_recent(str(source))
+        # B04: for a compressed selection the extracted file lives in a
+        # temp dir while its sidecar sits next to the original archive.
         self._sidecar_status, self._sidecar_detail = checksum_mod.check_sidecar(
-            path, digest if ok else None
+            path,
+            digest if ok else None,
+            sidecar_dir=os.path.dirname(str(source)),
         )
         self._update_sidecar_label()
 
@@ -997,6 +1308,11 @@ class MainWindow(QMainWindow):
         return menu
 
     def _show_dots_menu(self) -> None:
+        # U10: the menu is navigation, not a resumable side path — it used
+        # to stay fully live mid-write while the drive picker blocked.
+        if self._busy():
+            self._progress.set_warning(_MSG_BUSY)
+            return
         self._build_dots_menu().exec(QCursor.pos())
 
     def _build_settings_page(self) -> QWidget:
@@ -1128,6 +1444,29 @@ class MainWindow(QMainWindow):
         eject_row.addWidget(eject_label)
         eject_row.addStretch()
         behavior_recessed_col.addLayout(eject_row)
+
+        # U06: ask_before_elevation existed only in settings.json.
+        self._elevate_confirm_toggle = ToggleSwitch(
+            checked=bool(settings.get("ask_before_elevation")),
+            label="Confirm before elevation",
+            description="Ask before restarting Flint as administrator",
+        )
+        self._elevate_confirm_toggle.toggled.connect(
+            lambda on: settings.set_many(ask_before_elevation=bool(on))
+        )
+        elevate_row = QHBoxLayout()
+        elevate_row.setContentsMargins(0, 2, 0, 2)
+        elevate_row.setSpacing(8)
+        elevate_label = QLabel(
+            "Ask before restarting Flint with administrator rights"
+        )
+        elevate_label.setObjectName("capLabel")
+        elevate_label.setProperty("colorRole", "label")
+        elevate_label.setWordWrap(True)
+        elevate_row.addWidget(self._elevate_confirm_toggle)
+        elevate_row.addWidget(elevate_label)
+        elevate_row.addStretch()
+        behavior_recessed_col.addLayout(elevate_row)
 
         bcol.addWidget(behavior_recessed)
 
@@ -1391,7 +1730,7 @@ class MainWindow(QMainWindow):
 
         self._verify_progress = ProgressArea()
         self._verify_progress.set_verifying()
-        self._verify_progress._title.setText("Idle")
+        self._verify_progress.set_title("Idle")
         col.addWidget(self._verify_progress)
 
         self._verify_mode = QLabel("")
@@ -1446,15 +1785,12 @@ class MainWindow(QMainWindow):
 
     def _on_page_verify_start(self) -> None:
         if self._busy():
-            self._verify_progress.set_error(
-                "Wait for the current operation to finish first"
-            )
+            # U07: the same refusal text as the write strip uses.
+            self._verify_progress.set_error(_MSG_BUSY)
             self._scroll_to_verify_progress()
             return
         if not self._current_drive:
-            self._verify_progress.set_error(
-                "Select a USB drive first \u2014 click the drive card"
-            )
+            self._verify_progress.set_error(_MSG_NO_DRIVE)
             self._scroll_to_verify_progress()
             return
         iso = self._verify_zone.path
@@ -1503,7 +1839,7 @@ class MainWindow(QMainWindow):
         self._verify_hash_copy.setEnabled(False)
         verifier.progress.connect(self._on_page_verify_progress)
         verifier.stats.connect(self._on_page_verify_stats)
-        verifier.finished.connect(self._on_page_verify_finished)
+        verifier.done.connect(self._on_page_verify_finished)
         verifier.start()
 
     def _on_page_verify_progress(self, percent: float) -> None:
@@ -1525,7 +1861,7 @@ class MainWindow(QMainWindow):
         self._verify_mode.setText("")
         if ok:
             self._verify_progress.set_done()
-            self._verify_progress._title.setText("Verified")
+            self._verify_progress.set_title("Verified")
             # Show the computed hash for clipboard copy
             self._verify_hash_value.setText(message)
             self._verify_hash_copy.setEnabled(True)
@@ -1582,18 +1918,13 @@ class MainWindow(QMainWindow):
             self._progress.set_warning(
                 "Complete the current operation before navigating away"
             )
-            self._scroll_to_progress(self._content_scroll)
             return
         for i, item in enumerate(self._nav_items):
             item.set_active(i == index)
-        page = {0: 0, 1: 2, 2: 1, 3: 3}[index]
-        titles = {
-            0: "Write bootable USB",
-            1: "Verify a drive",
-            2: "Flash history",
-            3: "Settings",
-        }
-        self._topbar_title.setText(titles.get(index, ""))
+        # C15: the mapping lives in _NAV_PAGE/_NAV_TITLES (one place to
+        # extend when a page is added), not inline at every click.
+        page = _NAV_PAGE.get(index, 0)
+        self._topbar_title.setText(_NAV_TITLES.get(index, ""))
         if page == 1:
             self._reload_history()
         self._pages.setCurrentIndex(page)
@@ -1925,19 +2256,50 @@ class MainWindow(QMainWindow):
             verify_after_write=self._verify_toggle.isChecked(),
         )
 
+    def _dialogs_suppressed(self) -> bool:
+        """W8: True once shutdown started.
+
+        ``_shutdown`` pumps the event loop while it joins the workers, so a
+        finishing worker can still reach ``_finish_flash``/``_on_wipe_finished``.
+        A modal completion dialog started there runs its own event loop and
+        blocks the application exit, so those dialogs are dropped instead.
+        """
+        return self._shutdown_done
+
     def _shutdown(self) -> None:
         if self._shutdown_done:
             return
         self._shutdown_done = True
         self._poller.requestInterruption()
-        active = (
+        # W2: the drop zones own hash/analyze/decompress workers that are not
+        # reachable through a `self._*` attribute. Closing the window while
+        # one of them ran used to destroy a live QThread (process abort), so
+        # they are joined here too. They stay owned by their zone: no
+        # `_retire` (the zone keeps its own reference list).
+        # ``Any`` because the tuple mixes every worker class in the app;
+        # the only contract shutdown relies on is cancel()/isRunning()/wait().
+        zone_workers: list[Any] = []
+        for zone in (self._iso_zone, self._verify_zone):
+            live = getattr(zone, "live_workers", None)
+            if live is None:
+                continue
+            for worker in live():
+                if worker is not None and worker not in zone_workers:
+                    zone_workers.append(worker)
+        active: tuple[Any, ...] = (
             self._writer,
-            self._verifier,
+            self._hash_worker,
+            self._sidecar_worker,
+            self._fake_worker,
             self._page_verifier,
+            self._verifier,
             self._wipe_worker,
             self._backup_worker,
             self._clone_worker,
-        )
+            self._update_checker,
+            self._update_downloader,
+            self._digest_fetcher,
+        ) + tuple(zone_workers)
         # Cancel and wait for every live worker with the event loop pumping.
         # Never destroy a running QThread (that aborts the process and
         # abandons the drive mid-write); if a worker is still alive after the
@@ -1957,9 +2319,15 @@ class MainWindow(QMainWindow):
             if time.monotonic() > deadline:
                 break
         for worker in active:
-            if worker is not None and worker.isRunning():
+            if worker is None:
+                continue
+            if worker.isRunning():
                 self._zombies.append(worker)
-            elif worker is not None:
+            elif worker in zone_workers:
+                # The zone keeps its own reference (and its own pruning);
+                # retiring it here would double-own it.
+                continue
+            else:
                 self._retire(worker)
         if not self._poller.wait(2000):
             self._zombies.append(self._poller)
@@ -1967,6 +2335,9 @@ class MainWindow(QMainWindow):
             if retired is not None and not retired.isRunning():
                 retired.deleteLater()
         self._retired_workers.clear()
+        # U15: land any queued settings/history saves before the process
+        # exits (no-op while write-back is disabled, e.g. in tests).
+        writeback.flush(5.0)
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         assert event is not None
@@ -2003,6 +2374,32 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _close_block_reason(self) -> str:
+        """The sentence closeEvent/tray-Quit shows instead of closing.
+
+        Never a false "A write is in progress": closing is refused for a
+        pure image read, the capacity probe and an update download too,
+        and each of those gets its own honest wording.
+        """
+        if (
+            self._writing
+            or self._writer is not None
+            or self._queue_active
+            or self._page_verifier is not None
+            or self._wipe_worker is not None
+            or self._backup_worker is not None
+            or self._clone_worker is not None
+            or (self._hash_worker is not None and self._hash_worker.isRunning())
+            or (
+                self._sidecar_worker is not None
+                and self._sidecar_worker.isRunning()
+            )
+        ):
+            return "A write is in progress"
+        if self._zone_busy():
+            return "Flint is still reading the selected image"
+        return "An operation is in progress"
+
     def closeEvent(self, event: QCloseEvent | None) -> None:
         assert event is not None
         self._lifecycle_log(
@@ -2011,11 +2408,15 @@ class MainWindow(QMainWindow):
         )
         if self._busy():
             event.ignore()
+            reason = self._close_block_reason()
+            body = (
+                f"{reason} \u2014 closing is disabled.\n"
+                "You can minimise the window to the taskbar."
+            )
             if self._tray is not None:
                 self._tray.showMessage(
                     "Flint",
-                    "A write is in progress \u2014 closing is disabled.\n"
-                    "You can minimise the window to the taskbar.",
+                    body,
                     QSystemTrayIcon.MessageIcon.Information,
                     3000,
                 )
@@ -2023,11 +2424,12 @@ class MainWindow(QMainWindow):
                 dialogs.inform(
                     self,
                     kind="warning",
-                    title="Flint \u2014 write in progress",
-                    message=(
-                        "A write is in progress \u2014 closing is disabled.\n"
-                        "You can minimise the window to the taskbar."
+                    title=(
+                        "Flint \u2014 write in progress"
+                        if reason == "A write is in progress"
+                        else "Flint \u2014 closing disabled"
                     ),
+                    message=body,
                 )
             return
         self._save_settings()
@@ -2197,6 +2599,32 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(24, 20, 24, 20)
         col.setSpacing(14)
 
+        # U09: writes a previous session never finished are offered back
+        # before the user has to remember them.
+        self._resume_banner = QFrame()
+        self._resume_banner.setObjectName("block")
+        resume_row = QHBoxLayout(self._resume_banner)
+        resume_row.setContentsMargins(14, 10, 14, 10)
+        resume_row.setSpacing(8)
+        self._resume_label = QLabel("")
+        self._resume_label.setWordWrap(True)
+        self._resume_add_btn = QPushButton("Add to queue")
+        self._resume_add_btn.setObjectName("primary")
+        self._resume_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._resume_add_btn.clicked.connect(self._on_resume_add_clicked)
+        self._resume_dismiss_btn = QPushButton("\u2715")
+        self._resume_dismiss_btn.setObjectName("ghost")
+        self._resume_dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._resume_dismiss_btn.setToolTip("Ignore unfinished writes")
+        self._resume_dismiss_btn.clicked.connect(
+            lambda: self._resume_banner.setVisible(False)
+        )
+        resume_row.addWidget(self._resume_label, 1)
+        resume_row.addWidget(self._resume_add_btn)
+        resume_row.addWidget(self._resume_dismiss_btn)
+        self._resume_banner.setVisible(False)
+        col.addWidget(self._resume_banner)
+
         col.addWidget(self._build_section_label("Image source"))
         self._iso_zone = IsoDropZone()
         col.addWidget(self._iso_zone)
@@ -2315,7 +2743,7 @@ class MainWindow(QMainWindow):
             label="Fleet mode",
             description="Write to multiple drives simultaneously",
         )
-        self._fleet_toggle.setObjectName("fleetToggle")
+        self._fleet_toggle.setProperty("fleetToggle", True)
         self._fleet_toggle.toggled.connect(self._on_fleet_toggled)
         fleet_label = QLabel("Fleet mode")
         fleet_label.setObjectName("capLabel")
@@ -2334,11 +2762,14 @@ class MainWindow(QMainWindow):
         skip_row = QHBoxLayout()
         skip_row.setSpacing(8)
         self._fleet_skip_flashed = ToggleSwitch(
-            False,
+            bool(settings.get("fleet_skip_flashed")),
             label="Skip already-flashed drives",
             description="Skip drives that have already been flashed with the same image",
         )
-        self._fleet_skip_flashed.setObjectName("fleetToggle")
+        self._fleet_skip_flashed.setProperty("fleetToggle", True)
+        self._fleet_skip_flashed.toggled.connect(
+            lambda on: settings.set_many(fleet_skip_flashed=bool(on))
+        )
         skip_label = QLabel("Skip already-flashed drives")
         skip_label.setObjectName("capLabel")
         skip_label.setProperty("colorRole", "muted")
@@ -2756,7 +3187,6 @@ class MainWindow(QMainWindow):
                 self._progress.set_warning(
                     "Persistence disabled (mutually exclusive with Windows To Go)"
                 )
-                self._scroll_to_progress(self._content_scroll)
             self._persistence_toggle.setChecked(False)
             self._persistence_toggle.setEnabled(False)
         else:
@@ -2774,7 +3204,6 @@ class MainWindow(QMainWindow):
                     self._progress.set_warning(
                         "Write mode changed to File copy (required for TPM bypass)"
                     )
-                    self._scroll_to_progress(self._content_scroll)
         self._on_expert_changed()
 
     def _on_iso_analysis(
@@ -2831,7 +3260,6 @@ class MainWindow(QMainWindow):
                 "Hybrid ISO detected \u2014 raw write required. "
                 "Expert options are disabled."
             )
-            self._scroll_to_progress(self._content_scroll)
         else:
             self._mode_combo.setEnabled(expert)
             self._filesystem_combo.setEnabled(
@@ -2939,25 +3367,83 @@ class MainWindow(QMainWindow):
             return path
         return None
 
+    @staticmethod
+    def _drive_capacity(drive: dict[str, Any]) -> int:
+        """Exact capacity in bytes (mirrors core.cli._drive_capacity).
+
+        Prefers the detector's raw ``size_bytes``; the rounded
+        ``size_gb * 1e9`` is only a fallback for older records.
+        """
+        size = drive.get("size_bytes")
+        if isinstance(size, (int, float)) and size > 0:
+            return int(size)
+        return int((drive.get("size_gb") or 0) * 1_000_000_000)
+
+    def _refuse_if_system_disk(self, drive: dict[str, Any] | None) -> bool:
+        """B02: final system-disk re-check before a destructive start.
+
+        The detector already excludes the OS disk; this runs a fresh
+        check at the moment an operation is about to start. Identification
+        failure (``None``) refuses to proceed — never write on a guess.
+        Returns True when the operation must not continue.
+        """
+        if not drive:
+            return False
+        try:
+            system_paths = DriveDetector()._system_disk_paths()
+        except Exception:
+            logger.exception("system-disk re-check failed")
+            system_paths = None
+        if system_paths is None:
+            message = (
+                "Could not verify system disk status \u2014 operation "
+                "cancelled"
+            )
+        elif drive.get("physical_path", "") in system_paths:
+            message = "Refusing to write to the system disk"
+        else:
+            return False
+        self._progress.set_error(message)
+        return True
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         for widget in self._controls:
             widget.setEnabled(enabled)
         self._flash_btn.setEnabled(enabled)
 
+    def _iso_state(self) -> str:
+        """B04: ``empty`` / ``ready`` / ``decompressing`` / ``failed``f
+
+        Falls back to "is a path set" for zones that predate
+        ``resolve_state`` (test doubles), so a stub keeps working.
+        """
+        zone = self._iso_zone
+        resolve = getattr(zone, "resolve_state", None)
+        if resolve is None:
+            return "ready" if getattr(zone, "path", None) else "empty"
+        return str(resolve())
+
     def _update_controls_state(self) -> None:
         """Enable/disable primary actions based on selection and state."""
         busy = self._busy()
-        has_iso = bool(getattr(self._iso_zone, "path", None))
+        state = self._iso_state()
+        # B04: a compressed selection has a path long before it has a
+        # flashable image — gate on the state, not on `path`f
+        has_iso = state == "ready"
         has_drive = self._current_drive is not None
         # Flash enabled when not busy and iso + drive selected
         try:
             self._flash_btn.setEnabled((not busy) and has_iso and has_drive)
             if busy:
-                tip = "Wait for the current operation to finish"
+                tip = _MSG_BUSY
+            elif state == "decompressing":
+                tip = _MSG_DECOMPRESSING
+            elif state == "failed":
+                tip = _MSG_ARCHIVE_FAILED
             elif not has_iso:
-                tip = "Select an image first"
+                tip = _MSG_NO_IMAGE
             elif not has_drive:
-                tip = "Select a target drive first"
+                tip = _MSG_NO_DRIVE
             else:
                 tip = "Write the image to the selected drive"
             self._flash_btn.setToolTip(tip)
@@ -2966,28 +3452,74 @@ class MainWindow(QMainWindow):
         # Wipe enabled when a drive is selected and not busy
         try:
             self._wipe_btn.setEnabled((not busy) and has_drive)
+            # W7: the wipe-method split button follows the same rule.
+            self._wipe_menu_btn.setEnabled((not busy) and has_drive)
         except Exception:
             pass
-        # Verify page start button: disable if no drive or busy
+        # Verify page start button: disabled while busy or with no drive.
+        # U07: also requires an image (pasted digest or a hashed selection)f
         try:
             if hasattr(self, "_verify_start_btn"):
-                self._verify_start_btn.setEnabled((not busy) and has_drive)
+                self._verify_start_btn.setEnabled(
+                    (not busy)
+                    and has_drive
+                    and self._verify_ready()
+                )
         except Exception:
             pass
 
-    def _on_cancel_clicked(self) -> None:
+    def _verify_ready(self) -> bool:
+        """U07: something to verify — a pasted digest or a selected image."""
+        try:
+            if self._verify_sha_input.text().strip():
+                return True
+            return bool(
+                getattr(self._verify_zone, "path", None)
+                and getattr(self._verify_zone, "digest", None)
+            )
+        except Exception:
+            return False
+
+    def _on_cancel_clicked(self) -> bool:
+        """Abort the in-flight operation(s)f
+
+        U02: aborting a destructive write asks first; returns False when
+        the user declines (nothing is cancelled)f
+        """
+        if (
+            self._writer is not None
+            or self._wipe_worker is not None
+            or self._clone_worker is not None
+        ) and not dialogs.confirm(
+            self,
+            kind="warning",
+            title="Cancel write?",
+            message=(
+                "The write is still in progressf Cancelling now leaves "
+                "the target drive partially written \u2014 it may be "
+                "unusable until it is flashed again."
+            ),
+            accept="Cancel write",
+            accept_style="danger",
+        ):
+            return False
         if self._writer is not None:
             self._writer.cancel()
-        if self._verifier is not None:
-            self._verifier.cancel()
+        if self._hash_worker is not None:
+            self._hash_worker.cancel()
+        if self._sidecar_worker is not None:
+            self._sidecar_worker.cancel()
         if self._page_verifier is not None:
             self._page_verifier.cancel()
+        if self._verifier is not None:
+            self._verifier.cancel()
         if self._wipe_worker is not None:
             self._wipe_worker.cancel()
         if self._backup_worker is not None:
             self._backup_worker.cancel()
         if self._clone_worker is not None:
             self._clone_worker.cancel()
+        return True
 
     def _recheck_drive(self, drive: dict[str, Any]) -> dict[str, Any] | None:
         current = next(
@@ -3011,26 +3543,34 @@ class MainWindow(QMainWindow):
     def _on_flash_clicked(self) -> None:
         if self._busy():
             return
+        if self._refuse_if_system_disk(self._current_drive):
+            return
+        # B04: gate on the resolve state, not on `path`f A compressed
+        # selection has a path (the archive itself) long before it has a
+        # flashable image, and Ctrl+Return / "Flash again" reach this
+        # method even while the Flash button is disabled.
+        state = self._iso_state()
+        if state == "decompressing":
+            self._progress.set_error(_MSG_DECOMPRESSING)
+            return
+        if state == "failed":
+            self._progress.set_error(_MSG_ARCHIVE_FAILED)
+            return
         iso = self._iso_zone.path
-        if not iso:
-            self._progress.set_error("Select an ISO image first")
-            self._scroll_to_progress(self._content_scroll)
+        if state != "ready" or not iso:
+            self._progress.set_error(_MSG_NO_IMAGE)
             return
         if self._sidecar_status in ("mismatch", "error"):
             self._progress.set_error(
                 "Image checksum does not match its sidecar \u2014 "
                 "flashing blocked"
             )
-            self._scroll_to_progress(self._content_scroll)
             return
         if not self._current_drive:
             if self._drives:
                 self._show_drive_picker()
                 return
-            self._progress.set_error(
-                "No USB drive detected \u2014 plug one in first"
-            )
-            self._scroll_to_progress(self._content_scroll)
+            self._progress.set_error(_MSG_NO_DRIVES)
             return
         drive = self._current_drive
         name = drive["model"] or drive["name"]
@@ -3056,14 +3596,12 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "Hybrid ISO detected \u2014 raw write required"
             )
-            self._scroll_to_progress(self._content_scroll)
             return
         if (persist or wtg) and mode != "filecopy":
             self._progress.set_error(
                 "Persistence / Windows To Go require File copy mode "
                 "\u2014 enable it in Expert options"
             )
-            self._scroll_to_progress(self._content_scroll)
             return
         if bypass_tpm and mode != "filecopy":
             # Auto-switch to file-copy mode for TPM bypass.
@@ -3082,19 +3620,16 @@ class MainWindow(QMainWindow):
                 self._progress.set_error(
                     "Persistence size must be a whole number of MB/GB"
                 )
-                self._scroll_to_progress(self._content_scroll)
                 return
             if persistence_size_mb <= 0:
                 self._progress.set_error(
                     "Persistence size must be greater than zero"
                 )
-                self._scroll_to_progress(self._content_scroll)
                 return
             if persistence_size_mb > 65536:
                 self._progress.set_error(
                     "Persistence size is capped at 64 GiB"
                 )
-                self._scroll_to_progress(self._content_scroll)
                 return
         filesystem = (
             self._filesystem_combo.currentData() if expert else "fat32"
@@ -3107,7 +3642,6 @@ class MainWindow(QMainWindow):
                     "cannot store it. Pick NTFS or exFAT in Expert mode, "
                     "or write raw (DD)."
                 )
-                self._scroll_to_progress(self._content_scroll)
                 return
         confirm_text = self._confirm_text(drive, iso)
         if self._iso_hybrid:
@@ -3156,17 +3690,14 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "Drive changed or disconnected \u2014 refresh and re-pick"
             )
-            self._scroll_to_progress(self._content_scroll)
             return
         drive_path = self._drive_path_for(current)
         if not drive_path:
             self._progress.set_error("Drive path unavailable")
-            self._scroll_to_progress(self._content_scroll)
             return
         # Require typed confirmation for destructive actions
         if not self._require_typed_confirmation(current, iso):
-            self._progress.set_error("Confirmation failed — aborting")
-            self._scroll_to_progress(self._content_scroll)
+            self._progress.set_error(_MSG_CONFIRM_FAILED)
             return
         self._current_drive = current
         self._active_write_drive = current
@@ -3213,6 +3744,19 @@ class MainWindow(QMainWindow):
 
         Also used to retry a flash after a failed verification.
         """
+        # U12: the manifest needs the image digest and the cache can miss
+        # (queue/fleet items were never dropped through the hash zone)f
+        # Hashing a multi-GB image here froze the GUI — do it on a worker
+        # and re-enter this method when it lands.
+        if (
+            self._fleet_busy
+            and writer_kwargs.get("write_mode", "auto") != "filecopy"
+            and not self._iso_sha256_cache.get(iso)
+        ):
+            self._start_write_hash(
+                iso, drive_path, drive_letters, writer_kwargs, drive
+            )
+            return
         if self._fleet_busy and writer_kwargs.get("write_mode", "auto") != "filecopy":
             try:
                 source_size = os.path.getsize(iso)
@@ -3229,12 +3773,11 @@ class MainWindow(QMainWindow):
                 if chunk_size < 4096:
                     chunk_size = DEFAULT_CHUNK_SIZE
                 chunk_size -= chunk_size % 4096
-                # Use cached hash from background computation when ISO was
-                # selected; compute synchronously only as a last resort.
-                source_digest = self._iso_sha256_cache.get(iso)
+                # U12: the digest is guaranteed by the cache gate at the
+                # top of this method; never hash on the GUI thread here.
+                source_digest = self._iso_sha256_cache.get(iso, "")
                 if not source_digest:
-                    source_digest = jobs.source_sha256(iso)
-                    self._iso_sha256_cache[iso] = source_digest
+                    raise ValueError("image digest not available")
                 options = {
                     "chunk_size": chunk_size,
                     "verify_after_write": bool(
@@ -3264,6 +3807,9 @@ class MainWindow(QMainWindow):
                                 target_fingerprint=fingerprint,
                                 target_size=target_size,
                                 options=options,
+                                # size_gb is rounded; the exact capacity is
+                                # re-adopted by the writer before writing.
+                                check_target_size=False,
                             )
                         except ValueError:
                             continue
@@ -3320,7 +3866,6 @@ class MainWindow(QMainWindow):
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Writing\u2026")
 
-        self._scroll_to_progress(self._content_scroll)
 
         writer = UsbWriter(
             iso,
@@ -3343,10 +3888,81 @@ class MainWindow(QMainWindow):
                 ok, msg, res, w
             )
         )
-        writer.finished.connect(
+        writer.done.connect(
             lambda ok, msg, w=writer: self._on_write_finished(ok, msg, w)
         )
         writer.start()
+
+    def _start_write_hash(
+        self,
+        iso: str,
+        drive_path: str,
+        drive_letters: list[str],
+        writer_kwargs: dict[str, Any],
+        drive: dict[str, Any],
+    ) -> None:
+        """U12: hash the image for the fleet manifest off the GUI thread."""
+        if self._hash_worker is not None and self._hash_worker.isRunning():
+            return
+        self._hash_payload = (
+            iso,
+            drive_path,
+            drive_letters,
+            writer_kwargs,
+            drive,
+        )
+        self._progress.reset()
+        self._done_bar.setVisible(False)
+        self._set_controls_enabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._writing = True
+        self._write_started = time.perf_counter()
+        self._write_duration = 0.0
+        self._poller.suspend()
+        self._verify_handled = False
+        self._progress.set_phase("Hashing image")
+        self._progress.set_progress(0)
+        if self._tray is not None:
+            self._tray.setToolTip("Flint \u2014 Hashing image\u2026")
+        worker = IsoWorker(iso)
+        self._hash_worker = worker
+        worker.hash_done.connect(self._on_write_hash_done)
+        worker.progress.connect(self._progress.set_progress)
+        worker.start()
+
+    def _on_write_hash_done(self, path: str, ok: bool, digest: str) -> None:
+        worker = self._hash_worker
+        if worker is None:
+            return
+        cancelled = worker.isInterruptionRequested()
+        self._hash_worker = None
+        self._retire(worker)
+        payload = self._hash_payload
+        self._hash_payload = None
+        if cancelled:
+            self._reset_after_hash()
+            return
+        if not ok or not digest:
+            self._reset_after_hash()
+            self._progress.set_error(
+                "Could not hash the image \u2014 nothing was written"
+            )
+            return
+        if payload is None:
+            return
+        self._iso_sha256_cache[path] = digest
+        self._begin_write(*payload)
+
+    def _reset_after_hash(self) -> None:
+        """U12: return to idle after a hash that never became a write."""
+        self._writing = False
+        self._poller.resume()
+        self._set_controls_enabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._set_taskbar_progress(None)
+        self._progress.set_ready()
+        if self._tray is not None:
+            self._tray.setToolTip("Flint")
 
     def _on_write_progress(self, percent: float) -> None:
         self._progress.set_progress(percent)
@@ -3437,13 +4053,15 @@ class MainWindow(QMainWindow):
                 self._progress.set_warning(self._last_verify_message)
             self._finish_flash(True, "", self._last_verify_digest or None)
             return
-        if self._verify_toggle.isChecked():
-            if self._iso_zone.digest:
-                self._start_verify()
-                return
-            self._finish_flash(True, "", None, skipped_verify=True)
-            return
-        self._finish_flash(True, "", None)
+        # C05: the old standalone `_start_verify()` call here could never
+        # fire on the write path — `_verification_in_writer` is set from
+        # this same toggle above, which is handled earlierf What remains
+        # is the honest "verify was requested but never ran" outcome,
+        # which the legacy regression script drives directly (it finishes
+        # a write without `_begin_write` ever arming the in-writer verify)f
+        self._finish_flash(
+            True, "", None, skipped_verify=self._verify_toggle.isChecked()
+        )
 
     def _on_verify_result(
         self,
@@ -3501,6 +4119,11 @@ class MainWindow(QMainWindow):
             if oldest is not None and not oldest.isRunning():
                 oldest.deleteLater()
 
+    # C05: `_start_verify` is no longer called from `_on_write_finished`
+    # (every armed flash verifies inside the writer), but the legacy
+    # `_regression.py` script drives it directly to pin the
+    # verification-expectation hint, so the standalone read-back worker
+    # stays as that test-facing surface.
     def _start_verify(self) -> None:
         iso = self._iso_zone.path
         target = self._active_write_drive or self._current_drive
@@ -3522,7 +4145,7 @@ class MainWindow(QMainWindow):
         self._verifier = verifier
         verifier.progress.connect(self._on_verify_progress)
         verifier.stats.connect(self._on_verify_stats)
-        verifier.finished.connect(
+        verifier.done.connect(
             lambda ok, msg, v=verifier: self._on_verify_finished(ok, msg, v)
         )
         verifier.start()
@@ -3565,9 +4188,10 @@ class MainWindow(QMainWindow):
     def _on_wipe_clicked(self, method: str = "zero") -> None:
         if self._busy():
             return
+        if self._refuse_if_system_disk(self._current_drive):
+            return
         if not self._current_drive:
-            self._progress.set_error("Select a USB drive first")
-            self._scroll_to_progress(self._content_scroll)
+            self._progress.set_error(_MSG_NO_DRIVE)
             return
         drive = self._current_drive
         name = drive.get("model") or drive.get("name")
@@ -3597,17 +4221,14 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 "Drive changed or disconnected \u2014 refresh and re-pick"
             )
-            self._scroll_to_progress(self._content_scroll)
             return
         drive_path = self._drive_path_for(current)
         if not drive_path:
             self._progress.set_error("Drive path unavailable")
-            self._scroll_to_progress(self._content_scroll)
             return
         # Require typed confirmation for destructive actions
         if not self._require_typed_confirmation(current, None):
-            self._progress.set_error("Confirmation failed — aborting")
-            self._scroll_to_progress(self._content_scroll)
+            self._progress.set_error(_MSG_CONFIRM_FAILED)
             return
         self._current_drive = current
         self._active_write_drive = current
@@ -3619,10 +4240,13 @@ class MainWindow(QMainWindow):
         self._set_controls_enabled(False)
         self._cancel_btn.setEnabled(True)
         self._flash_btn.setEnabled(False)
+        # W7: the wipe buttons were the two controls this path left live, so
+        # a second wipe could be started on top of the running one.
+        self._wipe_btn.setEnabled(False)
+        self._wipe_menu_btn.setEnabled(False)
         self._writing = True
         self._write_started = time.perf_counter()
         self._poller.suspend()
-        self._scroll_to_progress(self._content_scroll)
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Wiping\u2026")
 
@@ -3637,7 +4261,7 @@ class MainWindow(QMainWindow):
         worker.eta_seconds.connect(self._progress.set_eta)
         worker.phase.connect(self._progress.set_phase)
         worker.verified.connect(self._on_wipe_verified)
-        worker.finished.connect(self._on_wipe_finished)
+        worker.done.connect(self._on_wipe_finished)
         worker.start()
 
     def _on_wipe_verified(self, ok: bool, message: str) -> None:
@@ -3662,12 +4286,11 @@ class MainWindow(QMainWindow):
         target = self._active_write_drive or self._current_drive
         if ok:
             self._progress.set_done()
-            self._progress._title.setText("Wiped")
+            self._progress.set_title("Wiped")
             self._done_label.setText("Drive wiped")
             self._done_summary.setText("")
             self._reflash_btn.setVisible(False)
             self._done_bar.setVisible(True)
-            self._scroll_to_done_bar()
             if self._tray is not None:
                 self._tray.showMessage(
                     "Flint \u2014 Wipe finished",
@@ -3697,6 +4320,8 @@ class MainWindow(QMainWindow):
                 success=ok,
                 drive_serial=target.get("serial"),
                 wipe_verified=self._format_wipe_verify(),
+                operation="wipe",
+                drive_path=target.get("physical_path"),
             )
             append_audited_history(report)
         # Copy-report must offer the wipe report (not a previous flash's).
@@ -3749,12 +4374,53 @@ class MainWindow(QMainWindow):
         self._update_controls_state()
 
     def _queue_images(self) -> list[str]:
+        """Clean image paths for every queue row (W3: no state prefixes)."""
         items: list[str] = []
         for i in range(self._queue_list.count()):
             item = self._queue_list.item(i)
             if item is not None:
-                items.append(item.text())
+                items.append(_clean_queue_path(item.text()))
         return items
+
+    def _persist_queue(self) -> None:
+        """U09(c): snapshot the queue so a restart doesn't lose it.
+
+        Uses ``core.paths.APP_DIR`` dynamically (not the imported
+        ``APP_DIR`` alias) so the conftest APP_DIR redirection covers it.
+        """
+        try:
+            app_dir = paths.APP_DIR
+            app_dir.mkdir(parents=True, exist_ok=True)
+            path = app_dir / "queue.json"
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._queue_images(), f, indent=2)
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception("failed to persist queue")
+
+    def _restore_queue(self) -> None:
+        """U09(c): reload a persisted queue; entries whose files are gone
+        are dropped silently (the user can re-add them)."""
+        try:
+            with open(paths.APP_DIR / "queue.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, list):
+            return
+        existing = set(self._queue_images())
+        added = False
+        for entry in data:
+            if not isinstance(entry, str) or entry in existing:
+                continue
+            if not os.path.isfile(entry):
+                continue
+            self._queue_list.addItem(entry)
+            existing.add(entry)
+            added = True
+        if added:
+            self._update_queue_badge()
 
     def _on_queue_add_clicked(self) -> None:
         if self._busy():
@@ -3766,11 +4432,24 @@ class MainWindow(QMainWindow):
             "Disk images (*.iso *.img);;All files (*)",
         )
         existing = set(self._queue_images())
+        added_compressed = False
         for path in paths:
-            if path not in existing:
-                self._queue_list.addItem(path)
-                existing.add(path)
+            if path in existing:
+                continue
+            # B04: "All files (*)" lets archives into this dialog; a
+            # queue item would be written raw, so refuse it at the door.
+            if decompress_mod.is_compressed(path):
+                added_compressed = True
+                continue
+            self._queue_list.addItem(path)
+            existing.add(path)
+        if added_compressed:
+            self._progress.set_error(
+                "Compressed archives can't be queued \u2014 "
+                "decompress them first"
+            )
         self._update_queue_badge()
+        self._persist_queue()
 
     def _on_queue_remove_clicked(self) -> None:
         if self._busy():
@@ -3778,12 +4457,14 @@ class MainWindow(QMainWindow):
         for item in self._queue_list.selectedItems():
             self._queue_list.takeItem(self._queue_list.row(item))
         self._update_queue_badge()
+        self._persist_queue()
 
     def _on_queue_clear_clicked(self) -> None:
         if self._busy():
             return
         self._queue_list.clear()
         self._update_queue_badge()
+        self._persist_queue()
 
     def _toggle_queue(self) -> None:
         visible = not self._queue_block.isVisible()
@@ -3799,6 +4480,81 @@ class MainWindow(QMainWindow):
         arrow = "\u25b4" if visible else "\u25be"
         count_str = f" ({count})" if count else ""
         self._queue_toggle_btn.setText(f"Flash queue {arrow}{count_str}")
+
+    def _recent_paths(self) -> list[str]:
+        raw = settings.get("recent_images") or []
+        if not isinstance(raw, list):
+            return []
+        return [str(p) for p in raw if isinstance(p, str)]
+
+    def _load_recents(self) -> None:
+        """U09(a): repopulate the drop zone's recent-images row.
+
+        W6: remembered paths that have since been moved or deleted used to
+        be listed anyway, so the row showed labels that silently did
+        nothing when clicked.
+        """
+        live = [p for p in self._recent_paths() if os.path.isfile(p)]
+        self._iso_zone.set_recents(live[:5])
+
+    def _remember_recent(self, path: str) -> None:
+        """U09(a): record a successfully hashed image as recent."""
+        if not path or not os.path.isfile(path):
+            return
+        recent = [p for p in self._recent_paths() if p != path]
+        recent.insert(0, path)
+        recent = recent[:5]
+        settings.set_many(recent_images=recent)
+        self._iso_zone.set_recents(recent)
+
+    def _scan_unfinished_jobs(self) -> list[tuple[Path, Any]]:
+        """U09(b): surface write manifests a previous session never finished."""
+        found: list[tuple[Path, Any]] = []
+        jobs_dir = APP_DIR / "jobs"
+        if jobs_dir.is_dir():
+            for manifest_path in sorted(jobs_dir.glob("*.json")):
+                try:
+                    manifest = jobs.load_manifest(manifest_path)
+                except (OSError, TypeError, ValueError):
+                    continue
+                if manifest.state not in {"writing", "resumable", "queued"}:
+                    continue
+                try:
+                    source = str(manifest.source_path)
+                    if not source or os.path.getsize(source) != manifest.source_size:
+                        continue
+                except OSError:
+                    continue
+                found.append((manifest_path, manifest))
+        self._unfinished_jobs = found
+        count = len(found)
+        if count:
+            self._resume_label.setText(
+                f"{count} unfinished write{'s' if count != 1 else ''} "
+                "found \u2014 add their images to the queue"
+            )
+            self._resume_banner.setVisible(True)
+        else:
+            self._resume_banner.setVisible(False)
+        return found
+
+    def _on_resume_add_clicked(self) -> None:
+        """U09(b): hand the unfinished images back to the queue."""
+        existing = set(self._queue_images())
+        added = 0
+        for _manifest_path, manifest in self._unfinished_jobs:
+            source = str(manifest.source_path)
+            if source in existing:
+                continue
+            self._queue_list.addItem(source)
+            existing.add(source)
+            added += 1
+        if added:
+            self._update_queue_badge()
+            self._persist_queue()
+            if not self._queue_block.isVisible():
+                self._toggle_queue()
+        self._resume_banner.setVisible(False)
 
     def _on_check_updates_clicked(self) -> None:
         if self._update_checker is not None:
@@ -3876,7 +4632,7 @@ class MainWindow(QMainWindow):
             self._pending_update_dest = dest
             self._pending_update_release = release
             self._digest_fetcher = DigestFetchWorker(digest_url)
-            self._digest_fetcher.finished.connect(self._on_digest_fetched)
+            self._digest_fetcher.done.connect(self._on_digest_fetched)
             self._digest_fetcher.start()
         else:
             self._begin_update_download(url, dest, None)
@@ -3927,7 +4683,7 @@ class MainWindow(QMainWindow):
             )
             return
         self._progress.set_done()
-        self._progress._title.setText("Update ready")
+        self._progress.set_title("Update ready")
         choice = dialogs.completion(
             self,
             kind="success",
@@ -3989,7 +4745,7 @@ class MainWindow(QMainWindow):
             self._progress.set_error("Add images to the queue first")
             return
         if not self._current_drive:
-            self._progress.set_error("Select a USB drive first")
+            self._progress.set_error(_MSG_NO_DRIVE)
             return
         drive = self._current_drive
         name = drive.get("model") or drive.get("name")
@@ -4014,7 +4770,7 @@ class MainWindow(QMainWindow):
             )
             return
         if not self._require_typed_confirmation(current, None):
-            self._progress.set_error("Confirmation failed — aborting")
+            self._progress.set_error(_MSG_CONFIRM_FAILED)
             return
         self._queue_items = images
         self._queue_index = 0
@@ -4044,18 +4800,80 @@ class MainWindow(QMainWindow):
             else:
                 self._fail_queue("no drive selected")
             return
+        if self._refuse_if_system_disk(selected):
+            if self._fleet_busy:
+                self._disarm_fleet()
+            else:
+                self._fail_queue("refusing to write to the system disk")
+            return
         if not (self._fleet is not None and self._fleet_busy):
             self._mark_queue_item(index, "flashing")
-        # Per-item safety: an unreadable or mismatching sidecar blocks the
-        # item cheaply (digest unknown here; the writer hashes the image
-        # itself during verification).
-        status, _detail = checksum_mod.check_sidecar(image, None)
+        # B04: a compressed archive would be written raw byte-for-byte —
+        # refuse it here instead of trusting the file dialog filter.
+        if decompress_mod.is_compressed(image):
+            reason = (
+                f"{os.path.basename(image)} is a compressed archive "
+                "\u2014 decompress it first"
+            )
+            if self._fleet_busy:
+                self._disarm_fleet(reason)
+            else:
+                self._fail_queue(reason)
+            return
+        # U14: per-item safety — an unreadable or mismatching sidecar
+        # blocks the item cheaply (digest unknown here; the writer hashes
+        # the image itself during verification)f Locating one is a stat;
+        # evaluating it is a file read, so that part runs on a worker and
+        # resumes through _on_queue_sidecar_checked.
+        if checksum_mod.find_sidecar(image) is None:
+            self._continue_queue_item(index, selected)
+            return
+        if (
+            self._sidecar_worker is not None
+            and self._sidecar_worker.isRunning()
+        ):
+            return
+        self._queue_sidecar_index = index
+        self._queue_sidecar_image = image
+        self._queue_sidecar_drive = selected
+        worker = SidecarCheckWorker(image)
+        self._sidecar_worker = worker
+        worker.checked.connect(self._on_queue_sidecar_checked)
+        worker.start()
+
+    def _on_queue_sidecar_checked(
+        self, image: str, status: str, _detail: str
+    ) -> None:
+        worker = self._sidecar_worker
+        if worker is None:
+            return
+        self._sidecar_worker = None
+        self._retire(worker)
+        if not self._queue_sidecar_image or image != self._queue_sidecar_image:
+            return
+        self._queue_sidecar_image = ""
         if status in ("error", "mismatch"):
             if self._fleet_busy:
                 self._disarm_fleet(f"checksum problem on {image}")
             else:
                 self._fail_queue(f"checksum problem on {image}")
             return
+        self._continue_queue_item(
+            self._queue_sidecar_index, self._queue_sidecar_drive
+        )
+
+    def _continue_queue_item(
+        self, index: int, selected: dict[str, Any] | None
+    ) -> None:
+        """U14: the synchronous tail of ``_start_queue_item``."""
+        images = (
+            self._fleet.images
+            if self._fleet is not None and self._fleet_busy
+            else self._queue_items
+        )
+        if selected is None or index >= len(images):
+            return
+        image = images[index]
         letters = selected.get("letters") or (
             [selected["letter"]] if selected.get("letter") else []
         )
@@ -4158,10 +4976,13 @@ class MainWindow(QMainWindow):
     def _on_fleet_toggled(self, checked: bool) -> None:
         if checked:
             self._arm_fleet()
-        else:
-            if self._fleet_busy:
-                self._on_cancel_clicked()
-            self._disarm_fleet()
+            return
+        if self._fleet_busy and not self._on_cancel_clicked():
+            # U02: the abort was declined — stay armed and keep writing.
+            with QSignalBlocker(self._fleet_toggle):
+                self._fleet_toggle.setChecked(True)
+            return
+        self._disarm_fleet()
 
     def _on_fleet_stop_clicked(self) -> None:
         if self._fleet_busy:
@@ -4274,6 +5095,9 @@ class MainWindow(QMainWindow):
         self._fleet_busy = False
         drive = self._fleet_drive
         if not succeeded:
+            # C03: record the failure so the session reports it instead of
+            # looking like everything is fine.
+            session.mark_failed()
             if drive is not None:
                 self._fleet_update_status(drive, "failed")
             self._fleet_drive = None
@@ -4325,15 +5149,9 @@ class MainWindow(QMainWindow):
             lines.append(replacement)
         self._fleet_status.setText("\n".join(lines))
 
-    def _scroll_to_progress(self, scroll: QScrollArea) -> None:
-        """Progress area is now fixed; no scrolling needed."""
-
     def _scroll_to_verify_progress(self) -> None:
         """Auto-scroll the verify page so its progress bar is visible."""
         QTimer.singleShot(100, lambda: self._verify_scroll.ensureWidgetVisible(self._verify_progress, 0, 50))
-
-    def _scroll_to_done_bar(self) -> None:
-        """Done bar is now fixed; no scrolling needed."""
 
     def _start_drive_operation(self, worker: Any) -> None:
         """Common busy-state setup for backup/clone operations."""
@@ -4347,7 +5165,6 @@ class MainWindow(QMainWindow):
         self._write_started = time.perf_counter()
         self._write_duration = 0.0
         self._poller.suspend()
-        self._scroll_to_progress(self._content_scroll)
         if self._tray is not None:
             op = "Backing up" if self._backup_out else "Cloning"
             self._tray.setToolTip(f"Flint \u2014 {op}\u2026")
@@ -4357,19 +5174,20 @@ class MainWindow(QMainWindow):
         worker.total_bytes.connect(self._progress.set_total)
         worker.eta_seconds.connect(self._progress.set_eta)
         worker.phase.connect(self._on_drive_phase)
-        worker.finished.connect(self._on_drive_operation_finished)
+        worker.done.connect(self._on_drive_operation_finished)
         worker.start()
 
     def _on_drive_phase(self, phase: str) -> None:
+        # C11: set_phase is the declared way to retitle the panel; the
+        # old second line poked _title directly to drop the ellipsis.
         self._progress.set_phase(phase)
-        self._progress._title.setText(phase)
 
     def _on_backup_clicked(self) -> None:
         if self._busy():
             return
         drive = self._current_drive
         if drive is None:
-            self._progress.set_error("Select a USB drive first")
+            self._progress.set_error(_MSG_NO_DRIVE)
             return
         current = self._recheck_drive(drive)
         if current is None:
@@ -4422,7 +5240,7 @@ class MainWindow(QMainWindow):
             return
         source = self._current_drive
         if source is None:
-            self._progress.set_error("Select a USB drive first")
+            self._progress.set_error(_MSG_NO_DRIVE)
             return
         current_source = self._recheck_drive(source)
         if current_source is None:
@@ -4466,9 +5284,9 @@ class MainWindow(QMainWindow):
         if target is None:
             self._progress.set_error("No target drive selected")
             return
-        if (target["size_gb"] * 1_000_000_000) < (
-            current_source["size_gb"] * 1_000_000_000
-        ):
+        if self._refuse_if_system_disk(target):
+            return
+        if self._drive_capacity(target) < self._drive_capacity(current_source):
             self._progress.set_error(
                 "Target drive is smaller than the source \u2014 clone refused"
             )
@@ -4499,7 +5317,7 @@ class MainWindow(QMainWindow):
             )
             return
         if not self._require_typed_confirmation(fresh_target, None):
-            self._progress.set_error("Confirmation failed — aborting")
+            self._progress.set_error(_MSG_CONFIRM_FAILED)
             return
         worker = CloneWorker(
             current_source["physical_path"],
@@ -4524,9 +5342,10 @@ class MainWindow(QMainWindow):
         self._cancel_btn.setEnabled(False)
         self._set_taskbar_progress(None, error=not ok)
         is_backup = bool(self._backup_out)
+        backup_out = self._backup_out
         if ok:
             self._progress.set_done()
-            self._progress._title.setText("Backed up" if is_backup else "Cloned")
+            self._progress.set_title("Backed up" if is_backup else "Cloned")
             if is_backup:
                 digest = self._backup_digest
                 self._done_label.setText("Backup complete")
@@ -4545,7 +5364,6 @@ class MainWindow(QMainWindow):
                 )
             self._reflash_btn.setVisible(False)
             self._done_bar.setVisible(True)
-            self._scroll_to_done_bar()
             if self._tray is not None:
                 self._tray.setToolTip("Flint")
                 self._tray.showMessage(
@@ -4578,8 +5396,9 @@ class MainWindow(QMainWindow):
                 success=bool(ok),
                 written_sha256=self._backup_digest if is_backup else None,
                 drive_serial=target.get("serial"),
+                operation=operation,
+                drive_path=target.get("physical_path"),
             )
-            report["operation"] = operation
             if source is not None:
                 report["source_drive_serial"] = source.get("serial")
             append_audited_history(report)
@@ -4603,6 +5422,46 @@ class MainWindow(QMainWindow):
                     else "Clone failed"
                 ),
                 message=self._friendly_error(message or "Operation failed"),
+                buttons=[("Close", "primary", "close")],
+            )
+            return
+        # U05: backup/clone succeeded — same completion shape as flash/wipe.
+        name = (
+            (target or {}).get("model")
+            or (target or {}).get("name")
+            or "the drive"
+        )
+        size = DriveDetector.format_size(
+            self._drive_capacity(target or {})
+        )
+        if is_backup:
+            dialogs.completion(
+                self,
+                kind="success",
+                title="Backup complete",
+                message=(
+                    f"{name} ({size}) was read into "
+                    f"{os.path.basename(backup_out)}f\n\n"
+                    "Flash the image to another drive whenever you need "
+                    "a copy."
+                ),
+                buttons=[("Close", "primary", "close")],
+            )
+        else:
+            src_name = (
+                (source or {}).get("model")
+                or (source or {}).get("name")
+                or "the source drive"
+            )
+            dialogs.completion(
+                self,
+                kind="success",
+                title="Clone complete",
+                message=(
+                    f"{src_name} \u2192 {name} ({size})f\n\n"
+                    f"{name} now holds an exact copy \u2014 eject it and "
+                    "boot from it."
+                ),
                 buttons=[("Close", "primary", "close")],
             )
 
@@ -4773,7 +5632,6 @@ class MainWindow(QMainWindow):
         self._wipe_btn.setEnabled(self._current_drive is not None)
         self._set_taskbar_progress(None, error=not succeeded)
         self._writer = None
-        self._verifier = None
         self._update_controls_state()
 
         target = self._active_write_drive or self._current_drive
@@ -4822,25 +5680,23 @@ class MainWindow(QMainWindow):
                 )
             self._reflash_btn.setVisible(True)
             self._done_bar.setVisible(True)
-            self._scroll_to_done_bar()
         elif error_text == "cancelled":
             self._progress.set_error(
                 "Write cancelled \u2014 the drive was left partially "
                 "written and is not usable. Flash again before using it."
             )
-            self._progress._title.setText("Cancelled")
+            self._progress.set_title("Cancelled")
             self._done_label.setText("Write cancelled")
             self._done_summary.setText(
                 "The drive needs a complete write before use."
             )
             self._reflash_btn.setVisible(True)
             self._done_bar.setVisible(True)
-            self._scroll_to_done_bar()
         else:
             self._progress.set_error(
                 self._friendly_error(error_text or "Failed")
             )
-            self._progress._title.setText("Failed")
+            self._progress.set_title("Failed")
             self._done_bar.setVisible(False)
 
         if boot and succeeded:
@@ -4873,10 +5729,13 @@ class MainWindow(QMainWindow):
                 bootable=boot,
                 boot_status=boot_status,
                 avg_mbps=avg_mbps,
+                drive_path=target.get("physical_path"),
             )
             append_audited_history(report)
         self._last_report = report
         self._active_write_drive = None
+        # U04: exactly one system notification per finish — the tray
+        # message every other flow (wipe/backup/clone) uses.
         if self._tray is not None:
             self._tray.setToolTip(
                 "Flint \u2014 Done" if succeeded else "Flint"
@@ -4890,13 +5749,21 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Information,
                     4000,
                 )
-
-        toast_msg = (
-            "Image was " + ("verified." if verified_sha else "written.")
-            if succeeded
-            else ("Write cancelled" if error_text == "cancelled" else "Write failed")
-        )
-        self._show_toast("Flint", toast_msg)
+            elif error_text == "cancelled":
+                self._tray.showMessage(
+                    "Flint \u2014 Write cancelled",
+                    "The drive was left partially written \u2014 flash "
+                    "it again before using it.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000,
+                )
+            else:
+                self._tray.showMessage(
+                    "Flint \u2014 Flash failed",
+                    self._friendly_error(error_text or "Failed"),
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000,
+                )
 
         if succeeded:
             if skipped_verify:

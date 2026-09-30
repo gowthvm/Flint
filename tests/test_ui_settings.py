@@ -94,6 +94,24 @@ def test_close_tray_toggle_persists(qapp, tmp_path):
         w._shutdown()
 
 
+def test_elevation_confirm_toggle_persists(qapp, tmp_path):
+    import core.settings as s
+
+    w = _make_window(
+        qapp, tmp_path, seed={"ask_before_elevation": False}
+    )
+    try:
+        # U06: ask_before_elevation used to live only in settings.json.
+        assert hasattr(w, "_elevate_confirm_toggle")
+        assert not w._elevate_confirm_toggle.isChecked()
+        w._elevate_confirm_toggle.setChecked(True)
+        assert s.get("ask_before_elevation") is True
+        w._elevate_confirm_toggle.setChecked(False)
+        assert s.get("ask_before_elevation") is False
+    finally:
+        w._shutdown()
+
+
 def test_settings_expert_toggle_syncs_with_write_page(qapp, tmp_path):
     w = _make_window(qapp, tmp_path)
     try:
@@ -142,6 +160,7 @@ def test_close_blocked_while_busy(qapp, tmp_path, monkeypatch):
         assert warned, "busy close must explain itself without a tray"
         w._writing = False
     finally:
+        w.hide()
         w._shutdown()
 
 
@@ -220,5 +239,42 @@ def test_auto_eject_off_shows_completion_dialog(qapp, tmp_path, monkeypatch):
     try:
         w._finish_flash(True, "", None)
         assert shown, "completion dialog must appear when auto-eject is off"
+    finally:
+        w._shutdown()
+
+
+def test_fleet_skip_flashed_persists_across_instances(qapp, tmp_path):
+    import core.settings as s
+
+    w = _make_window(qapp, tmp_path)
+    try:
+        assert not w._fleet_skip_flashed.isChecked()
+        w._fleet_skip_flashed.setChecked(True)
+        assert s.get("fleet_skip_flashed") is True
+    finally:
+        w._shutdown()
+
+    s._CACHE = None  # force a disk read: this is a round-trip, not a cache hit
+    w2 = _make_window(qapp, tmp_path)
+    try:
+        assert w2._fleet_skip_flashed.isChecked()
+        w2._fleet_skip_flashed.setChecked(False)
+        assert s.get("fleet_skip_flashed") is False
+    finally:
+        w2._shutdown()
+
+
+def test_log_level_applied_at_startup(qapp, tmp_path, monkeypatch):
+    import ui.window as window_mod
+
+    applied: list[str] = []
+    monkeypatch.setattr(
+        window_mod,
+        "apply_log_level",
+        lambda level: applied.append(level) or level,
+    )
+    w = _make_window(qapp, tmp_path, seed={"log_level": "DEBUG"})
+    try:
+        assert applied == ["DEBUG"]
     finally:
         w._shutdown()

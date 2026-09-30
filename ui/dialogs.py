@@ -47,6 +47,7 @@ class FlintDialog(QDialog):
         message: str = "",
         buttons: list[tuple[str, str, str]] | None = None,
         check_text: str | None = None,
+        check_default: bool = False,
         input_placeholder: str | None = None,
         mono: bool = False,
     ) -> None:
@@ -105,6 +106,7 @@ class FlintDialog(QDialog):
         if check_text:
             self._check = QCheckBox(check_text)
             self._check.setObjectName("flintDialogCheck")
+            self._check.setChecked(check_default)
             body.addWidget(self._check)
         root.addLayout(body)
 
@@ -193,6 +195,7 @@ def inform(
     title: str,
     message: str,
     check: str | None = None,
+    check_default: bool = False,
 ) -> FlintDialog:
     """Single-button information popup; returns the dialog so callers can
     read .checked() afterwards."""
@@ -203,6 +206,7 @@ def inform(
         message=message,
         buttons=[("Close", "primary", "close")],
         check_text=check,
+        check_default=check_default,
     )
     dlg.run()
     return dlg

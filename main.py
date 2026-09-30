@@ -34,6 +34,8 @@ _CRASH_PATH = os.path.join(
     "Flint",
     "crash.log",
 )
+# U16: the most this ever reads off the GUI thread, whatever the log's size.
+_CRASH_TAIL_BYTES = 64 * 1024
 
 
 def _log(message: str) -> None:
@@ -201,16 +203,30 @@ def _maybe_show_crash_report(
     dialogs: Any,
     application: Any,
 ) -> None:
-    """If the crash log grew since the last run, offer to copy the report."""
+    """If the crash log grew since the last run, offer to copy the report.
+
+    U16/H5: this runs from a 400 ms timer on the GUI thread, so only the
+    tail of the (unbounded) log is ever read — the recent traceback is
+    the useful part, and a multi-megabyte log must not stall startup.
+    """
     try:
-        with open(_CRASH_PATH, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        size = os.path.getsize(_CRASH_PATH)
     except OSError:
         return
     seen = int(settings.get("crash_report_seen_bytes") or 0)
-    if len(content) <= seen or not content[seen:].strip():
+    if size <= seen:
         return
-    settings.set_many(crash_report_seen_bytes=len(content))
+    start = max(seen, size - _CRASH_TAIL_BYTES)
+    try:
+        with open(_CRASH_PATH, "rb") as f:
+            f.seek(start)
+            chunk = f.read(size - start)
+    except OSError:
+        return
+    content = chunk.decode("utf-8", errors="replace")
+    settings.set_many(crash_report_seen_bytes=size)
+    if not content.strip():
+        return
     dlg = dialogs.FlintDialog(
         window,
         kind="warning",
@@ -227,9 +243,7 @@ def _maybe_show_crash_report(
     if dlg.run() == "copy":
         clipboard = application.clipboard()
         if clipboard is not None:
-            clipboard.setText(
-                content[seen:].strip() or content.strip()
-            )
+            clipboard.setText(content.strip())
 
 
 def main() -> int:
@@ -252,7 +266,7 @@ def main() -> int:
         from PyQt6.QtNetwork import QLocalServer, QLocalSocket
         from PyQt6.QtWidgets import QApplication
 
-        from core import settings
+        from core import settings, writeback
         from core.log import setup_logging
         from ui import dialogs
         from ui.style import build_style
@@ -262,6 +276,9 @@ def main() -> int:
         _log(f"start: pid={os.getpid()} argv={sys.argv}")
         _install_crash_logging()
         _ensure_admin(settings)
+        # U15: settings/history fsyncs move off the GUI thread; the CLI
+        # (and the tests) keep the synchronous default.
+        writeback.enable()
         app = QApplication(sys.argv)
         startup_theme = settings.get("theme")
         if startup_theme == "auto":
@@ -315,7 +332,7 @@ def main() -> int:
             _log(
                 f"aboutToQuit: visible={window.isVisible()} "
                 f"writer={window._writer is not None} "
-                f"verifier={window._verifier is not None} "
+                f"verifier={window._page_verifier is not None} "
                 f"tray={window._tray is not None}"
             )
 

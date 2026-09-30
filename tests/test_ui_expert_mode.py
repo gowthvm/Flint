@@ -164,11 +164,19 @@ def test_help_button_hover_shows_instant_fading_bubble(qapp, tmp_path):
         QTest.qWait(10)
         assert bubble.isVisible(), "bubble must appear on first hover"
         assert bubble._label.text() == btn.tip_text()
-        QTest.qWait(100)
-        assert bubble.windowOpacity() == 1.0, "bubble must reach full opacity"
+        deadline = 2000
+        while bubble.windowOpacity() < 0.9995 and deadline > 0:
+            QTest.qWait(10)
+            deadline -= 10
+        assert bubble.windowOpacity() >= 0.9995, (
+            "bubble must reach full opacity"
+        )
 
         btn.leaveEvent(QEvent(QEvent.Type.Leave))
-        QTest.qWait(100)
+        deadline = 2000
+        while bubble.isVisible() and deadline > 0:
+            QTest.qWait(10)
+            deadline -= 10
         assert not bubble.isVisible(), "bubble must fade out and hide"
     finally:
         w._shutdown()

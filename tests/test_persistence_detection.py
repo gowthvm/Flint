@@ -173,6 +173,107 @@ def test_create_persistence_patches_grub_on_drive(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# free-space gate (B14): an overlay that cannot fit must not be created
+# ---------------------------------------------------------------------------
+
+
+def _fake_free(monkeypatch, free_bytes):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        persistence.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=free_bytes),
+    )
+
+
+def test_casper_refuses_when_target_has_no_free_space(tmp_path, monkeypatch):
+    monkeypatch.setattr(persistence, "_mke2fs_candidates", list)
+    _fake_free(monkeypatch, 8 * 1024 * 1024)
+    root = str(tmp_path) + "\\"
+
+    ok, msg = persistence.create_persistence(
+        root, 1024, {"casper/filesystem.squashfs"}
+    )
+
+    assert ok is False
+    assert "free space" in msg
+    assert "1024 MB" in msg
+    assert not (tmp_path / "casper-rw").exists()
+
+
+def test_casper_accepts_exactly_size_plus_slack(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        persistence, "_mke2fs_candidates", lambda: [["mke2fs.exe"]]
+    )
+
+    def fake_run(args, capture_output=True, text=True, check=False):
+        calls.append(list(args))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(persistence.subprocess, "run", fake_run)
+    size_mb = 256
+    needed = (size_mb * 1024 * 1024) + persistence._FREE_SPACE_SLACK_BYTES
+    _fake_free(monkeypatch, needed)
+    root = str(tmp_path) + "\\"
+
+    ok, _msg = persistence.create_persistence(root, size_mb, {"casper/vmlinuz"})
+
+    assert ok is True
+    assert (tmp_path / "casper-rw").stat().st_size == size_mb * 1024 * 1024
+    assert calls and calls[0][0].endswith("mke2fs.exe")
+
+
+def test_casper_refuses_one_byte_below_size_plus_slack(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(persistence, "_mke2fs_candidates", list)
+    size_mb = 256
+    needed = (size_mb * 1024 * 1024) + persistence._FREE_SPACE_SLACK_BYTES
+    _fake_free(monkeypatch, needed - 1)
+    root = str(tmp_path) + "\\"
+
+    ok, msg = persistence.create_persistence(root, size_mb, {"casper/vmlinuz"})
+
+    assert ok is False
+    assert "free space" in msg
+    assert not (tmp_path / "casper-rw").exists()
+
+
+def test_live_overlay_ignores_free_space_gate(tmp_path, monkeypatch):
+    """The live style writes one tiny file, so it is never space-gated."""
+    _fake_free(monkeypatch, 0)
+    root = str(tmp_path) + "\\"
+
+    ok, _ = persistence.create_persistence(
+        root, 4096, {"live/filesystem.squashfs"}
+    )
+
+    assert ok is True
+    assert (tmp_path / "live" / "persistence.conf").is_file()
+
+
+def test_free_space_unknown_does_not_block(tmp_path, monkeypatch):
+    def _boom(path):
+        raise OSError("no such volume")
+
+    monkeypatch.setattr(persistence.shutil, "disk_usage", _boom)
+    monkeypatch.setattr(persistence, "_mke2fs_candidates", list)
+    root = str(tmp_path) + "\\"
+
+    ok, msg = persistence.create_persistence(
+        root, 64, {"casper/filesystem.squashfs"}
+    )
+
+    # Unmeasurable space is not a blocker: the old behaviour (create the
+    # file, warn about formatting) still applies.
+    assert (tmp_path / "casper-rw").is_file()
+    assert "NOT formatted" in msg
+    assert ok is False
+
+
+# ---------------------------------------------------------------------------
 # writer dispatch (no real drives touched)
 # ---------------------------------------------------------------------------
 
@@ -198,7 +299,7 @@ def test_writer_persistence_dispatches(qapp, monkeypatch, tmp_path):
 
     seen = {}
     monkeypatch.setattr(diskpart, "prepare_partition", lambda n, s, f: "E")
-    monkeypatch.setattr(diskpart, "copy_iso_files", lambda a, b: None)
+    monkeypatch.setattr(diskpart, "copy_iso_files", lambda a, b, **_kw: None)
     monkeypatch.setattr(
         persistence,
         "create_persistence",
@@ -218,7 +319,7 @@ def test_writer_persistence_dispatches(qapp, monkeypatch, tmp_path):
     notes = []
     finished = []
     writer.note.connect(notes.append)
-    writer.finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    writer.done.connect(lambda ok, msg: finished.append((ok, msg)))
     writer.run()
 
     assert finished == [(True, "")]

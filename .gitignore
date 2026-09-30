@@ -5,6 +5,8 @@ __pycache__/
 
 # C extensions
 *.so
+# Built native extension — *.py[cod] catches it only by accident ([cod] includes d)
+*.pyd
 
 # Distribution / packaging
 build/
@@ -34,6 +36,9 @@ htmlcov/
 # mypy
 .mypy_cache/
 
+# Ruff lint cache (ruff also self-ignores it; belt-and-braces)
+.ruff_cache/
+
 # Editor directories and workspace files
 .vscode/
 *.code-workspace
@@ -42,6 +47,8 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+desktop.ini
+._*
 
 # Logs and temporary files
 *.log
@@ -52,19 +59,34 @@ temp/
 # Wheels
 *.whl
 
+# Local build-validation output folder (wheels, reports)
+/dist-validation/
+
 # Secrets and signing material (never commit these)
 *.pfx
 *.key
 *.pem
 *.cer
 .env
+# Per-environment secret files (.env.local, .env.production, ...)
+.env.*
 
 # Local CI / artifacts folder (do not commit built EXEs)
 flint-dist/
+
+# Stray binaries and disk images dropped in the working tree
+# (built EXEs normally land in dist/ or flint-dist/; test images are huge)
+*.exe
+*.iso
+*.img
+*.vhdx
 
 # Local planning docs (not for the public repo)
 TODO.md
 PLAN.md
 AGENTS.md
+
+# Internal source-of-truth documentation (never publish)
+SOURCE_OF_TRUTH/
 
 .aider*

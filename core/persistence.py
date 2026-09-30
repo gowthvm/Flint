@@ -33,6 +33,33 @@ _GRUB_CONFIGS = (
 
 _KEYWORDS = {"casper": "persistent", "live": "persistence"}
 
+#: Headroom required on the target volume in addition to the requested
+#: overlay size.  ``casper-rw`` is allocated with ``truncate`` (whole
+#: image up front on NTFS/exFAT) and the filesystem still needs room for
+#: the writes the live session is about to make, so filling the stick to
+#: the last byte would fail later in a much less obvious way.
+_FREE_SPACE_SLACK_BYTES = 64 * 1024 * 1024
+
+
+def _free_space_bytes(path: str) -> int | None:
+    """Free bytes on the volume holding *path*, or None when unknown."""
+    try:
+        return int(shutil.disk_usage(path).free)
+    except (OSError, ValueError):
+        return None
+
+
+def _no_space_message(root: str, size_mb: int, size_bytes: int, free: int) -> str:
+    needed_mb = (size_bytes + _FREE_SPACE_SLACK_BYTES) // (1024 * 1024)
+    return (
+        f"not enough free space on {root} for persistence: a "
+        f"{size_mb} MB casper-rw needs {needed_mb} MB "
+        f"({size_mb} MB + {_FREE_SPACE_SLACK_BYTES // (1024 * 1024)} MB "
+        f"slack) but only {free // (1024 * 1024)} MB is free. "
+        "Reduce the persistence size or free space on the target, "
+        "then retry."
+    )
+
 
 def persistence_style(paths: set[str]) -> str:
     """'casper' for Ubuntu-style images, 'live' for Debian live, else 'casper'."""
@@ -145,11 +172,22 @@ def create_persistence(
 
     ``root`` is the target drive root (e.g. ``E:\\``). Returns (ok, message).
     ``ok`` is False when persistence was only partially set up (e.g. the
-    ext4 image could not be formatted).
+    ext4 image could not be formatted) or when the target volume has less
+    free space than the requested ``casper-rw`` plus
+    ``_FREE_SPACE_SLACK_BYTES`` — that case is refused before anything on
+    the drive is modified.
     """
     style = persistence_style(paths)
     keyword = _KEYWORDS[style]
     notes: list[str] = []
+
+    size_bytes = max(64, int(size_mb)) * 1024 * 1024
+    if style == "casper":
+        # Check before touching the drive: an overlay that cannot fit is a
+        # configuration error, not a partially-configured stick.
+        free = _free_space_bytes(root)
+        if free is not None and free < size_bytes + _FREE_SPACE_SLACK_BYTES:
+            return False, _no_space_message(root, size_mb, size_bytes, free)
 
     patched = _patch_boot_configs(root, keyword)
     notes.append(

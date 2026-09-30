@@ -91,7 +91,7 @@ def _run(worker: WipeWorker) -> dict[str, list]:
         "eta_seconds",
         "phase",
         "verified",
-        "finished",
+        "done",
     ):
         events[name] = []
 
@@ -124,7 +124,7 @@ def test_wipe_zero_fills_entire_drive(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert fake.chunks
     assert all(chunk == b"\x00" * len(chunk) for chunk in fake.chunks)
     assert sum(len(c) for c in fake.chunks) == size
@@ -141,7 +141,7 @@ def test_wipe_cancel_midway(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "cancelled")]
+    assert events["done"] == [(False, "cancelled")]
     assert len(fake.chunks) == 2
     assert sum(len(c) for c in fake.chunks) < fake.size
 
@@ -154,7 +154,7 @@ def test_wipe_reports_write_failure_and_closes_handle(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "simulated write failure")]
+    assert events["done"] == [(False, "simulated write failure")]
     assert 1234 in closed
 
 
@@ -173,7 +173,7 @@ def test_wipe_flushes_after_last_chunk(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert flushed == [1234]
 
 
@@ -185,7 +185,7 @@ def test_wipe_reports_open_failure_without_touching_kernel(monkeypatch):
 
     worker._open_drive = fail_open  # type: ignore[method-assign]
     events: list = []
-    worker.finished.connect(lambda ok, msg: events.append((ok, msg)))
+    worker.done.connect(lambda ok, msg: events.append((ok, msg)))
 
     worker.run()
 
@@ -200,7 +200,7 @@ def test_wipe_random_pass_writes_different_random_chunks(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert sum(len(c) for c in fake.chunks) == size
     assert any(chunk != b"\x00" * len(chunk) for chunk in fake.chunks)
     assert any(chunk != b"\xff" * len(chunk) for chunk in fake.chunks)
@@ -214,7 +214,7 @@ def test_wipe_nist_is_a_single_random_pass(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert events["total_bytes"][-1] == (fake.size,)
 
 
@@ -226,7 +226,7 @@ def test_wipe_dod_three_passes_zero_ones_random(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     zero_chunks = [c for c in fake.chunks if c == b"\x00" * len(c)]
     one_chunks = [c for c in fake.chunks if c == b"\xff" * len(c)]
     random_chunks = [
@@ -268,7 +268,7 @@ def test_wipe_dod_rewinds_before_second_and_third_pass(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert len(fake.chunks) == 3
     assert [len(chunk) for chunk in fake.chunks] == [size, size, size]
     assert seek_offsets == [0, 0]
@@ -282,7 +282,7 @@ def test_wipe_cancel_inside_second_dod_pass(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "cancelled")]
+    assert events["done"] == [(False, "cancelled")]
     assert sum(len(c) for c in fake.chunks) < 2 * fake.size
 
 
@@ -309,7 +309,7 @@ def test_wipe_skips_verification_when_disabled(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert events["verified"] == [(True, "skipped")]
     # A single pass, no extra read-back total.
     assert events["total_bytes"][-1] == (fake.size,)
@@ -323,7 +323,7 @@ def test_wipe_verifies_zero_fill(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert events["verified"] == [(True, "zeros confirmed")]
     # Written pass plus a verification read of the whole drive.
     assert events["total_bytes"][-1] == (size + size,)
@@ -339,7 +339,7 @@ def test_wipe_verifies_random_pass_round_trip(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert events["verified"] == [(True, "random pattern confirmed")]
     assert events["total_bytes"][-1] == (2 * size,)
     assert any("Verifying" in p[0] for p in events["phase"])
@@ -356,7 +356,7 @@ def test_wipe_verification_reports_mismatch(monkeypatch):
     assert events["verified"] == [
         (False, "data mismatch at offset 0")
     ]
-    assert events["finished"] == [
+    assert events["done"] == [
         (False, "verification failed: data mismatch at offset 0")
     ]
 
@@ -370,4 +370,4 @@ def test_wipe_verification_reports_read_failure(monkeypatch):
     events = _run(worker)
 
     assert events["verified"] == [(False, "read error: simulated read failure")]
-    assert events["finished"] == [(False, "simulated read failure")]
+    assert events["done"] == [(False, "simulated read failure")]

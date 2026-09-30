@@ -35,16 +35,42 @@ def test_diagnostics_includes_version_and_platform():
     assert "Elevated: yes" in text
 
 
-def test_diagnostics_lists_drives_with_only_safe_fields():
+def test_diagnostics_redacts_hardware_identifiers_by_default():
     text = build_diagnostics(_drives(), elevated=False, entries=[])
 
+    # Debuggable fields survive...
     assert "USB DISK" in text
     assert "32 GB" in text
-    assert r"\\.\PHYSICALDRIVE1" in text
-    assert "SERIAL1" in text
+    assert "bus=USB" in text
     assert "E:" in text
     assert "F:, G:" in text
     assert "Drives (2):" in text
+    # ...but identifiers that must not be pasted into a public issue do not.
+    assert "SERIAL1" not in text
+    assert r"\\.\PHYSICALDRIVE1" not in text
+    assert "PHYSICALDRIVE" not in text
+    assert "SERI…" in text
+    assert "path=<redacted>" in text
+
+
+def test_diagnostics_keeps_full_identifiers_when_redaction_disabled():
+    text = build_diagnostics(_drives(), entries=[], redact=False)
+
+    assert "SERIAL1" in text
+    assert r"\\.\PHYSICALDRIVE1" in text
+    assert r"\\.\PHYSICALDRIVE2" in text
+
+
+def test_redact_serial_is_short_and_non_reversible():
+    from core.diagnostics import _redact_serial
+
+    assert _redact_serial("") == "-"
+    assert _redact_serial(None) == "-"
+    assert _redact_serial("AB") == "**"
+    redacted = _redact_serial("SERIAL123456789")
+    assert redacted.startswith("SERI")
+    assert "SERIAL123456789" not in redacted
+    assert "15 chars" in redacted
 
 
 def test_diagnostics_includes_recent_history():

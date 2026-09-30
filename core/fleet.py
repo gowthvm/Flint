@@ -16,6 +16,11 @@ from typing import Any
 
 IDLE_EXPIRY_SECONDS = 60 * 60
 BYTES_PER_GB = 1_000_000_000
+# A record older than this no longer suppresses a drive: fleet mode is for
+# a working session, and a stick flashed months ago is legitimately back in
+# the rotation (plenty of time for its contents to have been wiped or for
+# the image to have been rebuilt).
+SKIP_FLASHED_WINDOW_DAYS = 90
 
 
 @dataclass
@@ -88,18 +93,26 @@ def was_recently_flashed(
     drive: dict[str, Any],
     image_path: str,
     *,
-    window_hours: int = 24 * 365,
+    window_hours: int | None = None,
 ) -> bool:
-    """Check if a drive was already successfully flashed with this image."""
+    """Check if this stick was successfully flashed with this image lately.
+
+    Identity comes from ``drive_fingerprint``: the serial when the stick
+    reports one, and the physical device path when it does not (matching
+    the ``physical_path`` recorded for the same stick).  A record only
+    counts inside ``SKIP_FLASHED_WINDOW_DAYS``.
+    """
     from core.history import load_history
 
     fp = drive_fingerprint(drive)
     if not fp:
         return False
 
-    serial = drive.get("serial") or ""
-    if not serial:
-        return False
+    serial = str(drive.get("serial") or "")
+    path = str(drive.get("physical_path") or "")
+
+    if window_hours is None:
+        window_hours = SKIP_FLASHED_WINDOW_DAYS * 24
 
     image_name = os.path.basename(image_path)
     cutoff = datetime.now().astimezone() - timedelta(hours=window_hours)
@@ -108,10 +121,22 @@ def was_recently_flashed(
         for entry in load_history():
             if not entry.get("success"):
                 continue
-            if (entry.get("drive_serial") or "") != serial:
-                continue
             if entry.get("iso") != image_name:
                 continue
+            if serial:
+                if (entry.get("drive_serial") or "") != serial:
+                    continue
+            else:
+                # Serial-less stick: match the recorded device path, the
+                # same fallback drive_fingerprint uses.  Records without
+                # a path (older entries) simply do not match.
+                entry_path = str(
+                    entry.get("physical_path") or entry.get("drive_path") or ""
+                )
+                if not path or not entry_path:
+                    continue
+                if entry_path.casefold() != path.casefold():
+                    continue
             ts_str = entry.get("timestamp", "")
             if not ts_str:
                 continue

@@ -6,6 +6,7 @@ MainWindow and can be reused across the application.
 
 import logging
 import os
+import shutil
 import time
 from collections import deque
 from collections.abc import Callable
@@ -275,6 +276,10 @@ class IsoWorker(QThread):
             if not self.isInterruptionRequested():
                 self.hash_done.emit(self._path, False, "")
 
+    def cancel(self) -> None:
+        """Ask the hash to stop; ``hash_done(False, "")`` follows."""
+        self.requestInterruption()
+
 
 class IsoDetectWorker(QThread):
     detected = pyqtSignal(str, bool, bool, bool)
@@ -299,6 +304,10 @@ class IsoDetectWorker(QThread):
             logger.exception("IsoDetectWorker.run failed")
             self.detected.emit(self._path, False, False, False)
 
+    def cancel(self) -> None:
+        """W2: shutdown calls this through ``IsoDropZone.live_workers``."""
+        self.requestInterruption()
+
 
 class DecompressWorker(QThread):
     """Decompress an archive in a background thread."""
@@ -310,32 +319,113 @@ class DecompressWorker(QThread):
         self._path = path
         self._tmp_dir = tmp_dir
         self._fmt = fmt
+        self.last_error: str = ""
 
     def run(self) -> None:
-        from core.decompress import (
-            _decompress_gz,
-            _decompress_xz,
-            _decompress_zip,
-        )
+        from core.decompress import decompress_image
 
         try:
             if self.isInterruptionRequested():
                 return
-            if self._fmt == ".zip":
-                extracted = _decompress_zip(self._path, self._tmp_dir)
-            elif self._fmt == ".gz":
-                extracted = _decompress_gz(self._path, self._tmp_dir)
-            elif self._fmt == ".xz":
-                extracted = _decompress_xz(self._path, self._tmp_dir)
-            else:
+            extracted_path = ""
+            with decompress_image(self._path) as extracted:
+                if os.path.abspath(extracted) == os.path.abspath(self._path):
+                    self.last_error = (
+                        f"{os.path.basename(self._path)} did not decompress "
+                        "into a separate file"
+                    )
+                else:
+                    if self.isInterruptionRequested():
+                        return
+                    extracted_path = os.path.join(
+                        self._tmp_dir, os.path.basename(extracted)
+                    )
+                    shutil.move(extracted, extracted_path)
+            if self.last_error:
                 self.done.emit(self._path, False, "", "")
                 return
             if self.isInterruptionRequested():
                 return
-            self.done.emit(self._path, True, extracted, self._tmp_dir)
-        except Exception:
+            self.done.emit(self._path, True, extracted_path, self._tmp_dir)
+        except Exception as exc:
             logger.exception("DecompressWorker failed for %s", self._path)
+            self.last_error = str(exc) or type(exc).__name__
             self.done.emit(self._path, False, "", "")
+
+    def cancel(self) -> None:
+        """W2: shutdown calls this through ``IsoDropZone.live_workers``.
+
+        Extraction itself is not interruptible, so this only marks the
+        worker; the owner must keep a reference until it actually stops.
+        """
+        self.requestInterruption()
+
+
+class SidecarCheckWorker(QThread):
+    """U14: evaluate ``<image>.sha256`` off the GUI thread.
+
+    The check itself is a small file read, but it runs once per queue /
+    fleet item and a network share can stall for seconds — cheap is not
+    the same as instantaneous when it sits between two writes.
+    """
+
+    checked = pyqtSignal(str, str, str)  # (image, status, detail)
+
+    def __init__(
+        self,
+        image: str,
+        digest: str | None = None,
+        sidecar_dir: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._image = image
+        self._digest = digest
+        self._sidecar_dir = sidecar_dir
+
+    def run(self) -> None:
+        from core import checksum
+
+        try:
+            status, detail = checksum.check_sidecar(
+                self._image,
+                self._digest,
+                sidecar_dir=self._sidecar_dir,
+            )
+        except Exception:
+            logger.exception("SidecarCheckWorker.run failed")
+            status, detail = "error", ""
+        if not self.isInterruptionRequested():
+            self.checked.emit(self._image, status, detail)
+
+    def cancel(self) -> None:
+        self.requestInterruption()
+
+
+class FakeCapacityWorker(QThread):
+    """U20: non-destructive counterfeit-capacity probe off the GUI thread."""
+
+    result = pyqtSignal(bool, str)  # (suspicious, note)
+
+    def __init__(self, drive_path: str, reported_bytes: int) -> None:
+        super().__init__()
+        self._drive_path = drive_path
+        self._reported = reported_bytes
+
+    def run(self) -> None:
+        from core import fake_detect
+
+        try:
+            suspicious, note = fake_detect.probe_capacity(
+                self._drive_path, self._reported
+            )
+        except Exception:
+            logger.exception("FakeCapacityWorker.run failed")
+            suspicious, note = False, ""
+        if not self.isInterruptionRequested():
+            self.result.emit(bool(suspicious), note or "")
+
+    def cancel(self) -> None:
+        self.requestInterruption()
 
 
 class IsoDropZone(QFrame):
@@ -356,6 +446,9 @@ class IsoDropZone(QFrame):
         self._decompress_worker: DecompressWorker | None = None
         self._digest: str | None = None
         self._hash_finished = False
+        self._archive_pending = False
+        self._archive_failed = False
+        self._compressed_source = False
         self._retired_workers: list[QThread] = []
         self._clear_guard: Callable[[], bool] | None = None
         self._browse_guard: Callable[[], bool] | None = None
@@ -400,8 +493,30 @@ class IsoDropZone(QFrame):
         col.addStretch()
         col.addWidget(icon)
         col.addWidget(text)
+        self._recent_buttons: list[QPushButton] = []
+        self._recents_row = QHBoxLayout()
+        self._recents_row.setSpacing(6)
+        self._recents_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col.addLayout(self._recents_row)
         col.addStretch()
         return widget
+
+    def set_recents(self, paths: list[str]) -> None:
+        """U09: up to three recently used images, one click to reload."""
+        while self._recent_buttons:
+            btn = self._recent_buttons.pop()
+            self._recents_row.removeWidget(btn)
+            btn.deleteLater()
+        for path in paths[:3]:
+            btn = QPushButton(os.path.basename(path))
+            btn.setObjectName("ghost")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(path)
+            btn.clicked.connect(
+                lambda _checked=False, p=path: self.load_iso(p)
+            )
+            self._recent_buttons.append(btn)
+            self._recents_row.addWidget(btn)
 
     def _build_loaded_state(self) -> QWidget:
         widget = QWidget()
@@ -471,7 +586,7 @@ class IsoDropZone(QFrame):
         assert event is not None
         mime = event.mimeData()
         assert mime is not None
-        if mime.hasUrls():
+        if mime.hasUrls() and not self._browse_blocked():
             event.acceptProposedAction()
             self.setProperty("dragging", True)
             _restyle(self)
@@ -482,7 +597,7 @@ class IsoDropZone(QFrame):
         assert event is not None
         mime = event.mimeData()
         assert mime is not None
-        if mime.hasUrls():
+        if mime.hasUrls() and not self._browse_blocked():
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -499,7 +614,7 @@ class IsoDropZone(QFrame):
         mime = event.mimeData()
         assert mime is not None
         urls = mime.urls()
-        if not urls:
+        if not urls or self._browse_blocked():
             event.ignore()
             return
         url = self._first_iso_url(event)
@@ -525,8 +640,11 @@ class IsoDropZone(QFrame):
                     return url
         return None
 
+    def _browse_blocked(self) -> bool:
+        return self._browse_guard is not None and self._browse_guard()
+
     def _browse(self) -> None:
-        if self._browse_guard is not None and self._browse_guard():
+        if self._browse_blocked():
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -537,6 +655,57 @@ class IsoDropZone(QFrame):
         if path:
             settings.set_many(last_iso_dir=os.path.dirname(path))
             self.load_iso(path)
+
+    def set_guards(
+        self,
+        clear: Callable[[], bool] | None = None,
+        browse: Callable[[], bool] | None = None,
+    ) -> None:
+        """C11: install the busy guards through a declared API.
+
+        ``None`` leaves a guard unchanged (so a caller can install just
+        one of the two); the backing attributes stay the names tests and
+        ``load_iso`` already read.
+        """
+        if clear is not None:
+            self._clear_guard = clear
+        if browse is not None:
+            self._browse_guard = browse
+
+    def browse(self) -> None:
+        """C11: public entry point for the file dialog (Ctrl+O)."""
+        self._browse()
+
+    def busy(self) -> bool:
+        """W2: True while this zone's own background work is in flight.
+
+        ``window.MainWindow._busy`` could not see this widget's workers, so
+        an image could be re-picked or cleared (or the app closed) while a
+        hash, a format detection or a decompression was still running.
+        """
+        if self._archive_pending:
+            return True
+        return any(
+            worker is not None and worker.isRunning()
+            for worker in (self._worker, self._analyzer, self._decompress_worker)
+        )
+
+    def live_workers(self) -> list[QThread]:
+        """W2: running workers this zone owns, for shutdown to cancel/join.
+
+        Retired workers that outlived their grace period (W1) are still
+        running and still need a join before the process exits, so they are
+        included; entries are never ``None``.
+        """
+        workers: list[QThread] = [
+            worker
+            for worker in (self._worker, self._analyzer, self._decompress_worker)
+            if worker is not None and worker.isRunning()
+        ]
+        workers.extend(
+            worker for worker in self._retired_workers if worker.isRunning()
+        )
+        return workers
 
     def clear_iso(self) -> None:
         if self._clear_guard is not None and self._clear_guard():
@@ -555,14 +724,15 @@ class IsoDropZone(QFrame):
         if analyzer is not None:
             self._retired_workers.append(analyzer)
         self._analyzer = None
-        dc = self._decompress_worker
-        if dc is not None and dc.isRunning():
-            dc.requestInterruption()
-            dc.wait(3000)
-        self._decompress_worker = None
+        self._prune_retired_workers()
+        self._retire_decompress_worker()
         self._digest = None
         self._hash_finished = False
+        self._archive_pending = False
+        self._archive_failed = False
+        self._compressed_source = False
         self._path = None
+        self._cleanup_decompressed()
         self.iso_analysis.emit("", False, False, False)
         self._drop_error.setVisible(False)
         self._drop_timer.stop()
@@ -572,9 +742,19 @@ class IsoDropZone(QFrame):
         _restyle(self)
 
     def load_iso(self, path: str) -> None:
-        if not path or not os.path.isfile(path):
+        if not path:
             return
-        if self._browse_guard is not None and self._browse_guard():
+        if not os.path.isfile(path):
+            # W3: a recent/history entry can stop resolving (deleted or
+            # ejected drive). Say so inline instead of doing nothing, which
+            # looked like a dead click.
+            self._drop_error.setText(
+                f"{os.path.basename(path) or path} is no longer available"
+            )
+            self._drop_error.setVisible(True)
+            self._drop_timer.start(5000)
+            return
+        if self._browse_blocked():
             return
         self._drop_error.setVisible(False)
         self._drop_timer.stop()
@@ -585,22 +765,21 @@ class IsoDropZone(QFrame):
         if old is not None:
             self._retired_workers.append(old)
         self._worker = None
+        self._prune_retired_workers()
         self._digest = None
         self._hash_finished = False
+        self._archive_pending = False
+        self._archive_failed = False
         self._cleanup_decompressed()
-
-        dc = self._decompress_worker
-        if dc is not None and dc.isRunning():
-            dc.requestInterruption()
-            dc.wait(3000)
-        self._decompress_worker = None
+        self._retire_decompress_worker()
 
         from core.decompress import is_compressed
 
         self._path = path
+        self._compressed_source = is_compressed(path)
         size = DriveDetector.format_size(os.path.getsize(path))
         self._iso_name.setText(os.path.basename(path))
-        suffix = " (compressed)" if is_compressed(path) else ""
+        suffix = " (compressed)" if self._compressed_source else ""
         self._iso_meta.setText(f"{size}{suffix} \u00b7 Verifying\u2026")
         self._iso_meta.setProperty("error", False)
         _restyle(self._iso_meta)
@@ -610,25 +789,35 @@ class IsoDropZone(QFrame):
         _restyle(self)
         self.iso_selected.emit(path)
 
-        if is_compressed(path):
+        if self._compressed_source:
             self._iso_meta.setText(f"{size} (compressed) \u00b7 Decompressing\u2026")
             import tempfile
 
-            from core.decompress import compressed_format
+            from core.decompress import (
+                COMPRESSED_EXTENSIONS,
+                compressed_format,
+            )
 
-            tmp_dir = tempfile.mkdtemp(prefix="flint-decompress-")
             fmt = compressed_format(path)
-            if fmt in (".zip", ".gz", ".xz"):
+            if fmt is not None and fmt in COMPRESSED_EXTENSIONS:
+                tmp_dir = tempfile.mkdtemp(prefix="flint-decompress-")
                 worker = DecompressWorker(path, tmp_dir, fmt)
                 self._decompress_worker = worker
+                self._archive_pending = True
                 worker.done.connect(self._on_decompress_done)
                 worker.start()
             else:
                 self._drop_error.setText(
-                    f"Unsupported compression: {fmt}"
+                    f"Unsupported compression: {fmt or 'unknown'}"
                 )
                 self._drop_error.setVisible(True)
                 self._drop_timer.start(5000)
+                self._archive_pending = False
+                self._archive_failed = True
+                self._set_meta(
+                    False,
+                    f"{size} (compressed) \u00b7 could not decompress",
+                )
             return
 
         self._start_hash_and_analyze(path, size)
@@ -636,12 +825,23 @@ class IsoDropZone(QFrame):
     def _on_decompress_done(
         self, path: str, ok: bool, extracted: str, tmp_dir: str
     ) -> None:
+        sender = self.sender()
+        if sender is not None and sender is not self._decompress_worker:
+            return
         if path != self._path:
             return
+        worker = self._decompress_worker
+        last_error = worker.last_error if worker is not None else ""
         self._decompress_worker = None
+        self._archive_pending = False
         if not ok:
+            self._archive_failed = True
+            size = DriveDetector.format_size(os.path.getsize(path))
+            self._set_meta(
+                False, f"{size} (compressed) \u00b7 could not decompress"
+            )
             self._drop_error.setText(
-                f"Failed to decompress {os.path.basename(path)}"
+                last_error or f"Failed to decompress {os.path.basename(path)}"
             )
             self._drop_error.setVisible(True)
             self._drop_timer.start(5000)
@@ -677,28 +877,91 @@ class IsoDropZone(QFrame):
                     pass
             self._decompressed_path = None
 
+    def _remove_decompress_tmp_dir(self, worker: QThread) -> None:
+        """Delete a decompress worker's temp dir (never while it runs)."""
+        tmp_dir = getattr(worker, "_tmp_dir", "")
+        if tmp_dir and "flint-decompress-" in tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _release_retired_worker(self, worker: QThread) -> None:
+        """W1: a retired decompress worker finally stopped.
+
+        Only now is its temp dir safe to remove, and only now may the
+        reference go away.
+        """
+        self._remove_decompress_tmp_dir(worker)
+        try:
+            self._retired_workers.remove(worker)
+        except ValueError:
+            pass
+
+    def _prune_retired_workers(self) -> None:
+        """W1: keep the retirement list bounded.
+
+        Dropping the last reference to a *running* ``QThread`` aborts the
+        process, so only stopped entries are discarded (oldest first).
+        """
+        while len(self._retired_workers) > 16:
+            for index, worker in enumerate(self._retired_workers):
+                if not worker.isRunning():
+                    self._retired_workers.pop(index)
+                    break
+            else:
+                return
+
+    def _retire_decompress_worker(self) -> None:
+        dc = self._decompress_worker
+        if dc is None:
+            return
+        if dc.isRunning():
+            dc.requestInterruption()
+            dc.wait(3000)
+        self._decompress_worker = None
+        if dc.isRunning():
+            # W1: core.decompress extraction is uninterruptible for large
+            # archives, so the worker can outlive the 3 s grace period.
+            # Dropping the last Python reference to a running QThread lets
+            # Qt delete the live thread (and abort the process mid-extract),
+            # so retain it and let its `finished` signal release it.
+            self._retired_workers.append(dc)
+            self._prune_retired_workers()
+            dc.finished.connect(lambda: self._release_retired_worker(dc))
+            return
+        self._remove_decompress_tmp_dir(dc)
+
     def _on_analysis(
         self, path: str, is_linux: bool, is_windows: bool, is_hybrid: bool
     ) -> None:
-        if path != self._path:
+        sender = self.sender()
+        if sender is not None and sender is not self._analyzer:
+            return
+        if path != self.path:
             return
         self.iso_analysis.emit(path, is_linux, is_windows, is_hybrid)
 
     def _on_hash_progress(self, percent: int) -> None:
-        if self._path is None or self._hash_finished:
+        sender = self.sender()
+        if sender is not None and sender is not self._worker:
+            return
+        resolved = self.path
+        if resolved is None or self._hash_finished:
             return
         size = DriveDetector.format_size(
-            os.path.getsize(self._path) if os.path.isfile(self._path) else 0
+            os.path.getsize(resolved) if os.path.isfile(resolved) else 0
         )
         self._set_meta(False, f"{size} \u00b7 Reading image\u2026 {percent}%")
 
     def _on_hash_eta(self, seconds: int) -> None:
-        if self._path is None or self._hash_finished:
+        sender = self.sender()
+        if sender is not None and sender is not self._worker:
+            return
+        resolved = self.path
+        if resolved is None or self._hash_finished:
             return
         if seconds <= 0:
             return
         size = DriveDetector.format_size(
-            os.path.getsize(self._path) if os.path.isfile(self._path) else 0
+            os.path.getsize(resolved) if os.path.isfile(resolved) else 0
         )
         if seconds < 60:
             eta_str = f"~{seconds}s"
@@ -710,18 +973,59 @@ class IsoDropZone(QFrame):
 
     @property
     def path(self) -> str | None:
+        """The image that will be hashed, detected and flashed."""
+        return self._decompressed_path or self._path
+
+    @property
+    def source_path(self) -> str | None:
+        """The original selection: the archive when the image was compressed."""
         return self._path
+
+    @property
+    def was_compressed(self) -> bool:
+        return self._decompressed_path is not None
+
+    @property
+    def compressed_source(self) -> bool:
+        """The selection was (or is) a compressed archive."""
+        return self._compressed_source
+
+    def resolve_state(self) -> str:
+        """Whether the current selection is flashable.
+
+        One of ``"empty"``, ``"ready"``, ``"decompressing"`` or
+        ``"failed"``.  ``path`` still returns whatever was selected so
+        callers that only ask "what did the user pick" keep working; a
+        compressed selection has a path long before it has a flashable
+        image, so anything destructive must gate on this instead.
+        """
+        if self._archive_pending:
+            return "decompressing"
+        if self._archive_failed:
+            return "failed"
+        if not self._path:
+            return "empty"
+        if self._compressed_source and self._decompressed_path is None:
+            return "failed"
+        return "ready"
 
     @property
     def digest(self) -> str | None:
         return self._digest
 
     def _on_hash_done(self, path: str, ok: bool, digest: str) -> None:
-        if path != self._path:
+        # A retired worker can still be winding down while a new selection
+        # for the *same* path is already being hashed; the path check alone
+        # cannot tell those apart, so the sender decides first.
+        sender = self.sender()
+        if sender is not None and sender is not self._worker:
+            return
+        if path != self.path:
             return
         self._hash_finished = True
         self._digest = digest if ok else None
-        size = DriveDetector.format_size(os.path.getsize(self._path or ""))
+        resolved = self.path or ""
+        size = DriveDetector.format_size(os.path.getsize(resolved))
         if ok:
             self._set_meta(True, f"{size} \u00b7 SHA256 verified")
             self._iso_check.setText("\u2713\ufe0e")
@@ -1100,6 +1404,15 @@ class ProgressArea(ChamferPanel):
     def set_phase(self, phase: str) -> None:
         self._title.setText(f"{phase}\u2026")
 
+    def set_title(self, text: str) -> None:
+        """C11: set the headline verbatim (no trailing ellipsis)."""
+        self._title.setText(text)
+
+    @property
+    def message(self) -> str:
+        """The current warning/error text ("" when nothing is shown)."""
+        return self._error.text()
+
     def set_done(self) -> None:
         self._smooth_timer.stop()
         self._target_pct = 100.0
@@ -1170,15 +1483,9 @@ class DriveChip(ChamferPanel):
 class NavItem(QFrame):
     clicked = pyqtSignal()
 
-    def __init__(
-        self,
-        text: str,
-        active: bool,
-        badge: str | None = None,
-    ) -> None:
+    def __init__(self, text: str, active: bool) -> None:
         super().__init__()
         self._text = text
-        self._badge = badge
         self.setObjectName("navItem")
         self.setProperty("on", active)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1195,13 +1502,6 @@ class NavItem(QFrame):
 
         row.addWidget(label)
         row.addStretch()
-        if badge is not None:
-            self._badge_label: QLabel | None = QLabel(badge)
-            self._badge_label.setObjectName("badgeOn" if active else "badge")
-            self._badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            row.addWidget(self._badge_label)
-        else:
-            self._badge_label = None
 
     def set_active(self, active: bool) -> None:
         self.setProperty("on", active)
@@ -1209,11 +1509,6 @@ class NavItem(QFrame):
         self.update()
         self._label.setProperty("on", active)
         _restyle(self._label)
-        if self._badge_label is not None:
-            self._badge_label.setObjectName(
-                "badgeOn" if active else "badge"
-            )
-            _restyle(self._badge_label)
 
     def keyPressEvent(self, event: QKeyEvent | None) -> None:
         assert event is not None

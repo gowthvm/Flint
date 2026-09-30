@@ -374,7 +374,7 @@ def hash_drive(
 class VerifyWorker(QThread):
     progress = pyqtSignal(float)
     stats = pyqtSignal(int, int)
-    finished = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str)
 
     def __init__(
         self,
@@ -408,10 +408,10 @@ class VerifyWorker(QThread):
             # Never let a worker thread die silently: the UI would stay
             # blocked with no way out.
             logger.exception("VerifyWorker.run failed")
-            self.finished.emit(False, str(exc) or "verification failed")
+            self.done.emit(False, str(exc) or "verification failed")
             return
         if not ok:
-            self.finished.emit(False, result)
+            self.done.emit(False, result)
             return
         self.progress.emit(100.0)
-        self.finished.emit(True, result)
+        self.done.emit(True, result)

@@ -93,7 +93,7 @@ def test_flash_happy_path(tmp_path, monkeypatch, capsys):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
 
     rc = cli._cmd_flash(
         {"image": str(image), "drive": "E", "confirm": "ABC1234"}
@@ -107,7 +107,7 @@ def test_flash_failure_exit_code(tmp_path, monkeypatch, capsys):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (False, "boom"))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (False, "boom"))
 
     rc = cli._cmd_flash(
         {"image": str(image), "drive": "E", "confirm": "ABC1234"}
@@ -132,10 +132,10 @@ def test_wipe_unknown_method_rejected(tmp_path, monkeypatch, capsys):
 
 def test_wipe_valid_method_dispatches(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
     worker_used = []
 
-    def _capture_worker(worker, label):
+    def _capture_worker(worker):
         worker_used.append(worker.method)
         return True, ""
 
@@ -200,7 +200,7 @@ def test_queue_happy_path_with_quoted_paths(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     started: list[str] = []
 
-    def _fake_run(worker, label):
+    def _fake_run(worker):
         started.append(worker.iso_path)
         return True, ""
 
@@ -220,7 +220,7 @@ def test_queue_happy_path_with_relative_paths(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     started: list[str] = []
 
-    def _fake_run(worker, label):
+    def _fake_run(worker):
         started.append(worker.iso_path)
         return True, ""
 
@@ -244,7 +244,7 @@ def test_queue_flashes_every_image_then_reports_count(
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     started: list[str] = []
 
-    def _fake_run(worker, label):
+    def _fake_run(worker):
         started.append(worker.iso_path)
         return True, ""
 
@@ -261,7 +261,7 @@ def test_main_dispatches_flash_command(tmp_path, monkeypatch, capsys):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
 
     rc = cli.main(
         [
@@ -344,7 +344,7 @@ def test_run_worker_emits_flint_progress_lines(monkeypatch, capsys):
         speed_mbps = pyqtSignal(float)
         written_bytes = pyqtSignal(int)
         total_bytes = pyqtSignal(int)
-        finished = pyqtSignal(bool, str)
+        done = pyqtSignal(bool, str)
 
         def run(self) -> None:
             self.total_bytes.emit(1_000_000_000)
@@ -353,11 +353,11 @@ def test_run_worker_emits_flint_progress_lines(monkeypatch, capsys):
             self.speed_mbps.emit(42.5)
             self.written_bytes.emit(500_000_000)
             self.progress.emit(100.0)
-            self.finished.emit(True, "ok")
+            self.done.emit(True, "ok")
 
     app = QCoreApplication([])
     worker = _FakeWorker()
-    ok, message = cli._run_worker(worker, "test")
+    ok, message = cli._run_worker(worker)
     assert QCoreApplication.instance() is app
     assert ok and message == "ok"
     err = capsys.readouterr().err
@@ -487,7 +487,7 @@ def test_result_json_object(monkeypatch, capsys, tmp_path):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (False, "boom"))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (False, "boom"))
     monkeypatch.setattr(cli, "_JSON", True)
     assert cli._cmd_flash(
         {"image": str(image), "drive": "E", "confirm": "ABC1234"}
@@ -518,7 +518,7 @@ def test_flash_prompts_for_serial_when_tty(tmp_path, monkeypatch, capsys):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
     monkeypatch.setattr(cli, "_interactive", lambda: True)
     monkeypatch.setattr(cli, "_prompt", lambda prompt: "ABC1234")
 
@@ -597,7 +597,7 @@ def test_flash_all_flashes_every_image_to_every_drive(
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     started: list[str] = []
 
-    def _fake_run(worker, label):
+    def _fake_run(worker):
         started.append(worker.iso_path)
         return True, ""
 
@@ -628,7 +628,7 @@ def test_flash_all_interrupt_cancels(tmp_path, monkeypatch, capsys):
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
 
-    def _interrupt(worker, label):
+    def _interrupt(worker):
         raise KeyboardInterrupt()
 
     monkeypatch.setattr(cli, "_run_worker", _interrupt)
@@ -659,7 +659,7 @@ def test_flash_all_parallel_uses_campaign_batches(
     monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
     started: list[str] = []
 
-    def _fake_run(worker, label):
+    def _fake_run(worker):
         started.append(worker.target_fingerprint)
         return True, ""
 
@@ -698,6 +698,81 @@ def test_flash_all_rejects_invalid_parallelism(tmp_path, capsys):
     assert "--parallel must be a number" in capsys.readouterr().out
 
 
+def test_flash_all_marks_failed_image_on_session(tmp_path, monkeypatch, capsys):
+    """C03: a failed flash is recorded on the session like the GUI's."""
+    from core import fleet
+
+    sessions: list[fleet.FleetSession] = []
+    base = fleet.FleetSession
+
+    class Recording(base):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sessions.append(self)
+
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(fleet, "FleetSession", Recording)
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (False, "boom"))
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    rc = cli._cmd_flash_all(
+        {"images": [str(image)], "confirm": "ARM", "timeout": "1"}
+    )
+
+    assert rc == cli.EXIT_FAIL
+    assert len(sessions) == 1
+    assert sessions[0].failed_count == 1
+    assert sessions[0].done_count == 0
+    assert "fleet stopped" in capsys.readouterr().out
+
+
+def test_flash_all_parallel_marks_failed_campaigns(
+    tmp_path, monkeypatch, capsys
+):
+    """C03: parallel fleets record every failed target too."""
+    from core import fleet
+
+    sessions: list[fleet.FleetSession] = []
+    base = fleet.FleetSession
+
+    class Recording(base):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            sessions.append(self)
+
+    image = tmp_path / "agent.iso"
+    image.write_bytes(b"data")
+    first = _fake_drives()[0]
+    second = dict(first)
+    second.update(
+        physical_path=r"\\.\PHYSICALDRIVE4",
+        serial="DEF5678",
+        letter="F",
+        letters=["F"],
+    )
+    monkeypatch.setattr(fleet, "FleetSession", Recording)
+    monkeypatch.setattr(cli, "_detect_drives", lambda *_: [first, second])
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (False, "boom"))
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    rc = cli._cmd_flash_all(
+        {
+            "images": [str(image)],
+            "confirm": "ARM",
+            "timeout": "1",
+            "parallel": "2",
+        }
+    )
+
+    assert rc == cli.EXIT_FAIL
+    assert sessions[0].failed_count == 2
+    assert sessions[0].done_count == 0
+    assert "campaign stopped" in capsys.readouterr().out
+
+
 def test_deploy_runs_one_image_to_multiple_targets(
     tmp_path, monkeypatch, capsys
 ):
@@ -715,7 +790,7 @@ def test_deploy_runs_one_image_to_multiple_targets(
     monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
     started: list[str] = []
 
-    def _fake_run(worker, label):
+    def _fake_run(worker):
         started.append(worker.target_fingerprint)
         return True, ""
 
@@ -801,6 +876,77 @@ def test_deploy_status_cancel_and_retry(tmp_path, monkeypatch, capsys):
     assert "cancelled" in capsys.readouterr().out
     assert cli.main(["deploy", "--retry", "--job", manifest.job_id]) == cli.EXIT_OK
     assert "queued" in capsys.readouterr().out
+
+
+def test_deploy_status_prunes_stale_manifests(tmp_path, monkeypatch, capsys):
+    """L10: the status listing drops old terminal-state manifests first."""
+    import time
+
+    from core import paths
+    from core.jobs import JobManifest, save_manifest
+
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    stale = JobManifest(
+        source_path="old.iso",
+        source_size=10,
+        source_sha256="a" * 64,
+        target_fingerprint="serial:OLD",
+        target_size=100,
+        state="failed",
+    )
+    stale_path = paths.APP_DIR / "jobs" / f"{stale.job_id}.json"
+    save_manifest(stale_path, stale)
+    ancient = time.time() - 40 * 86400
+    os.utime(stale_path, (ancient, ancient))
+    live = JobManifest(
+        source_path="new.iso",
+        source_size=10,
+        source_sha256="b" * 64,
+        target_fingerprint="serial:NEW",
+        target_size=100,
+        state="resumable",
+    )
+    live_path = paths.APP_DIR / "jobs" / f"{live.job_id}.json"
+    save_manifest(live_path, live)
+
+    assert cli.main(["deploy", "--status"]) == cli.EXIT_OK
+
+    out = capsys.readouterr().out
+    assert live.job_id in out
+    assert stale.job_id not in out
+    assert not stale_path.exists()
+    assert live_path.exists()
+
+
+def test_deploy_status_survives_prune_failure(
+    tmp_path, monkeypatch, capsys, caplog
+):
+    """A prune that blows up warns but never fails the listing."""
+    from core import jobs as jobs_mod
+    from core import paths
+    from core.jobs import JobManifest, save_manifest
+
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    manifest = JobManifest(
+        source_path="image.iso",
+        source_size=10,
+        source_sha256="a" * 64,
+        target_fingerprint="serial:ONE",
+        target_size=100,
+        state="resumable",
+    )
+    path = paths.APP_DIR / "jobs" / f"{manifest.job_id}.json"
+    save_manifest(path, manifest)
+
+    def _boom(directory):
+        raise OSError("jobs directory is locked")
+
+    monkeypatch.setattr(jobs_mod, "prune_manifests", _boom)
+
+    assert cli.main(["deploy", "--status"]) == cli.EXIT_OK
+    assert manifest.job_id in capsys.readouterr().out
+    assert "could not prune" in caplog.text
+    assert path.exists()
 
 
 # --- verify --------------------------------------------------------------
@@ -908,6 +1054,23 @@ def test_completions_prints_powershell_script(capsys):
     assert "flash-all" in out
 
 
+@pytest.mark.parametrize(
+    "shell,script",
+    [
+        ("powershell", cli._POWERSHELL_COMPLETION),
+        ("bash", cli._BASH_COMPLETION),
+        ("zsh", cli._ZSH_COMPLETION),
+    ],
+)
+def test_completions_stdout_is_the_script_only(shell, script, capsys):
+    """Redirected stdout must be the script and nothing else (no RESULT)."""
+    assert cli.main(["completions", "--shell", shell]) == cli.EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out == script + "\n"
+    assert "RESULT" not in captured.out
+    assert f"RESULT ok: {shell} completion script" in captured.err
+
+
 # --- streams -------------------------------------------------------------
 
 
@@ -915,13 +1078,62 @@ def test_flash_progress_lines_never_pollute_stdout(tmp_path, monkeypatch, capsys
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
     assert cli.main(["flash", "--image", str(image), "--drive", "E",
                      "--confirm", "ABC1234"]) == cli.EXIT_OK
     captured = capsys.readouterr()
     assert "FLINT " not in captured.out
     for line in captured.out.splitlines():
         assert "RESULT" in line
+
+
+def test_main_wires_cli_logging_once(capsys, monkeypatch):
+    """L21/C02: main() attaches exactly one stderr handler, at the
+    settings log_level (patched here so the level is deterministic)."""
+    import logging
+
+    from core import settings as settings_mod
+
+    flint = logging.getLogger("flint")
+
+    def _cli_handlers():
+        return [
+            handler
+            for handler in flint.handlers
+            if getattr(handler, "_flint_cli_handler", False)
+        ]
+
+    def _purge():
+        for handler in _cli_handlers():
+            flint.removeHandler(handler)
+
+    # Detach whatever a previous test's cli.main() attached so this run
+    # exercises the attach path itself.
+    _purge()
+    real_level = str(settings_mod.get("log_level") or "WARNING")
+    monkeypatch.setattr(
+        settings_mod,
+        "get",
+        lambda key, default=None: "ERROR" if key == "log_level" else default,
+    )
+
+    assert cli.main(["help", "flash"]) == cli.EXIT_OK
+    cli.main(["help", "flash"])
+    capsys.readouterr()
+
+    handlers = _cli_handlers()
+    assert len(handlers) == 1
+    assert handlers[0].level == logging.ERROR
+    assert isinstance(handlers[0], logging.StreamHandler)
+
+    # Restore process state for later tests: real settings level again.
+    _purge()
+    monkeypatch.undo()
+    cli.main(["help", "flash"])
+    restored = _cli_handlers()
+    assert len(restored) == 1
+    assert restored[0].level == getattr(logging, real_level.upper(), logging.WARNING)
+    capsys.readouterr()
 
 
 def test_scan_happy_path(monkeypatch, capsys):
@@ -986,7 +1198,7 @@ def test_flash_passes_partition_and_write_options_to_worker(
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     seen: dict[str, str] = {}
 
-    def _capture(worker, label):
+    def _capture(worker):
         seen["partition_scheme"] = worker.partition_scheme
         seen["filesystem"] = worker.filesystem
         seen["write_mode"] = worker.write_mode
@@ -1060,7 +1272,7 @@ def test_flash_allows_non_system_drive(tmp_path, monkeypatch, capsys):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
     from core import drives
 
     monkeypatch.setattr(
@@ -1187,7 +1399,7 @@ def test_flash_check_fake_proceeds_with_yes(tmp_path, monkeypatch, capsys):
     image = tmp_path / "a.iso"
     image.write_bytes(b"data")
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
     from core import fake_detect
 
     monkeypatch.setattr(
@@ -1210,7 +1422,7 @@ def test_backup_without_confirm_runs(tmp_path, monkeypatch, capsys):
     with NameError because ``issue`` was only assigned in the confirm
     branch."""
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
-    monkeypatch.setattr(cli, "_run_worker", lambda worker, label: (True, ""))
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
     out = tmp_path / "b.img"
 
     rc = cli._cmd_backup({"drive": "E", "out": str(out)})
@@ -1434,7 +1646,7 @@ def test_flash_resume_flag_passes_to_worker(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
     seen: list[bool] = []
 
-    def _capture(worker, label):
+    def _capture(worker):
         seen.append(worker.resume)
         return True, ""
 
@@ -1449,3 +1661,696 @@ def test_flash_resume_flag_passes_to_worker(tmp_path, monkeypatch, capsys):
 def test_flash_help_documents_resume(capsys):
     assert cli.main(["flash", "--help"]) == cli.EXIT_OK
     assert "--resume" in capsys.readouterr().out
+
+# --- agent C findings: B04 B05 B09 B10 B11 L05 L06 L08 L11 L13 L16
+# --- L18 L19 L20 D01 D02 D09 D10 C03
+
+
+def test_flash_decompresses_archive_before_writing(tmp_path, monkeypatch, capsys):
+    """B04: an archive is extracted; the raw stream is never written."""
+    import gzip as gzip_lib
+
+    payload = b"image payload"
+    archive = tmp_path / "disk.img.gz"
+    archive.write_bytes(gzip_lib.compress(payload))
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    seen: dict[str, object] = {}
+
+    def _fake_run(worker):
+        seen["path"] = worker.iso_path
+        seen["exists"] = os.path.isfile(worker.iso_path)
+        with open(worker.iso_path, "rb") as handle:
+            seen["bytes"] = handle.read()
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _fake_run)
+
+    rc = cli._cmd_flash(
+        {"image": str(archive), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_OK
+    assert seen["path"] != str(archive)
+    assert str(seen["path"]).endswith("disk.img")
+    assert seen["bytes"] == payload
+    assert seen["exists"] is True
+    # the temp file is gone once the write finished
+    assert not os.path.exists(str(seen["path"]))
+    assert "decompressed disk.img.gz" in capsys.readouterr().err
+
+
+def test_flash_rejects_unsupported_compression(tmp_path, monkeypatch, capsys):
+    from core import decompress
+
+    image = tmp_path / "a.7z"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(decompress, "compressed_format", lambda path: ".7z")
+    ran: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: ran.append(1) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    out = capsys.readouterr().out
+    assert "unsupported compression" in out
+    assert "RESULT fail" in out
+    assert ran == []
+
+
+def test_flash_rejects_zst_without_library(tmp_path, monkeypatch, capsys):
+    import sys
+
+    image = tmp_path / "a.img.zst"
+    image.write_bytes(b"data")
+    monkeypatch.setitem(sys.modules, "zstandard", None)
+    ran: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: ran.append(1) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "zstandard" in capsys.readouterr().out
+    assert ran == []
+
+
+def test_flash_backup_image_writes_raw(tmp_path, monkeypatch):
+    """B10: restoring a backup must not fall into the file-copy path."""
+    image = tmp_path / "flint-backup-20240101-010101.img"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    seen: list[str] = []
+
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: seen.append(worker.write_mode) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_OK
+    assert seen == ["dd"]
+
+
+def test_flash_ignores_missing_image_size_bytes_when_absent(tmp_path, monkeypatch):
+    """B10: an explicitly requested mode always wins over the backup rule."""
+    image = tmp_path / "restore.img"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    seen: list[str] = []
+
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: seen.append(worker.write_mode) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {
+            "image": str(image),
+            "drive": "E",
+            "confirm": "ABC1234",
+            "write-mode": "filecopy",
+        }
+    )
+
+    assert rc == cli.EXIT_OK
+    assert seen == ["filecopy"]
+
+
+def test_flash_sidecar_mismatch_blocks_flash(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    (tmp_path / "a.iso.sha256").write_text("0" * 64 + "\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    ran: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: ran.append(1) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_FAIL
+    out = capsys.readouterr().out
+    assert "does not match" in out
+    assert "RESULT fail" in out
+    assert ran == []
+
+
+def test_flash_matching_sidecar_allows_flash(tmp_path, monkeypatch, capsys):
+    import hashlib
+
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    digest = hashlib.sha256(b"data").hexdigest()
+    (tmp_path / "a.iso.sha256").write_text(digest + "\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    ran: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: ran.append(1) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234"}
+    )
+
+    assert rc == cli.EXIT_OK
+    assert ran == [1]
+    assert "sidecar checksum OK" in capsys.readouterr().err
+
+
+def test_sidecar_filename_column_selects_this_image(tmp_path, capsys):
+    """E: the sidecar is validated against this image's basename."""
+    import hashlib
+
+    image = tmp_path / "ubuntu.iso"
+    image.write_bytes(b"data")
+    digest = hashlib.sha256(b"data").hexdigest()
+    sidecar = tmp_path / "ubuntu.iso.sha256"
+
+    sidecar.write_text(f"{digest}  other.iso\n", encoding="utf-8")
+    assert cli._check_sidecar(str(image)) == cli.EXIT_USAGE
+    assert "lists no SHA-256 digest for ubuntu.iso" in capsys.readouterr().out
+
+    sidecar.write_text(f"{digest} *ubuntu.iso\n", encoding="utf-8")
+    assert cli._check_sidecar(str(image)) is None
+
+    sidecar.write_text(f"{digest}\n", encoding="utf-8")
+    assert cli._check_sidecar(str(image)) is None
+
+
+
+def test_clone_gates_on_exact_size_bytes(monkeypatch, capsys):
+    """L05: rounded size_gb must not decide the clone gate."""
+    source = {
+        "physical_path": r"\\.\PHYSICALDRIVE3",
+        "serial": "SRC1111",
+        "model": "USB Stick",
+        "size_gb": 16,
+        "size_bytes": 15_000_000_000,
+        "letter": "E",
+        "letters": ["E"],
+        "name": "USB Stick",
+    }
+    target = dict(
+        source,
+        physical_path=r"\\.\PHYSICALDRIVE4",
+        serial="TGT1111",
+        size_bytes=14_000_000_000,
+        letter="F",
+        letters=["F"],
+    )
+    monkeypatch.setattr(cli, "_detect_drives", lambda *_: [source, target])
+
+    rc = cli._cmd_clone(
+        {"from": "SRC1111", "to": "TGT1111", "confirm": "TGT1111"}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "smaller than the source" in capsys.readouterr().out
+
+
+def test_check_fake_probe_uses_size_bytes(monkeypatch):
+    """L06: the probe reads at the exact capacity, not a rounded offset."""
+    from core import fake_detect
+
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        fake_detect,
+        "probe_capacity",
+        lambda path, reported: calls.append((path, reported)) or (False, "clean"),
+    )
+
+    rc = cli._check_fake_drive(
+        {"physical_path": "X", "size_gb": 64, "size_bytes": 64_000_000_012},
+        False,
+    )
+
+    assert rc is None
+    assert calls == [("X", 64_000_000_012)]
+
+
+def test_flash_verify_reads_drive_back_exactly_once(tmp_path, monkeypatch, capsys):
+    """L08: the writer's read-back is the only verification pass."""
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    runs: list[object] = []
+    second_pass: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: runs.append(worker) or (True, ""))
+    monkeypatch.setattr(
+        cli, "_cmd_verify_raw", lambda *a, **k: second_pass.append(a) or cli.EXIT_OK
+    )
+
+    rc = cli._cmd_flash(
+        {"image": str(image), "drive": "E", "confirm": "ABC1234", "verify": True}
+    )
+
+    assert rc == cli.EXIT_OK
+    assert len(runs) == 1
+    assert second_pass == []
+    assert "flashed and verified" in capsys.readouterr().out
+
+
+def test_flash_all_parallel_serves_multi_image_fleets(
+    tmp_path, monkeypatch, capsys
+):
+    """L11: --parallel fans out over drives even with several images."""
+    import threading
+
+    one = tmp_path / "one.iso"
+    two = tmp_path / "two.iso"
+    one.write_bytes(b"1")
+    two.write_bytes(b"2")
+    first = _fake_drives()[0]
+    second = dict(
+        first,
+        physical_path=r"\\.\PHYSICALDRIVE4",
+        serial="DEF5678",
+        letter="F",
+        letters=["F"],
+    )
+    monkeypatch.setattr(cli, "_detect_drives", lambda *_: [first, second])
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    started: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def _fake_run(worker):
+        with lock:
+            started.append((worker.target_fingerprint, worker.iso_path))
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _fake_run)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    rc = cli._cmd_flash_all(
+        {
+            "images": [str(one), str(two)],
+            "confirm": "ARM",
+            "timeout": "1",
+            "parallel": "2",
+        }
+    )
+
+    assert rc == cli.EXIT_OK
+    # one campaign job per drive, each flashing every image
+    assert len(started) == 4
+    assert {fingerprint for fingerprint, _ in started} == {"ABC1234", "DEF5678"}
+    assert sorted(path for _, path in started) == sorted(
+        [str(one), str(one), str(two), str(two)]
+    )
+    assert len(list((tmp_path / "app" / "jobs").glob("*.json"))) == 2
+
+
+def test_flash_bypass_tpm_requires_filecopy(tmp_path, monkeypatch, capsys):
+    """L13: a bypass that can never patch fails instead of being ignored."""
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    ran: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: ran.append(1) or (True, ""))
+
+    rc = cli._cmd_flash(
+        {
+            "image": str(image),
+            "drive": "E",
+            "confirm": "ABC1234",
+            "bypass-tpm": True,
+        }
+    )
+
+    assert rc == cli.EXIT_USAGE
+    out = capsys.readouterr().out
+    assert "bypass-tpm" in out
+    assert "filecopy" in out
+    assert ran == []
+
+
+def test_flash_all_rejects_bypass_tpm_without_filecopy(tmp_path, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+
+    rc = cli._cmd_flash_all(
+        {"images": [str(image)], "confirm": "ARM", "bypass-tpm": True}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "bypass-tpm" in capsys.readouterr().out
+
+
+def test_deploy_rejects_bypass_tpm_without_filecopy(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+
+    rc = cli._cmd_deploy(
+        {
+            "images": [str(image)],
+            "drives": ["E"],
+            "confirm": "ARM",
+            "bypass-tpm": True,
+        }
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "bypass-tpm" in capsys.readouterr().out
+
+
+def test_queue_forwards_write_mode_and_bypass(tmp_path, monkeypatch, capsys):
+    queue_file = tmp_path / "queue.txt"
+    queue_file.write_text("disk.img\n", encoding="utf-8")
+    disk = tmp_path / "disk.img"
+    disk.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    seen: dict[str, object] = {}
+
+    def _capture(worker):
+        seen["write_mode"] = worker.write_mode
+        seen["bypass_tpm"] = worker.bypass_tpm
+        return True, ""
+
+    monkeypatch.setattr(cli, "_run_worker", _capture)
+
+    rc = cli._cmd_queue(
+        {
+            "file": str(queue_file),
+            "drive": "E",
+            "confirm": "ABC1234",
+            "write-mode": "filecopy",
+            "bypass-tpm": True,
+        }
+    )
+
+    assert rc == cli.EXIT_OK
+    assert seen == {"write_mode": "filecopy", "bypass_tpm": True}
+
+
+def test_queue_bypass_tpm_without_filecopy_fails(tmp_path, monkeypatch, capsys):
+    queue_file = tmp_path / "queue.txt"
+    queue_file.write_text("disk.iso\n", encoding="utf-8")
+    disk = tmp_path / "disk.iso"
+    disk.write_bytes(b"data")
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+    ran: list[object] = []
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: ran.append(1) or (True, ""))
+
+    rc = cli._cmd_queue(
+        {"file": str(queue_file), "drive": "E", "confirm": "ABC1234", "bypass-tpm": True}
+    )
+
+    assert rc == cli.EXIT_USAGE
+    assert "bypass-tpm" in capsys.readouterr().out
+    assert ran == []
+
+
+def test_deploy_forwards_write_mode_to_worker(tmp_path, monkeypatch, capsys):
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"image")
+    first = _fake_drives()[0]
+    second = dict(
+        first,
+        physical_path=r"\\.\PHYSICALDRIVE4",
+        serial="DEF5678",
+        letter="F",
+        letters=["F"],
+    )
+    monkeypatch.setattr(cli, "_detect_drives", lambda *_: [first, second])
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    seen: list[str] = []
+
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: seen.append(worker.write_mode) or (True, ""))
+
+    rc = cli._cmd_deploy(
+        {
+            "images": [str(image)],
+            "drives": ["ABC1234", "DEF5678"],
+            "confirm": "ARM",
+            "parallel": "1",
+            "write-mode": "filecopy",
+            "bypass-tpm": True,
+        }
+    )
+
+    assert rc == cli.EXIT_OK
+    assert seen == ["filecopy", "filecopy"]
+
+
+def test_list_json_reports_size_bytes(monkeypatch, capsys):
+    drives = [
+        {
+            "physical_path": r"\\.\PHYSICALDRIVE3",
+            "serial": "ABC1234",
+            "model": "USB Stick",
+            "size_gb": 16,
+            "size_bytes": 17_179_869_184,
+            "letter": "E",
+            "letters": ["E"],
+            "name": "USB Stick",
+        }
+    ]
+    monkeypatch.setattr(cli, "_detect_drives", lambda *_: drives)
+
+    assert cli.main(["list", "--json"]) == cli.EXIT_OK
+
+    objects = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+    ]
+    payload = next(obj for obj in objects if obj["type"] == "drives")
+    assert payload["drives"][0]["size_bytes"] == 17_179_869_184
+
+
+def test_double_cli_flag_is_stripped(monkeypatch, capsys):
+    """L18: every --cli token disappears, not just the first."""
+    monkeypatch.setattr(cli, "_detect_drives", _fake_drives)
+
+    rc = cli.main(["--cli", "--cli", "list"])
+
+    assert rc == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out
+
+
+def test_version_text_mode_emits_result(capsys):
+    assert cli.main(["--version"]) == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out
+
+
+def test_help_text_mode_emits_result(capsys):
+    assert cli.main(["help", "flash"]) == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out
+
+
+def test_bare_argv_text_mode_emits_result(capsys):
+    assert cli.main([]) == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out
+
+
+def test_completions_text_mode_emits_result(capsys):
+    assert cli.main(["completions"]) == cli.EXIT_OK
+    captured = capsys.readouterr()
+    assert "Register-ArgumentCompleter" in captured.out
+    # L19 keeps the RESULT line, but off the script stream.
+    assert "RESULT ok" in captured.err
+
+
+
+def test_elevation_rebuilds_from_passed_argv(monkeypatch, capsys):
+    """L20: the relaunch uses argv given to main(), not the host's argv."""
+    recorded: list[list[str]] = []
+    monkeypatch.setattr(
+        cli, "ensure_elevated", lambda argv: recorded.append(argv) or None
+    )
+
+    rc = cli.main(["wipe", "--yes"])
+
+    assert rc == cli.EXIT_USAGE
+    assert len(recorded) == 1
+    assert recorded[0][-2:] == ["wipe", "--yes"]
+
+
+def test_flash_resume_documents_job_manifest(capsys):
+    """D01: help names the manifest that actually exists."""
+    assert cli.main(["flash", "--help"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert ".flint_job.json" in out
+    assert ".flint_state" not in out
+
+
+def test_flash_help_documents_write_mode_values(capsys):
+    assert cli.main(["flash", "--help"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "auto|dd|filecopy" in out
+    assert "--write-mode raw|file-copy" not in out
+
+
+def test_resolve_write_mode_accepts_documented_aliases(tmp_path):
+    """D02: the spellings the help used to advertise now resolve."""
+    from core.diskpart import resolve_write_mode
+
+    plain = tmp_path / "plain.iso"
+    plain.write_bytes(b"data")
+
+    assert resolve_write_mode("raw", str(plain)) == "dd"
+    assert resolve_write_mode("file-copy", str(plain)) == "filecopy"
+    assert resolve_write_mode("filecopy", str(plain)) == "filecopy"
+    assert resolve_write_mode("auto", str(plain)) == "dd"
+
+
+def test_deploy_run_elevates_while_status_does_not(
+    tmp_path, monkeypatch, capsys
+):
+    """B05/D09: --run writes, so it leaves the privilege-free bucket."""
+    monkeypatch.setattr("core.paths.APP_DIR", tmp_path / "app")
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        cli, "ensure_elevated", lambda argv: recorded.append("elevated") or None
+    )
+
+    assert cli.main(["deploy", "--status"]) == cli.EXIT_OK
+    assert recorded == []
+
+    assert cli.main(["deploy", "--run", "--job", "nope"]) == cli.EXIT_USAGE
+    assert recorded == ["elevated"]
+    assert "deployment job not found" in capsys.readouterr().out
+
+
+def test_deploy_help_documents_elevation_split(capsys):
+    assert cli.main(["deploy", "--help"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "no privileges" in out
+    assert "elevates" in out
+
+
+def test_completion_scripts_cover_every_option():
+    """D10: the generated lists come from the parser's own option sets."""
+    powershell = cli._POWERSHELL_COMPLETION
+    bash = cli._BASH_COMPLETION
+    zsh = cli._ZSH_COMPLETION
+    assert cli._ALL_OPTIONS
+    bash_options_line = next(
+        line for line in bash.splitlines()
+        if line.strip().startswith("options=")
+    )
+    bash_options = set(
+        bash_options_line.split("=", 1)[1].strip().strip("'").split()
+    )
+    for option in cli._ALL_OPTIONS:
+        assert f"'{option}'" in powershell, option
+        assert option in bash_options, option
+        assert f"'{option}[" in zsh, option
+
+def test_dead_cli_api_removed():
+    """C03: TOP_LEVEL_COMMANDS and _run_worker's label are gone."""
+    import inspect
+
+    assert not hasattr(cli, "TOP_LEVEL_COMMANDS")
+    assert "label" not in inspect.signature(cli._run_worker).parameters
+
+
+def test_run_worker_ctrl_c_cancels_worker(monkeypatch, capsys):
+    """B09: Ctrl+C cancels the worker and waits for its finished signal."""
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    class _CancellableWorker(QObject):
+        progress = pyqtSignal(float)
+        done = pyqtSignal(bool, str)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancel_calls = 0
+
+        def start(self) -> None:  # no thread: the loop is faked below
+            pass
+
+        def cancel(self) -> None:
+            self.cancel_calls += 1
+            self.done.emit(False, "cancelled")
+
+    class _InterruptingLoop:
+        def exec(self) -> None:
+            raise KeyboardInterrupt()
+
+        def quit(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "QEventLoop", _InterruptingLoop)
+    # _run_worker's _ensure_app() pins a process-wide QCoreApplication;
+    # restore _APP to None on teardown or every later MainWindow test
+    # aborts Qt (0xC0000409) when it creates a QApplication.
+    monkeypatch.setattr(cli, "_APP", None, raising=False)
+    worker = _CancellableWorker()
+
+    ok, message = cli._run_worker(worker)
+
+    assert ok is False
+    assert message == "cancelled"
+    assert worker.cancel_calls == 1
+    assert "interrupted - cancelling" in capsys.readouterr().err
+
+
+def test_result_line_survives_ascii_codepage_pipe(monkeypatch):
+    """B17: the Unicode RESULT icon must not crash an ANSI-codepage pipe."""
+    import io as io_mod
+
+    buf = io_mod.BytesIO()
+    ascii_stream = io_mod.TextIOWrapper(buf, encoding="ascii", newline="")
+    monkeypatch.setattr(cli.sys, "stdout", ascii_stream)
+    monkeypatch.setattr(cli, "_JSON", False)
+    monkeypatch.setattr(cli, "_QUIET", False)
+
+    rc = cli._result("ok", "Flint v2.0.0", cli.EXIT_OK)
+
+    ascii_stream.flush()
+    assert rc == cli.EXIT_OK
+    assert b"RESULT ok" in buf.getvalue()
+
+
+def test_main_cli_honors_log_level_setting(monkeypatch):
+    """C02: cli.main passes the settings log_level to setup_cli_logging."""
+    from core import log as log_mod
+    from core import settings as settings_mod
+
+    seen: dict[str, str] = {}
+
+    def fake_setup(name: str = "flint", level: str = "WARNING"):
+        seen["level"] = level
+        return log_mod.logging.getLogger(name)
+
+    monkeypatch.setattr(log_mod, "setup_cli_logging", fake_setup)
+    monkeypatch.setattr(
+        settings_mod,
+        "get",
+        lambda key, default=None: "DEBUG" if key == "log_level" else default,
+    )
+
+    rc = cli.main(["--version"])
+
+    assert rc == cli.EXIT_OK
+    assert seen["level"] == "DEBUG"
+
+
+def test_flash_records_history_for_skip_flashed(tmp_path, monkeypatch, capsys):
+    """L07: CLI flashes land in audited history so --skip-flashed can
+    match them next run — including a serial-less stick via its path."""
+    from core import fleet, history
+
+    image = tmp_path / "ubuntu.iso"
+    image.write_bytes(b"data")
+    monkeypatch.setattr(history, "HISTORY_PATH", tmp_path / "h.json")
+    drive = _fake_drives()[0]
+    monkeypatch.setattr(cli, "_detect_drives", lambda *a, **k: [drive])
+    monkeypatch.setattr(cli, "_run_worker", lambda worker: (True, ""))
+
+    rc = cli.main(
+        ["flash", "--image", str(image), "--drive", "E", "--confirm", "ABC1234"]
+    )
+
+    assert rc == cli.EXIT_OK
+    assert "RESULT ok" in capsys.readouterr().out
+    entries = [
+        entry
+        for entry in history.load_history()
+        if entry.get("operation") == "flash"
+    ]
+    assert entries and entries[-1]["success"] is True
+    assert entries[-1]["physical_path"] == drive["physical_path"]
+    # A serial-less stick with the same path is recognised; another is not.
+    serial_less = {**drive, "serial": ""}
+    assert fleet.was_recently_flashed(serial_less, str(image)) is True
+    other = {**serial_less, "physical_path": r"\\.\PHYSICALDRIVE9"}
+    assert fleet.was_recently_flashed(other, str(image)) is False

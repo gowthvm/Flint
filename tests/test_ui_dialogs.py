@@ -240,3 +240,102 @@ def test_wipe_popup(qapp, tmp_path, monkeypatch):
         assert h.load_history()
     finally:
         w._shutdown()
+
+
+def test_wipe_history_records_wipe_operation(qapp, tmp_path, monkeypatch):
+    import ui.window as window_mod
+
+    w = _make_window(qapp, tmp_path)
+    captured: dict = {}
+
+    def fake_flash_report(
+        iso_name, drive_model, duration_seconds, verified, success, **kwargs
+    ):
+        captured.update(kwargs)
+        captured["iso"] = iso_name
+        return {"iso": iso_name, "operation": kwargs.get("operation", "flash")}
+
+    monkeypatch.setattr(window_mod, "flash_report", fake_flash_report)
+    try:
+        _capture(monkeypatch)
+        w._current_drive = {
+            "model": "TestDrive", "name": "TestDrive", "letter": "K:",
+            "serial": "S9", "physical_path": r"\\.\PHYSICALDRIVE9",
+        }
+        w._active_write_drive = w._current_drive
+        w._write_duration = 1.0
+        w._on_wipe_finished(True, "")
+        assert captured["operation"] == "wipe"
+        assert captured["drive_path"] == r"\\.\PHYSICALDRIVE9"
+        assert captured["iso"] == "\u2014 wipe \u2014"
+    finally:
+        w._shutdown()
+
+
+def test_cancel_write_asks_for_confirmation(qapp, tmp_path, monkeypatch):
+    w = _make_window(qapp, tmp_path)
+    confirms: list[dict] = []
+    cancels: list[str] = []
+
+    class _Worker:
+        def cancel(self) -> None:
+            cancels.append("write")
+
+    try:
+        w._writer = _Worker()  # type: ignore[assignment]
+        monkeypatch.setattr(
+            "ui.window.dialogs.confirm",
+            lambda parent, **kw: confirms.append(kw) or False,
+        )
+        assert w._on_cancel_clicked() is False
+        assert confirms[0]["title"] == "Cancel write?"
+        assert confirms[0]["accept"] == "Cancel write"
+        assert confirms[0]["accept_style"] == "danger"
+        assert not cancels, "declining must leave the write running"
+
+        monkeypatch.setattr(
+            "ui.window.dialogs.confirm",
+            lambda parent, **kw: confirms.append(kw) or True,
+        )
+        assert w._on_cancel_clicked() is True
+        assert cancels
+
+        confirms.clear()
+        w._writer = None
+        assert w._on_cancel_clicked() is True
+        assert not confirms, "an idle cancel must not ask for confirmation"
+    finally:
+        w._writer = None
+        w._shutdown()
+
+
+def test_backup_and_clone_success_popups(qapp, tmp_path, monkeypatch):
+    w = _make_window(qapp, tmp_path)
+    try:
+        calls = _capture(monkeypatch)
+        w._backup_out = str(tmp_path / "backup.img")
+        w._backup_drive = {
+            "model": "SrcDrive", "name": "SrcDrive", "serial": "S1",
+            "physical_path": r"\\.\PHYSICALDRIVE4", "size_gb": 8,
+        }
+        w._on_drive_operation_finished(True, "")
+        assert calls[-1]["kind"] == "success"
+        assert calls[-1]["title"] == "Backup complete"
+        assert "SrcDrive" in calls[-1]["message"]
+        assert "backup.img" in calls[-1]["message"]
+
+        w._clone_source = {
+            "model": "SrcDrive", "name": "SrcDrive", "serial": "S1",
+            "physical_path": r"\\.\PHYSICALDRIVE4", "size_gb": 8,
+        }
+        w._clone_target = {
+            "model": "DstDrive", "name": "DstDrive", "serial": "S2",
+            "physical_path": r"\\.\PHYSICALDRIVE5", "size_gb": 16,
+        }
+        w._on_drive_operation_finished(True, "")
+        assert calls[-1]["kind"] == "success"
+        assert calls[-1]["title"] == "Clone complete"
+        assert "DstDrive" in calls[-1]["message"]
+        assert "16 GB" in calls[-1]["message"]
+    finally:
+        w._shutdown()

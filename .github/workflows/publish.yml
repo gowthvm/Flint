@@ -155,6 +155,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Python-version coverage (R13): this matrix builds CPython 3.10–3.13
+      # win_amd64 wheels only — cibuildwheel v2.22 tops out at 3.13, and
+      # requires-python >= 3.10 prunes older. Python 3.14 is declared in
+      # pyproject.toml classifiers and supported, but gets NO wheel here: pip
+      # on 3.14 builds one from the sdist locally (expected; the native
+      # extension build is optional by design).
       - uses: pypa/cibuildwheel@v2.22
         env:
           CIBW_BUILD: "cp3*-win_amd64"

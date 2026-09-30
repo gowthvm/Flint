@@ -41,14 +41,28 @@ def parse_boot_headers(data: bytes) -> dict[str, Any]:
                 if data[start : start + 16] == _ESP_TYPE_GUID:
                     report["efi_partition"] = True
                     break
+    # MBR partition table: only structurally valid entries are evidence.
+    # A boot indicator outside {0x00, 0x80}, a zero type or an entry that
+    # claims no sectors is noise (or corruption), never a boot layout.
     for i in range(4):
         entry = mbr[446 + i * 16 : 446 + (i + 1) * 16]
         if len(entry) != 16 or all(b == 0 for b in entry):
             continue
-        if (
-            entry[0] == 0x80
-            or entry[4] in (0x0C, 0x0B, 0x07)
-            or entry[0] not in (0x00, 0x80)
+        boot_indicator = entry[0]
+        partition_type = entry[4]
+        start_lba = int.from_bytes(entry[8:12], "little")
+        sectors = int.from_bytes(entry[12:16], "little")
+        if boot_indicator not in (0x00, 0x80):
+            continue
+        if partition_type == 0 or start_lba == 0 or sectors == 0:
+            continue
+        # Active partition, or a FAT/NTFS/EFI type on a drive that has no
+        # GPT header: both indicate an install rather than empty media.
+        if boot_indicator == 0x80 or partition_type in (
+            0x0B,
+            0x0C,
+            0x07,
+            0xEF,
         ):
             report["efi_partition"] = True
             break

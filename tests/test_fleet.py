@@ -4,11 +4,21 @@ No real drives and no Qt are involved; every behaviour here is pure
 policy logic from core.fleet.
 """
 
+from datetime import datetime, timedelta
+
 from core import fleet
 
 
-def _drive(serial="SN123", path=r"\\.\PHYSICALDRIVE1", size_gb=32):
-    return {"serial": serial, "physical_path": path, "size_gb": size_gb}
+def _stamp(days_ago=0, hours_ago=0):
+    """History timestamp inside/outside the skip window, dynamically."""
+    moment = datetime.now().astimezone() - timedelta(
+        days=days_ago, hours=hours_ago
+    )
+    return moment.isoformat(timespec="seconds")
+
+
+def _drive(serial="SN123", path=r"\\.\PHYSICALDRIVE1", size_gb=32, **extra):
+    return {"serial": serial, "physical_path": path, "size_gb": size_gb, **extra}
 
 
 def _image(tmp_path, name="ubuntu.iso", size=1_000):
@@ -60,6 +70,24 @@ class TestCapacityGate:
         img = _image(tmp_path, size=1_000)
         session = fleet.FleetSession(images=[img])
         assert not session.fits_on_drive(img, {"serial": "SN"})
+
+    def test_exact_size_bytes_beats_rounded_gb(self, tmp_path):
+        """A stick whose size_gb rounds below the image must still qualify
+        when the exact byte count is available (fleet capacity regression)."""
+        img = _image(tmp_path, size=1_500)
+        session = fleet.FleetSession(images=[img])
+        # size_gb=0.000001 rounds the claimed capacity down to 1000 bytes.
+        assert not session.fits_on_drive(img, _drive(size_gb=0.000001))
+        assert session.fits_on_drive(
+            img, _drive(size_gb=0.000001, size_bytes=2_000)
+        )
+
+    def test_size_bytes_rejects_oversized_image(self, tmp_path):
+        img = _image(tmp_path, size=2_000)
+        session = fleet.FleetSession(images=[img])
+        assert not session.fits_on_drive(
+            img, _drive(size_gb=0.000001, size_bytes=1_500)
+        )
 
     def test_all_images_must_fit_for_candidate(self, tmp_path):
         small = _image(tmp_path, "a.iso", size=1_000)
@@ -139,7 +167,7 @@ def test_skip_flashed_drive_skipped(tmp_path, monkeypatch):
     d = _drive(serial="SN1")
     monkeypatch.setattr(
         "core.history.load_history",
-        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": _stamp()}],
     )
     assert fleet.pick_candidate([d], session, skip_flashed=True) is None
 
@@ -151,7 +179,7 @@ def test_flashed_drive_shown_when_skip_disabled(tmp_path, monkeypatch):
     d = _drive(serial="SN1")
     monkeypatch.setattr(
         "core.history.load_history",
-        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": _stamp()}],
     )
     assert fleet.pick_candidate([d], session, skip_flashed=False) is d
 
@@ -163,7 +191,7 @@ def test_failed_history_does_not_skip(tmp_path, monkeypatch):
     d = _drive(serial="SN1")
     monkeypatch.setattr(
         "core.history.load_history",
-        lambda: [{"success": False, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+        lambda: [{"success": False, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": _stamp()}],
     )
     assert fleet.pick_candidate([d], session, skip_flashed=True) is d
 
@@ -175,7 +203,7 @@ def test_wrong_image_does_not_skip(tmp_path, monkeypatch):
     d = _drive(serial="SN1")
     monkeypatch.setattr(
         "core.history.load_history",
-        lambda: [{"success": True, "drive_serial": "SN1", "iso": "fedora.iso", "timestamp": "2026-01-01T12:00:00+00:00"}],
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "fedora.iso", "timestamp": _stamp()}],
     )
     assert fleet.pick_candidate([d], session, skip_flashed=True) is d
 
@@ -196,3 +224,132 @@ def test_corrupt_history_does_not_skip(tmp_path, monkeypatch):
     d = _drive(serial="SN1")
     monkeypatch.setattr("core.history.load_history", lambda: (_ for _ in ()).throw(OSError("boom")))
     assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_stale_flash_record_does_not_skip(tmp_path, monkeypatch):
+    """A record older than the skip window is no longer a reason to skip
+    the stick: it is back in the rotation."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": _stamp(days_ago=fleet.SKIP_FLASHED_WINDOW_DAYS + 90)}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_record_inside_the_window_still_skips(tmp_path, monkeypatch):
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": _stamp(days_ago=fleet.SKIP_FLASHED_WINDOW_DAYS - 1)}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is None
+
+
+def test_skip_window_is_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet, "SKIP_FLASHED_WINDOW_DAYS", 30)
+    img = _image(tmp_path, "ubuntu.iso")
+    d = _drive(serial="SN1")
+
+    def _pick(days):
+        session = fleet.FleetSession(images=[img])
+        monkeypatch.setattr(
+            "core.history.load_history",
+            lambda: [{"success": True, "drive_serial": "SN1", "iso": "ubuntu.iso", "timestamp": _stamp(days_ago=days)}],
+        )
+        return fleet.pick_candidate([d], session, skip_flashed=True)
+
+    assert _pick(10) is None  # inside 30 days -> skipped
+    assert _pick(45) is d  # outside 30 days -> offered again
+
+
+def test_serial_less_drive_skipped_by_physical_path(tmp_path, monkeypatch):
+    """L07: a stick with no serial falls back to its device path, the same
+    way drive_fingerprint does, so the skip toggle can work for it."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": None, "iso": "ubuntu.iso", "timestamp": _stamp(), "physical_path": r"\\.\PHYSICALDRIVE1"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is None
+
+
+def test_serial_less_drive_not_skipped_for_another_path(
+    tmp_path, monkeypatch
+):
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="", path=r"\\.\PHYSICALDRIVE7")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": None, "iso": "ubuntu.iso", "timestamp": _stamp(), "physical_path": r"\\.\PHYSICALDRIVE1"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_serial_less_drive_not_skipped_without_a_recorded_path(
+    tmp_path, monkeypatch
+):
+    """Older records carry no device path: conservative (may re-flash)
+    rather than skipping a stick on an unverifiable identity."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": None, "iso": "ubuntu.iso", "timestamp": _stamp()}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_serial_match_ignores_a_path_for_a_different_stick(
+    tmp_path, monkeypatch
+):
+    """When a serial is present it decides alone: a stale path record for
+    another stick must not suppress this one."""
+    img = _image(tmp_path, "ubuntu.iso")
+    session = fleet.FleetSession(images=[img])
+    d = _drive(serial="SN1", path=r"\\.\PHYSICALDRIVE7")
+    monkeypatch.setattr(
+        "core.history.load_history",
+        lambda: [{"success": True, "drive_serial": "SN9", "iso": "ubuntu.iso", "timestamp": _stamp(), "physical_path": r"\\.\PHYSICALDRIVE7"}],
+    )
+    assert fleet.pick_candidate([d], session, skip_flashed=True) is d
+
+
+def test_recorded_flash_recognises_a_serial_less_stick(
+    tmp_path, monkeypatch
+):
+    """End to end: what flash_report writes, was_recently_flashed reads."""
+    from core import history
+
+    monkeypatch.setattr(history, "HISTORY_PATH", tmp_path / "h.json")
+    entry = history.flash_report(
+        "ubuntu.iso",
+        "Generic Stick",
+        1.0,
+        True,
+        True,
+        drive_path=r"\\.\PHYSICALDRIVE1",
+    )
+    history.save_history([entry])
+
+    assert (
+        fleet.was_recently_flashed(
+            _drive(serial=""), str(tmp_path / "ubuntu.iso")
+        )
+        is True
+    )
+    assert (
+        fleet.was_recently_flashed(
+            _drive(serial="", path=r"\\.\PHYSICALDRIVE2"),
+            str(tmp_path / "ubuntu.iso"),
+        )
+        is False
+    )

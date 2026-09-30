@@ -8,11 +8,15 @@ The module is Windows-only; every entry point raises NotImplementedError on
 other platforms with a helpful message.
 """
 
+import locale
 import os
 import re
 import subprocess
 import tempfile
+import time
+from collections.abc import Callable
 
+from core.deviceio import _Cancelled
 from core.iso import detect_linux_iso, is_hybrid_iso
 
 SCHEMES = ("auto", "gpt", "mbr")
@@ -60,7 +64,13 @@ def resolve_write_mode(write_mode: str, iso_path: str) -> str:
     ``auto`` mode switches to file-copy for them — matching Rufus behaviour
     and letting Windows Explorer show the drive contents.
     """
-    mode = (write_mode or "auto").lower()
+    mode = (write_mode or "auto").lower().strip()
+    # D02: the CLI help and the docs use "raw" and "file-copy" as well as
+    # "dd"/"filecopy"; accept both spellings so a literal value the help
+    # advertises can never silently fall through to dd.
+    mode = {"raw": "dd", "file-copy": "filecopy", "file copy": "filecopy"}.get(
+        mode, mode
+    )
     if is_hybrid_iso(iso_path):
         return "dd"
     if mode == "filecopy":
@@ -102,6 +112,73 @@ def _ps_quote(text: str) -> str:
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         args, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise OSError(
+            " ".join(args) + " failed" + (f": {detail}" if detail else "")
+        )
+    return result
+
+
+def _popen_cancellable(
+    args: list[str],
+    is_cancelled: Callable[[], bool] | None = None,
+    *,
+    poll_seconds: float = 0.2,
+    grace_seconds: float = 3.0,
+) -> subprocess.CompletedProcess[str]:
+    """Run a long-lived tool and kill it promptly when cancel trips (L22).
+
+    robocopy and dism can run for minutes; a cancel must not wait for them
+    to finish. The child is terminated first, then killed after a grace
+    period, and ``_Cancelled`` propagates so the caller reports
+    "cancelled". Output goes to temp files (not pipes) so a chatty child
+    can never deadlock the poll loop. Non-zero exits are returned, not
+    raised — robocopy's 0-7 exit codes are success.
+    """
+    encoding = locale.getpreferredencoding(False)
+    with (
+        tempfile.TemporaryFile() as out_f,
+        tempfile.TemporaryFile() as err_f,
+    ):
+        proc = subprocess.Popen(args, stdout=out_f, stderr=err_f)
+        while proc.poll() is None:
+            if is_cancelled is not None and is_cancelled():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=grace_seconds)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=grace_seconds)
+                raise _Cancelled()
+            time.sleep(poll_seconds)
+        out_f.seek(0)
+        err_f.seek(0)
+        stdout = out_f.read().decode(encoding, errors="replace")
+        stderr = err_f.read().decode(encoding, errors="replace")
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def _run_cancellable(
+    args: list[str],
+    is_cancelled: Callable[[], bool] | None = None,
+    *,
+    poll_seconds: float = 0.2,
+    grace_seconds: float = 3.0,
+) -> subprocess.CompletedProcess[str]:
+    """``_run`` with cancel support: identical semantics when
+    ``is_cancelled`` is None; otherwise the child is killed on cancel.
+
+    Partitioning deliberately stays on the blocking ``_run`` — killing
+    diskpart mid-script can leave the partition table half-written, so
+    partitioning always runs to completion and cancel is checked between
+    steps instead.
+    """
+    if is_cancelled is None:
+        return _run(args)
+    result = _popen_cancellable(
+        args, is_cancelled, poll_seconds=poll_seconds, grace_seconds=grace_seconds
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
@@ -184,26 +261,36 @@ def dismount_iso(iso_path: str) -> None:
     )
 
 
-def copy_tree(source_letter: str, target_letter: str) -> None:
-    """Copy a mounted ISO's contents to a drive letter with robocopy."""
+def copy_tree(
+    source_letter: str,
+    target_letter: str,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Copy a mounted ISO's contents to a drive letter with robocopy.
+
+    With ``is_cancelled``, a cancel kills robocopy mid-copy and raises
+    ``_Cancelled`` (L22) instead of letting it run for minutes.
+    """
     _require_windows()
-    result = subprocess.run(
-        [
-            "robocopy",
-            f"{source_letter}:\\",
-            f"{target_letter}:\\",
-            "/E",
-            "/NFL",
-            "/NDL",
-            "/NJH",
-            "/NJS",
-            "/R:1",
-            "/W:1",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    args = [
+        "robocopy",
+        f"{source_letter}:\\",
+        f"{target_letter}:\\",
+        "/E",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NJS",
+        "/R:1",
+        "/W:1",
+    ]
+    if is_cancelled is None:
+        result = subprocess.run(
+            args, capture_output=True, text=True, check=False
+        )
+    else:
+        result = _popen_cancellable(args, is_cancelled)
     # robocopy exits with 0-7 on success (>= 8 means real errors).
     if result.returncode >= 8:
         detail = (result.stderr or result.stdout or "").strip()
@@ -213,12 +300,17 @@ def copy_tree(source_letter: str, target_letter: str) -> None:
         )
 
 
-def copy_iso_files(iso_path: str, target_letter: str) -> None:
+def copy_iso_files(
+    iso_path: str,
+    target_letter: str,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> None:
     """Mount the ISO, copy its contents onto the drive, then unmount."""
     _require_windows()
     source_letter = mount_iso(iso_path)
     try:
-        copy_tree(source_letter, target_letter)
+        copy_tree(source_letter, target_letter, is_cancelled=is_cancelled)
     finally:
         dismount_iso(iso_path)
 
@@ -232,13 +324,22 @@ def _find_windows_image(source_letter: str) -> str | None:
     return None
 
 
-def apply_windows_image(iso_path: str, target_letter: str) -> None:
+def apply_windows_image(
+    iso_path: str,
+    target_letter: str,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> None:
     """Apply a Windows installation image onto a drive (Windows To Go).
 
     Mounts the ISO, applies ``sources/install.wim|esd|swm`` with ``dism`` and
     installs boot files with ``bcdboot`` (UEFI + legacy). The target
     partition must be NTFS; requires elevation. The image index defaults to 1
     (see README for multi-edition images).
+
+    With ``is_cancelled``, a cancel kills dism mid-apply and raises
+    ``_Cancelled`` (L22); ``bcdboot`` stays blocking (it takes under a
+    second) and the ISO is always unmounted.
     """
     _require_windows()
     source_letter = mount_iso(iso_path)
@@ -249,14 +350,15 @@ def apply_windows_image(iso_path: str, target_letter: str) -> None:
                 "no sources/install.wim, install.esd or install.swm found "
                 "on the mounted image"
             )
-        _run(
+        _run_cancellable(
             [
                 _DISM,
                 "/Apply-Image",
                 f"/ImageFile:{image}",
                 "/Index:1",
                 f"/ApplyDir:{target_letter}:\\",
-            ]
+            ],
+            is_cancelled,
         )
         _run([_BCD_BOOT, f"{target_letter}:\\Windows", "/f", "ALL"])
     finally:

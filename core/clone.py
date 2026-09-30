@@ -40,7 +40,7 @@ class CloneWorker(QThread):
     total_bytes = pyqtSignal(int)
     eta_seconds = pyqtSignal(int)
     phase = pyqtSignal(str)
-    finished = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str)
 
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
@@ -52,6 +52,7 @@ class CloneWorker(QThread):
         source_letters: list[str] | None = None,
         target_letters: list[str] | None = None,
         cancel_event: Event | None = None,
+        zero_tail: bool = True,
     ) -> None:
         super().__init__()
         self.source_path = source_path
@@ -59,10 +60,22 @@ class CloneWorker(QThread):
         self.source_letters = source_letters or []
         self.target_letters = target_letters or []
         self.cancel_event = cancel_event
+        # B08: zero-fill the target tail (source_size → capacity) so a larger
+        # target does not keep a remnant of its previous contents.
+        self.zero_tail = zero_tail
         self._canceled = False
+        self._finished = False
 
     def cancel(self) -> None:
         self._canceled = True
+
+    def _emit_finished(self, ok: bool, message: str) -> None:
+        # L04: exactly one "done" per run — run()'s outer except must not
+        # re-emit after _run_inner already reported (mirror UsbWriter).
+        if self._finished:
+            return
+        self._finished = True
+        self.done.emit(ok, message)
 
     def _cancel_requested(self) -> bool:
         return self._canceled or (
@@ -71,10 +84,17 @@ class CloneWorker(QThread):
 
     # Instance-method seams (unit tests bind fakes here).
     def _open_source(self) -> Any:
-        return open_drive(self.source_path, write=False)
+        # B03: letterless source => nothing to FSCTL-lock, so the handle is
+        # the lock (dwShareMode = 0).  With letters the volume locks taken by
+        # run() do the locking and the handle stays shareable.
+        return open_drive(
+            self.source_path, write=False, exclusive=not self.source_letters
+        )
 
     def _open_target(self) -> Any:
-        return open_drive(self.target_path, write=True)
+        return open_drive(
+            self.target_path, write=True, exclusive=not self.target_letters
+        )
 
     def _source_size(self, handle: Any) -> int:
         return drive_size(handle)
@@ -134,7 +154,8 @@ class CloneWorker(QThread):
                 self._unlock_volumes(volumes)
         except Exception as exc:
             logger.exception("CloneWorker.run failed")
-            self.finished.emit(False, str(exc))
+            # L04: guarded — _run_inner may already have emitted.
+            self._emit_finished(False, str(exc))
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
@@ -153,7 +174,12 @@ class CloneWorker(QThread):
             target_total = self._target_size(target)
             if target_total < total:
                 raise OSError("target drive is smaller than the source")
-            self.total_bytes.emit(total)
+            # B08: the job covers copy (source bytes) plus the zero-fill of
+            # the target tail, so one monotonic 0→100 bar spans both phases
+            # (L17: no phase may restart the percentage).
+            tail = (target_total - total) if self.zero_tail else 0
+            job_total = total + tail
+            self.total_bytes.emit(job_total)
             self.phase.emit("Cloning")
             done = 0
             durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
@@ -177,21 +203,25 @@ class CloneWorker(QThread):
                 if window_time > 0 and window_bytes > 0:
                     bytes_per_sec = window_bytes / window_time
                     speed = bytes_per_sec / 1_000_000
-                    remaining = (total - done) / bytes_per_sec
+                    remaining = (job_total - done) / bytes_per_sec
                 else:
                     speed = 0.0
                     remaining = 0.0
 
-                self.progress.emit(done / total * 100.0)
+                self.progress.emit(done / job_total * 100.0)
                 self.speed_mbps.emit(speed)
                 self.written_bytes.emit(done)
                 self.eta_seconds.emit(int(remaining))
+            if not self._cancel_requested() and tail:
+                self._zero_fill(target, total, target_total, job_total)
             if not self._cancel_requested():
                 self.phase.emit("Flushing")
                 self._flush(target)
-                self._verify_clone(source, target, total)
+                # target_end == total + tail: when zero_tail is off the tail
+                # was never rewritten, so verification stops at the source size.
+                self._verify_clone(source, target, total, job_total)
         except Exception as exc:
-            self.finished.emit(False, str(exc))
+            self._emit_finished(False, str(exc))
             return
         finally:
             kernel32().CloseHandle(source)
@@ -199,20 +229,69 @@ class CloneWorker(QThread):
                 kernel32().CloseHandle(target)
 
         if self._cancel_requested():
-            self.finished.emit(False, "cancelled")
+            self._emit_finished(False, "cancelled")
             return
-        self.finished.emit(True, "")
+        self._emit_finished(True, "")
 
-    def _verify_clone(self, source: Any, target: Any, total: int) -> None:
-        """Read both devices back and fail on the first differing region."""
+    def _zero_fill(
+        self, target: Any, start: int, end: int, job_total: int
+    ) -> None:
+        """B08: erase the target tail [start, end) with zeros, chunked and
+        cancel-aware.  Progress continues from the copy phase (already past
+        ``start / job_total``) up to 100 % — it never restarts (L17)."""
+        self.phase.emit("Zero-filling")
+        zeros = b"\x00" * self.CHUNK_SIZE
+        offset = start
+        durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
+        sizes: deque[int] = deque(maxlen=self.SPEED_WINDOW)
+        while offset < end:
+            if self._cancel_requested():
+                return
+            count = min(self.CHUNK_SIZE, end - offset)
+            chunk_start = time.perf_counter()
+            self._write_chunk(target, zeros[:count])
+            durations.append(time.perf_counter() - chunk_start)
+            sizes.append(count)
+            offset += count
+
+            window_bytes = sum(sizes)
+            window_time = sum(durations)
+            if window_time > 0 and window_bytes > 0:
+                bytes_per_sec = window_bytes / window_time
+                speed = bytes_per_sec / 1_000_000
+                remaining = (job_total - offset) / bytes_per_sec
+            else:
+                speed = 0.0
+                remaining = 0.0
+
+            self.progress.emit(offset / job_total * 100.0)
+            self.speed_mbps.emit(speed)
+            self.written_bytes.emit(offset)
+            self.eta_seconds.emit(int(remaining))
+
+    def _verify_clone(
+        self, source: Any, target: Any, source_end: int, target_end: int
+    ) -> None:
+        """Read both devices back and fail on the first differing region.
+
+        Covers the *whole* target (B08): ``[0, source_end)`` is compared
+        against the source, then ``[source_end, target_end)`` must be zeros
+        (the tail this clone just wrote).  ``target_end < source_end`` is
+        impossible; callers pass ``target_end == source_end`` when zero-fill
+        was disabled.
+
+        L17: no progress is re-emitted here — the copy/zero-fill phases
+        already reached 100 % and a watcher must not see the percentage
+        restart during verification.
+        """
         self._seek(source, 0)
         self._seek(target, 0)
         self.phase.emit("Verifying clone")
         checked = 0
-        while checked < total:
+        while checked < source_end:
             if self._cancel_requested():
                 return
-            count = min(self.CHUNK_SIZE, total - checked)
+            count = min(self.CHUNK_SIZE, source_end - checked)
             source_data = self._read_chunk(source, count)
             target_data = self._read_target_chunk(target, count)
             if source_data != target_data:
@@ -233,7 +312,23 @@ class CloneWorker(QThread):
                     f"clone verification failed at byte {checked + limit:,}"
                 )
             checked += len(source_data)
-            self.progress.emit(checked / total * 100.0)
-            self.written_bytes.emit(checked)
             if not source_data:
                 raise OSError("clone verification read ended early")
+        while checked < target_end:
+            if self._cancel_requested():
+                return
+            count = min(self.CHUNK_SIZE, target_end - checked)
+            tail_data = self._read_target_chunk(target, count)
+            if len(tail_data) != count:
+                raise OSError(
+                    f"clone verification failed at byte {checked + len(tail_data):,}"
+                )
+            stale = next(
+                (index for index, byte in enumerate(tail_data) if byte),
+                None,
+            )
+            if stale is not None:
+                raise OSError(
+                    f"clone verification failed at byte {checked + stale:,}"
+                )
+            checked += count

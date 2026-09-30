@@ -293,6 +293,90 @@ def test_copy_iso_files_mounts_copies_dismounts(monkeypatch):
     assert robocopy[1] == "D:\\" and robocopy[2] == "E:\\"
 
 
+# --------------------------------------------------- L22 cancel handling ----
+
+
+def test_popen_cancellable_kills_child_when_cancel_trips(monkeypatch):
+    """L22: cancel during a long tool run terminates the child and raises
+    _Cancelled instead of waiting for it to finish."""
+    from core.deviceio import _Cancelled
+
+    events: list[str] = []
+
+    class _Proc:
+        returncode = None
+
+        def poll(self):
+            return None  # child never finishes on its own
+
+        def terminate(self):
+            events.append("terminate")
+
+        def wait(self, timeout=None):
+            events.append("wait")
+            return 0
+
+        def kill(self):
+            events.append("kill")
+
+    monkeypatch.setattr(diskpart.subprocess, "Popen", lambda *a, **k: _Proc())
+    with pytest.raises(_Cancelled):
+        diskpart._popen_cancellable(
+            ["robocopy", "D:\\", "E:\\"], lambda: True, poll_seconds=0
+        )
+    assert events == ["terminate", "wait"]
+
+
+def test_popen_cancellable_kills_after_grace_period(monkeypatch):
+    """A child that ignores terminate() is killed after the grace period."""
+    from core.deviceio import _Cancelled
+
+    events: list[str] = []
+
+    class _Proc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            events.append("terminate")
+
+        def wait(self, timeout=None):
+            events.append("wait")
+            if events.count("wait") == 1:
+                raise diskpart.subprocess.TimeoutExpired(
+                    cmd="robocopy", timeout=timeout
+                )
+            return -15
+
+        def kill(self):
+            events.append("kill")
+
+    monkeypatch.setattr(diskpart.subprocess, "Popen", lambda *a, **k: _Proc())
+    with pytest.raises(_Cancelled):
+        diskpart._popen_cancellable(
+            ["robocopy"], lambda: True, poll_seconds=0, grace_seconds=0
+        )
+    assert events == ["terminate", "wait", "kill", "wait"]
+
+
+def test_popen_cancellable_returns_result_when_not_cancelled(monkeypatch):
+    class _Proc:
+        returncode = None
+
+        def poll(self):
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(diskpart.subprocess, "Popen", lambda *a, **k: _Proc())
+    result = diskpart._popen_cancellable(
+        ["robocopy"], lambda: False, poll_seconds=0
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
 # ---------------------------------------------------------------------------
 # writer dispatch (no real drives touched)
 # ---------------------------------------------------------------------------
@@ -312,7 +396,11 @@ def test_writer_filecopy_dispatches_to_diskpart(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(
         diskpart, "prepare_partition", lambda n, s, f: calls.append((n, s, f)) or "E"
     )
-    monkeypatch.setattr(diskpart, "copy_iso_files", lambda iso, letter: calls.append((iso, letter)))
+    monkeypatch.setattr(
+        diskpart,
+        "copy_iso_files",
+        lambda iso, letter, **_kw: calls.append((iso, letter)),
+    )
 
     plain = _write_iso(tmp_path, "plain.iso", partitions=False)
     writer = UsbWriter(
@@ -327,7 +415,7 @@ def test_writer_filecopy_dispatches_to_diskpart(qapp, monkeypatch, tmp_path):
     finished = []
     writer.mode.connect(modes.append)
     writer.phase.connect(phases.append)
-    writer.finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    writer.done.connect(lambda ok, msg: finished.append((ok, msg)))
 
     writer.run()
 

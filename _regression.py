@@ -81,6 +81,10 @@ check("history v2 + export/import/clear")
 import core.settings as s
 
 s.SETTINGS_PATH = Path(d) / "s.json"
+# Isolation: the history section's lazy `settings.get` may already have
+# cached the *real* settings file (theme etc.) — drop the cache so this
+# block exercises only the temp file above.
+s._CACHE = None
 s.set_many(onboarding_seen=True)
 assert s.get("theme") == "dark" and s.get("verify_after_write") is True
 s.set_many(theme="light", window_geometry="W1000H700")
@@ -704,7 +708,7 @@ class _NoSignal:
 class _FakeVerifier:
     progress = _NoSignal()
     stats = _NoSignal()
-    finished = _NoSignal()
+    done = _NoSignal()
 
     def __init__(self, *args, **kwargs):
         pass

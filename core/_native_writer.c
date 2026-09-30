@@ -25,8 +25,10 @@
 static PyObject *
 py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    const char *path;
-    const char *device_path;
+    PyObject *path_obj = NULL;
+    PyObject *device_path_obj = NULL;
+    wchar_t *path = NULL;
+    wchar_t *device_path = NULL;
     unsigned long long chunk_size = WRITER_DEFAULT_CHUNK;
     PyObject *progress = Py_None;
     static char *kwlist[] = {"path", "device_path", "chunk_size", "progress", NULL};
@@ -41,10 +43,22 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
 
     (void)self;
 
+    /* Non-ASCII paths: image and device paths are user data and may contain
+     * characters outside the ANSI code page; the "s" format plus CreateFileA
+     * mis-resolves those, so both are converted to UTF-16 for the W APIs. */
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "ss|KO", kwlist,
-            &path, &device_path, &chunk_size, &progress))
+            args, kwargs, "UU|KO", kwlist,
+            &path_obj, &device_path_obj, &chunk_size, &progress))
         return NULL;
+
+    path = PyUnicode_AsWideCharString(path_obj, NULL);
+    if (path == NULL)
+        return NULL;
+    device_path = PyUnicode_AsWideCharString(device_path_obj, NULL);
+    if (device_path == NULL) {
+        PyMem_Free(path);
+        return NULL;
+    }
 
     /* FILE_FLAG_NO_BUFFERING requires sector-multiple sizes: clamp and align. */
     if (chunk_size > WRITER_MAX_CHUNK)
@@ -53,15 +67,15 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
         chunk_size = WRITER_SECTOR;
     chunk_size -= chunk_size % WRITER_SECTOR;
 
-    in_handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    in_handle = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (in_handle == INVALID_HANDLE_VALUE)
         goto fail;
 
     /* Raw device handles are sector aligned; regular files are created (or
      * reopened and truncated) and trimmed back after the padded final chunk. */
-    is_device = (_strnicmp(device_path, "\\\\.\\", 4) == 0);
-    out_handle = CreateFileA(device_path, GENERIC_WRITE, 0, NULL,
+    is_device = (_wcsnicmp(device_path, L"\\\\.\\", 4) == 0);
+    out_handle = CreateFileW(device_path, GENERIC_WRITE, 0, NULL,
                              is_device ? OPEN_EXISTING : OPEN_ALWAYS,
                              FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
                              NULL);
@@ -92,7 +106,7 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
     for (;;) {
         DWORD bytes_read = 0;
         DWORD to_write;
-        DWORD written = 0;
+        DWORD written_total = 0;
 
         if (!ReadFile(in_handle, buffer, (DWORD)chunk_size, &bytes_read, NULL))
             goto fail;
@@ -106,8 +120,22 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
             memset((char *)buffer + bytes_read, 0,
                    to_write - bytes_read);
         }
-        if (!WriteFile(out_handle, buffer, to_write, &written, NULL))
-            goto fail;
+        /* WriteFile can succeed while transferring fewer bytes than asked
+         * (raw devices do this at chunk boundaries) and the file pointer
+         * still advances by the count written.  `done` below counts the
+         * whole chunk, so a short write must be completed here or the
+         * target would silently hold less than the reported byte count. */
+        while (written_total < to_write) {
+            DWORD written = 0;
+            if (!WriteFile(out_handle, (char *)buffer + written_total,
+                           to_write - written_total, &written, NULL))
+                goto fail;
+            if (written == 0) {
+                SetLastError(ERROR_WRITE_FAULT);
+                goto fail;
+            }
+            written_total += written;
+        }
         done += bytes_read;
 
         if (progress != NULL && progress != Py_None) {
@@ -133,7 +161,7 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
         HANDLE trim;
         CloseHandle(out_handle);
         out_handle = INVALID_HANDLE_VALUE;
-        trim = CreateFileA(device_path, GENERIC_WRITE, 0, NULL,
+        trim = CreateFileW(device_path, GENERIC_WRITE, 0, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (trim == INVALID_HANDLE_VALUE)
             goto fail;
@@ -164,18 +192,23 @@ cleanup:
         CloseHandle(out_handle);
     if (in_handle != INVALID_HANDLE_VALUE)
         CloseHandle(in_handle);
+    PyMem_Free(path);
+    PyMem_Free(device_path);
     if (ok == -1)
         return NULL; /* exception already set by the callback */
     if (!ok) {
         if (saved_err != 0)
             PyErr_SetFromWindowsErr(saved_err);
         else
-            PyErr_SetFromWindowsErr(GetLastError());
+            PyErr_SetString(PyExc_OSError, "native write failed");
         return NULL;
     }
     return PyLong_FromUnsignedLongLong(done);
 
 fail:
+    /* VirtualFree/CloseHandle in the cleanup block overwrite the thread's
+     * last-error value, so it must be captured here, before the goto. */
+    saved_err = GetLastError();
     ok = 0;
     goto cleanup;
 }

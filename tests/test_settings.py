@@ -58,3 +58,117 @@ def test_auto_eject_defaults_false_and_typechecked(tmp_path):
         assert s.get("auto_eject") is True
     finally:
         s._CACHE = None
+
+
+def test_dead_export_import_api_removed():
+    """C03: export_settings/import_settings were never called anywhere."""
+    assert not hasattr(s, "export_settings")
+    assert not hasattr(s, "import_settings")
+
+
+def test_legacy_settings_file_loads_and_gets_stamped_on_save(_isolated_settings):
+    """C10: a pre-versioned settings.json still loads (defaults merge) and
+    the next save stamps the current schema_version."""
+    path = _isolated_settings / "settings.json"
+    path.write_text(json.dumps({"theme": "light"}), encoding="utf-8")
+    s._CACHE = None
+    try:
+        assert s.get("theme") == "light"
+        assert s.get("schema_version") == s.SETTINGS_SCHEMA_VERSION == 1
+        assert s.get("expert_mode") is True  # defaults still merged in
+
+        s.set_many(theme="dark")
+
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["schema_version"] == 1
+        assert on_disk["theme"] == "dark"
+    finally:
+        s._CACHE = None
+
+
+def test_older_schema_version_is_migrated_on_load(_isolated_settings):
+    """C10: a version-0 (or corrupted-version) file is run through the
+    migration dispatch and stamped with the current version in memory."""
+    path = _isolated_settings / "settings.json"
+    path.write_text(
+        json.dumps({"schema_version": 0, "onboarding_seen": True}),
+        encoding="utf-8",
+    )
+    s._CACHE = None
+    try:
+        assert s.get("onboarding_seen") is True
+        assert s.get("schema_version") == 1
+    finally:
+        s._CACHE = None
+
+
+def test_settings_save_always_stamps_current_schema_version(_isolated_settings):
+    """C10: callers cannot talk the stored version down."""
+    s._CACHE = None
+    try:
+        s.set_many(schema_version=0, theme="solarized")
+        assert s.get("schema_version") == 1
+        on_disk = json.loads(
+            (_isolated_settings / "settings.json").read_text(encoding="utf-8")
+        )
+        assert on_disk["schema_version"] == 1
+    finally:
+        s._CACHE = None
+
+
+def test_fleet_skip_flashed_defaults_false(_isolated_settings):
+    """U21: the fleet skip toggle persists (support-only: the UI wires the
+    read/write in a later phase)."""
+    assert "fleet_skip_flashed" in s._DEFAULTS
+    assert s.get("fleet_skip_flashed") is False
+
+    s.set_many(fleet_skip_flashed=True)
+    assert s.get("fleet_skip_flashed") is True
+    on_disk = json.loads(
+        (_isolated_settings / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["fleet_skip_flashed"] is True
+
+    s.set_many(fleet_skip_flashed="yes")  # wrong type -> rejected
+    assert s.get("fleet_skip_flashed") is True
+
+
+def test_set_many_async_visible_immediately_and_job_lands_it(
+    _isolated_settings, monkeypatch
+):
+    """U15: with write-back enabled the cache updates synchronously while
+    the durable write is deferred; running the queued job lands it."""
+    jobs = []
+    monkeypatch.setattr(s.writeback, "enabled", lambda: True)
+    monkeypatch.setattr(s.writeback, "submit", jobs.append)
+
+    s.set_many(theme="light")
+
+    assert s.get("theme") == "light"  # visible immediately
+    path = Path(s.SETTINGS_PATH)
+    # The fsync has not run: either the file does not exist yet or it
+    # still holds the pre-save content.
+    assert not path.exists() or (
+        json.loads(path.read_text(encoding="utf-8")).get("theme") != "light"
+    )
+    assert len(jobs) == 1
+
+    jobs[0]()  # the deferred fsync + replace
+    on_disk = json.loads(Path(s.SETTINGS_PATH).read_text(encoding="utf-8"))
+    assert on_disk.get("theme") == "light"
+    assert s.get("theme") == "light"
+
+
+def test_set_many_lands_after_flush_with_real_writeback(_isolated_settings):
+    """U15 end-to-end: enable the real worker, flush, file is written."""
+    from core import writeback
+
+    try:
+        writeback.enable()
+        s.set_many(theme="light")
+        assert s.get("theme") == "light"
+        assert writeback.flush(5.0) is True
+        on_disk = json.loads(Path(s.SETTINGS_PATH).read_text(encoding="utf-8"))
+        assert on_disk.get("theme") == "light"
+    finally:
+        writeback.disable()

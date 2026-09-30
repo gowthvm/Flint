@@ -183,7 +183,7 @@ class UpdateDownloadWorker(QThread):
 class DigestFetchWorker(QThread):
     """Fetch sidecar digest in a background thread."""
 
-    finished = pyqtSignal(str, str)  # (url, digest or "")
+    done = pyqtSignal(str, str)  # (url, digest or "")
 
     def __init__(self, url: str | None) -> None:
         super().__init__()
@@ -191,7 +191,7 @@ class DigestFetchWorker(QThread):
 
     def run(self) -> None:
         digest = fetch_sidecar_digest(self._url)
-        self.finished.emit(self._url or "", digest or "")
+        self.done.emit(self._url or "", digest or "")
 
 
 def default_download_path(version: str) -> str:

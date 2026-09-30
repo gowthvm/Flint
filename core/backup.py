@@ -8,6 +8,7 @@ nothing is written to the drive itself.
 import hashlib
 import logging
 import os
+import shutil
 import time
 from collections import deque
 from typing import Any
@@ -40,7 +41,7 @@ class BackupWorker(QThread):
     eta_seconds = pyqtSignal(int)
     phase = pyqtSignal(str)
     digest = pyqtSignal(str)
-    finished = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str)
 
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
@@ -56,14 +57,28 @@ class BackupWorker(QThread):
         self.out_path = out_path
         self.letters = letters or []
         self._canceled = False
+        self._finished = False
 
     def cancel(self) -> None:
         self._canceled = True
 
+    def _emit_finished(self, ok: bool, message: str) -> None:
+        # L04: exactly one "done" per run.  run()'s outer except used to
+        # re-emit after _run_inner had already reported success/failure
+        # (e.g. when _unlock_volumes raised) — mirror UsbWriter's guard.
+        if self._finished:
+            return
+        self._finished = True
+        self.done.emit(ok, message)
+
     # Instance-method seams (unit tests bind fakes here; the production
     # implementations delegate to core.deviceio).
     def _open_drive(self) -> Any:
-        return open_drive(self.drive_path, write=False)
+        # B03: with no mounted letters there is nothing to FSCTL-lock, so the
+        # read handle itself must act as the lock (dwShareMode = 0).  When
+        # letters exist the volume locks taken by run() do the locking and
+        # the handle stays shareable, matching UsbWriter's pattern.
+        return open_drive(self.drive_path, write=False, exclusive=not self.letters)
 
     def _drive_size(self, handle: Any) -> int:
         return drive_size(handle)
@@ -85,6 +100,21 @@ class BackupWorker(QThread):
     def _flush(self, handle: Any) -> None:
         flush(handle)
 
+    def _free_space(self, directory: str) -> int:
+        return shutil.disk_usage(directory).free
+
+    def _check_free_space(self, total: int) -> None:
+        # B07: the source is a raw device, so "needed" is the device capacity.
+        # Fail here, before the destination is opened for writing at all.
+        directory = os.path.dirname(os.path.abspath(self.out_path))
+        free = self._free_space(directory)
+        if free < total:
+            raise OSError(
+                f"not enough free space in {directory}: "
+                f"{free:,} bytes available, {total:,} bytes needed "
+                "for the backup"
+            )
+
     def _write_to_file(self, out_file: Any, data: bytes) -> None:
         out_file.write(data)
 
@@ -103,7 +133,8 @@ class BackupWorker(QThread):
                 self._unlock_volumes(volumes)
         except Exception as exc:
             logger.exception("BackupWorker.run failed")
-            self.finished.emit(False, str(exc))
+            # L04: guarded — _run_inner may already have emitted.
+            self._emit_finished(False, str(exc))
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
@@ -111,13 +142,18 @@ class BackupWorker(QThread):
         handle = self._open_drive()
         out_file = None
         success = False
+        # B07: never touch the destination until the image is complete and
+        # verified — stream into a sibling .partial file and os.replace it
+        # onto out_path only on success.
+        partial_path = self.out_path + ".partial"
         try:
             total = self._drive_size(handle)
             if total <= 0:
                 raise OSError("unable to determine drive size")
             self.total_bytes.emit(total)
+            self._check_free_space(total)
             self.phase.emit("Backing up")
-            out_file = open(self.out_path, "wb", buffering=0)  # noqa: SIM115
+            out_file = open(partial_path, "wb", buffering=0)  # noqa: SIM115
             digest = hashlib.sha256()
             done = 0
             durations: deque[float] = deque(maxlen=self.SPEED_WINDOW)
@@ -162,15 +198,20 @@ class BackupWorker(QThread):
                 # Verify the backup file matches what we read from the drive
                 self.phase.emit("Verifying backup")
                 verify_digest = hashlib.sha256()
-                with open(self.out_path, "rb") as vf:
+                with open(partial_path, "rb") as vf:
                     while vchunk := vf.read(self.CHUNK_SIZE):
                         verify_digest.update(vchunk)
                 if verify_digest.hexdigest() != digest.hexdigest():
                     raise OSError("backup verification failed: file does not match drive contents")
-                self.digest.emit(digest.hexdigest())
+                if out_file is not None:
+                    out_file.close()
+                    out_file = None
+                # Success only: publish the verified image atomically.
+                os.replace(partial_path, self.out_path)
                 success = True
+                self.digest.emit(digest.hexdigest())
         except Exception as exc:
-            self.finished.emit(False, str(exc))
+            self._emit_finished(False, str(exc))
             return
         finally:
             if out_file is not None:
@@ -178,15 +219,16 @@ class BackupWorker(QThread):
                     out_file.close()
                 except OSError:
                     pass
-            # Remove partial backup file on error or cancellation.
-            if (self._canceled or not success) and os.path.isfile(self.out_path):
+            # Remove the partial image on error or cancellation; any
+            # pre-existing file at out_path is left untouched (B07).
+            if (self._canceled or not success) and os.path.isfile(partial_path):
                 try:
-                    os.unlink(self.out_path)
+                    os.unlink(partial_path)
                 except OSError:
                     pass
             kernel32().CloseHandle(handle)
 
         if self._canceled:
-            self.finished.emit(False, "cancelled")
+            self._emit_finished(False, "cancelled")
             return
-        self.finished.emit(True, "")
+        self._emit_finished(True, "")

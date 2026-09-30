@@ -19,6 +19,31 @@ def _isolated_settings(tmp_path, monkeypatch):
     return app_dir
 
 
+@pytest.fixture(autouse=True)
+def _isolated_app_dir(tmp_path, monkeypatch):
+    """Redirect core.paths.APP_DIR so queue persistence never touches the
+    real %APPDATA%\\Flint. Separate fixture name so test modules that
+    shadow ``_isolated_settings`` cannot accidentally undo this."""
+    from core import paths
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(paths, "APP_DIR", app_dir)
+    return app_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolated_system_disk_cache(monkeypatch):
+    """Reset drives._OTHER_SYSTEM_CACHE before every test.
+
+    It is a process-lifetime cache in production; without this, one test
+    that resolves real registry/WMI data (e.g. cli flash -> _is_system_disk)
+    leaks the host's physical paths into later tests' exclusion sets."""
+    from core import drives
+
+    monkeypatch.setattr(drives, "_OTHER_SYSTEM_CACHE", None)
+
+
 @pytest.fixture()
 def _make_window(monkeypatch):
     """Create a MainWindow without showing it (skips elevation checks)."""

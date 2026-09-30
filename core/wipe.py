@@ -10,6 +10,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.deviceio import (
     ES_CONTINUOUS,
     ES_SYSTEM_REQUIRED,
+    _Cancelled,
     drive_size,
     flush,
     kernel32,
@@ -52,7 +53,7 @@ class WipeWorker(QThread):
     eta_seconds = pyqtSignal(int)
     phase = pyqtSignal(str)
     verified = pyqtSignal(bool, str)
-    finished = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str)
 
     CHUNK_SIZE = 4 * 1024 * 1024
     SPEED_WINDOW = 5
@@ -138,7 +139,7 @@ class WipeWorker(QThread):
                 self._unlock_volumes(volumes)
         except Exception as exc:
             logger.exception("WipeWorker.run failed")
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
@@ -151,7 +152,7 @@ class WipeWorker(QThread):
                 raise OSError("unable to determine drive size")
             patterns = _wipe_patterns(self.method)
         except Exception as exc:
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
             kernel32().CloseHandle(handle)
             return
 
@@ -204,18 +205,26 @@ class WipeWorker(QThread):
                 )
             elif not self._canceled:
                 self.verified.emit(True, "skipped")
+        except _Cancelled:
+            # B06: the cancel callback fired inside write_bytes_retry's retry
+            # loop.  _Cancelled is not an OSError, so without this handler it
+            # escapes to run() and reports an empty failure message instead
+            # of the "cancelled" sentinel the CLI/UI expect.
+            logger.info("WipeWorker._run_inner: wipe cancelled mid-retry")
+            self.done.emit(False, "cancelled")
+            return
         except OSError as exc:
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
             return
         finally:
             kernel32().CloseHandle(handle)
 
         if self._canceled:
-            self.finished.emit(False, "cancelled")
+            self.done.emit(False, "cancelled")
             return
         if not self._verify_passed:
             return  # _verify_pass already emitted the failure
-        self.finished.emit(True, "")
+        self.done.emit(True, "")
 
     def _verify_pass(
         self,
@@ -247,7 +256,7 @@ class WipeWorker(QThread):
                     self.verified.emit(
                         False, f"data mismatch at offset {done}"
                     )
-                    self.finished.emit(
+                    self.done.emit(
                         False,
                         "verification failed: "
                         f"data mismatch at offset {done}",
@@ -260,7 +269,7 @@ class WipeWorker(QThread):
         except OSError as exc:
             self._verify_passed = False
             self.verified.emit(False, "read error: " + str(exc))
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
             return
         self.verified.emit(
             True,

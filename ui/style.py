@@ -15,7 +15,6 @@ _PALETTES = {
         "error": "#ff4444",
         "success": "#2ecc71",
         "warning": "#ffb300",
-        "menuHover": "#2d2d2d",
         # Gradient stops
         "winTop": "#0c0c0c",
         "winBottom": "#090909",
@@ -50,7 +49,6 @@ _PALETTES = {
         "error": "#c62828",
         "success": "#1e8e3e",
         "warning": "#b26a00",
-        "menuHover": "#eaeaea",
         # Gradient stops
         "winTop": "#f4f4f4",
         "winBottom": "#ebebeb",
@@ -85,7 +83,6 @@ _PALETTES = {
         "error": "#ff5555",
         "success": "#4cd964",
         "warning": "#ffd54f",
-        "menuHover": "#1c1c1c",
         # Gradient stops
         "winTop": "#000000",
         "winBottom": "#000000",
@@ -120,6 +117,12 @@ DESIGN_TOKENS = {
     "radius_md": 6,
     "radius_lg": 8,
     "radius_btn": 7,
+    "radius_xs": 3,  # QProgressBar track/chunk, #dot
+    "radius_seg": 5,  # #seg / #segOn
+    "radius_help": 9,  # #helpBtn
+    "radius_frame": 10,  # generic QFrame
+    "radius_pill": 10,  # #badge / #badgeOn pill
+    "radius_dialog": 12,  # #flintDialog
     "icon_small": 16,
     "icon_medium": 22,
     "icon_large": 38,
@@ -129,6 +132,14 @@ DESIGN_TOKENS = {
     "btn_pad_v": 9,
     "btn_pad_h": 16,
     "btn_primary_pad": 10,
+    "combo_pad_v": 4,
+    "combo_pad_h": 10,
+    "badge_pad_v": 2,
+    "badge_pad_h": 6,
+    "chip_pad_v": 3,
+    "chip_pad_h": 8,
+    "seg_pad_v": 7,
+    "caplabel_pad_b": 2,
     "progress_h": 4,
     "font_xs": 10,
     "font_sm": 11,
@@ -136,6 +147,10 @@ DESIGN_TOKENS = {
     "font_md": 14,
     "font_lg": 16,
     "font_xl": 22,
+    "font_12": 12,  # #logoMark, #seg / #segOn
+    "font_15": 15,  # #title
+    "font_24": 24,  # #flintDialogIcon
+    "font_hidden": 1,  # QProgressBar text-hidden trick
     "button_height": 36,
     "chamfer": 8,  # signature cut-corner motif size (px)
 }
@@ -188,7 +203,7 @@ QFrame {
         stop:1 @surfaceBottom
     );
     border: 1px solid @border;
-    border-radius: 10px;
+    border-radius: $radius_frame;
 }
 
 QWidget#fixedStrip {
@@ -229,10 +244,10 @@ QLabel#helpTipLabel {
 QProgressBar {
     background: @track;
     border: none;
-    border-radius: 3px;
+    border-radius: $radius_xs;
     min-height: $progress_h;
     max-height: $progress_h;
-    font-size: 1px;
+    font-size: $font_hidden;
     color: transparent;
 }
 
@@ -244,7 +259,7 @@ QProgressBar:focus {
 QProgressBar::chunk {
     background: @primary;
     border: none;
-    border-radius: 3px;
+    border-radius: $radius_xs;
 }
 
 QPushButton {
@@ -381,9 +396,9 @@ QPushButton#ghost:pressed {
 QPushButton#helpBtn {
     background: @track;
     border: 1px solid @border;
-    border-radius: 9px;
+    border-radius: $radius_help;
     color: @muted;
-    font-size: 10px;
+    font-size: $font_xs;
     font-weight: 600;
     padding: 0;
 }
@@ -405,7 +420,7 @@ QComboBox {
     border-radius: $radius_md;
     color: @text;
     font-size: $font_base;
-    padding: 4px 10px;
+    padding: $combo_pad_v $combo_pad_h;
     min-height: 22px;
 }
 
@@ -532,30 +547,30 @@ QFrame#vdiv, QFrame#hdiv {
 
 QLabel#logoMark {
     background: @primary;
-    border-radius: 6px;
+    border-radius: $radius_md;
     color: @onPrimary;
-    font-size: 12px;
+    font-size: $font_12;
 }
 
 QLabel#logoName {
     color: @text;
-    font-size: 14px;
+    font-size: $font_md;
     font-weight: 500;
 }
 
 QLabel#capLabel {
     color: @faded;
     font-family: $font_mono;
-    font-size: 10px;
+    font-size: $font_xs;
     font-weight: 600;
     letter-spacing: 0.08em;
-    padding-bottom: 2px;
+    padding-bottom: $caplabel_pad_b;
 }
 
 QFrame#navItem {
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: $radius_md;
 }
 
 QFrame#navItem:hover {
@@ -586,7 +601,7 @@ QFrame#navItem:focus {
 
 QLabel#navText {
     color: @muted;
-    font-size: 13px;
+    font-size: $font_base;
 }
 
 QLabel#navText[on="true"] {
@@ -595,20 +610,31 @@ QLabel#navText[on="true"] {
 
 QLabel#badge {
     background: @border;
-    border-radius: 10px;
+    border-radius: $radius_pill;
     color: @muted;
-    font-size: 10px;
-    padding: 2px 6px;
+    font-size: $font_xs;
+    padding: $badge_pad_v $badge_pad_h;
 }
 
 QLabel#badgeOn {
     background: @primary;
-    border-radius: 10px;
+    border-radius: $radius_pill;
     color: @onPrimary;
-    font-size: 10px;
-    padding: 2px 6px;
+    font-size: $font_xs;
+    padding: $badge_pad_v $badge_pad_h;
 }
 
+/* Chamfered panels: #driveChip, #driveCard and #progressArea are
+   ChamferPanel subclasses (ui/chamfer.py). Verified behavior: this QSS
+   background/border renders underneath (paintEvent does not call super,
+   yet the stylesheet is applied before it), so it is only visible as a
+   sliver inside each cut corner between the rounded arc and the chamfer
+   line; inside the path, ChamferPanel.paintEvent paints card/track fill
+   and the border stroke on top; the outermost corner pixels show the
+   parent background. NOT deduplicated: the 1px border feeds the box model,
+   so removing it would shift child layouts, and the cut-corner sliver
+   would change color. Keep these palette colors in sync with
+   ui/chamfer.py (surfaceTop/surfaceBottom here ~ card/track there). */
 QFrame#driveChip {
     background: qlineargradient(
         spread:pad,
@@ -640,7 +666,7 @@ QFrame#driveCard {
         stop:1 @surfaceBottom
     );
     border: 1px solid @border;
-    border-radius: 8px;
+    border-radius: $radius_lg;
 }
 
 QFrame#driveCard:hover {
@@ -651,28 +677,31 @@ QFrame#driveChip:focus {
     border-color: @muted;
 }
 
+/* NOTE: Qt ignores pseudo-states on non-final compounds, so this `:focus`
+   matches unconditionally - the muted border is effectively always drawn
+   (shipped behavior; do not "fix" without accepting a visual change). */
 QWidget#toggleSwitch:focus QLabel#toggleTrack {
     border: 1px solid @muted;
 }
 
 QLabel#doneSummary {
     color: @muted;
-    font-size: 11px;
+    font-size: $font_sm;
 }
 
 QLabel#verifyHint {
     color: @muted;
-    font-size: 11px;
+    font-size: $font_sm;
 }
 
 QLabel#dropError {
     color: @error;
-    font-size: 11px;
+    font-size: $font_sm;
 }
 
 QLabel#dot {
     background: @primary;
-    border-radius: 3px;
+    border-radius: $radius_xs;
 }
 
 QLabel#dot[dim="true"] {
@@ -681,7 +710,7 @@ QLabel#dot[dim="true"] {
 
 QLabel#driveName {
     color: @text;
-    font-size: 13px;
+    font-size: $font_base;
     font-weight: 500;
 }
 
@@ -691,7 +720,7 @@ QLabel#driveName[dim="true"] {
 
 QLabel#driveSub {
     color: @muted;
-    font-size: 11px;
+    font-size: $font_sm;
 }
 
 QLabel#driveSub[dim="true"] {
@@ -707,9 +736,9 @@ QPushButton#iconBtn {
         stop:1 @surfaceBottom
     );
     border: 1px solid @border;
-    border-radius: 6px;
+    border-radius: $radius_md;
     color: @muted;
-    font-size: 14px;
+    font-size: $font_md;
     padding: 0;
 }
 
@@ -738,13 +767,13 @@ QPushButton#iconBtn:pressed {
 
 QLabel#title {
     color: @text;
-    font-size: 15px;
+    font-size: $font_15;
     font-weight: 600;
 }
 
 QLabel#subtitle {
     color: @faded;
-    font-size: 11px;
+    font-size: $font_sm;
 }
 
 QFrame#isoDropZone {
@@ -861,7 +890,7 @@ QLabel#chip {
     border-radius: $radius_sm;
     color: @text;
     font-size: $font_sm;
-    padding: 3px 8px;
+    padding: $chip_pad_v $chip_pad_h;
 }
 
 QLabel#chipOn {
@@ -871,7 +900,7 @@ QLabel#chipOn {
     color: @onPrimary;
     font-size: $font_sm;
     font-weight: 500;
-    padding: 3px 8px;
+    padding: $chip_pad_v $chip_pad_h;
 }
 
 QLabel#chipOk {
@@ -880,16 +909,16 @@ QLabel#chipOk {
     border-radius: $radius_sm;
     color: @success;
     font-size: $font_sm;
-    padding: 3px 8px;
+    padding: $chip_pad_v $chip_pad_h;
 }
 
 QPushButton#seg {
     background: transparent;
     border: 1px solid @border;
-    border-radius: 5px;
+    border-radius: $radius_seg;
     color: @muted;
-    font-size: 12px;
-    padding: 7px 0;
+    font-size: $font_12;
+    padding: $seg_pad_v 0;
 }
 
 QPushButton#seg:hover {
@@ -905,11 +934,11 @@ QPushButton#segOn:focus {
 QPushButton#segOn {
     background: @primary;
     border: 1px solid @primary;
-    border-radius: 5px;
+    border-radius: $radius_seg;
     color: @onPrimary;
-    font-size: 12px;
+    font-size: $font_12;
     font-weight: 500;
-    padding: 7px 0;
+    padding: $seg_pad_v 0;
 }
 
 QPushButton#segOn:hover {
@@ -963,12 +992,12 @@ QLabel#progError[level="warning"] {
 
 QLabel#verifyLabel {
     color: @faded;
-    font-size: 11px;
+    font-size: $font_sm;
 }
 
 QWidget#toggleTrack {
     background: @primary;
-    border-radius: 8px;
+    border-radius: $radius_lg;
 }
 
 QWidget#toggleTrack:hover {
@@ -985,21 +1014,33 @@ QWidget#toggleTrack[on="false"]:hover {
     border-color: @faded;
 }
 
-QWidget#toggleTrack:disabled {
-    opacity: 0.4;
+/* Disabled toggles use explicit colors: Qt's style sheet engine ignores
+   `opacity` on widget backgrounds (verified - disabled rendered identical
+   to enabled before this rule), so swap to dimmed palette tokens instead. */
+QWidget#toggleTrack:disabled,
+QWidget#toggleTrack:disabled:hover {
+    background: @muted;
 }
 
-QWidget#toggleTrack:disabled[on="false"] {
-    opacity: 0.3;
+QWidget#toggleTrack:disabled[on="false"],
+QWidget#toggleTrack:disabled[on="false"]:hover {
+    background: @card;
 }
 
 QLabel#toggleKnob {
     background: @onPrimary;
-    border-radius: 6px;
+    border-radius: $radius_md;
 }
 
 QWidget#toggleTrack[on="false"] QLabel#toggleKnob {
     background: @muted;
+}
+
+/* Qt ignores pseudo-states on non-final compounds of a selector (they match
+   unconditionally), so :disabled must sit on #toggleKnob itself. */
+QLabel#toggleKnob:disabled,
+QWidget#toggleTrack[on="false"] QLabel#toggleKnob:disabled {
+    background: @faded;
 }
 
 QRadioButton {
@@ -1011,7 +1052,7 @@ QRadioButton {
 QRadioButton::indicator {
     width: 14px;
     height: 14px;
-    border-radius: 7px;
+    border-radius: $radius_btn;
     border: 1px solid @border;
     background: @card;
 }
@@ -1042,7 +1083,7 @@ QScrollBar:vertical {
 
 QScrollBar::handle:vertical {
     background: @border;
-    border-radius: 4px;
+    border-radius: $radius_sm;
     min-height: 30px;
 }
 
@@ -1123,13 +1164,13 @@ QLineEdit:focus {
 QDialog#flintDialog {
     background: @card;
     border: 1px solid @border;
-    border-radius: 12px;
+    border-radius: $radius_dialog;
 }
 
 QDialog#flintDialog QLabel#flintDialogIcon {
     background: transparent;
     border: none;
-    font-size: 24px;
+    font-size: $font_24;
     font-weight: 600;
 }
 
@@ -1172,7 +1213,7 @@ QDialog#flintDialog QCheckBox::indicator {
     width: 14px;
     height: 14px;
     border: 1px solid @border;
-    border-radius: 4px;
+    border-radius: $radius_sm;
     background: @card;
 }
 
@@ -1211,6 +1252,3 @@ def build_style(theme: str = "dark") -> str:
         qss = qss.replace(f"${key}", px(val))
     qss = qss.replace("$font_mono", FONT_MONO)
     return qss
-
-
-APP_STYLE: str = build_style("dark")

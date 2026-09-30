@@ -58,6 +58,81 @@ def test_sidecar_digest_unreadable(tmp_path):
     assert message.startswith("could not read x.sha256")
 
 
+# ---------------------------------------------------------------------------
+# B11: a sidecar listing several files must be read per-image
+# ---------------------------------------------------------------------------
+
+_DIGEST_A = "a" * 64
+_DIGEST_B = "b" * 64
+
+
+def test_parse_picks_the_line_that_names_this_image():
+    text = (
+        f"{_DIGEST_A}  other.iso\n"
+        f"{_DIGEST_B}  ubuntu.iso\n"
+        f"{_DIGEST_A}  third.iso\n"
+    )
+    assert checksum.parse_sidecar(text, "ubuntu.iso") == _DIGEST_B
+
+
+def test_parse_ignores_a_line_for_a_different_file():
+    text = f"{_DIGEST_A}  other.iso\n"
+    assert checksum.parse_sidecar(text, "ubuntu.iso") is None
+    # Without a name the historical "first digest" behaviour remains.
+    assert checksum.parse_sidecar(text) == _DIGEST_A
+
+
+def test_parse_matches_basename_of_a_full_path():
+    text = f"{_DIGEST_B}  C:\\dist\\UBUNTU.ISO\n"
+    assert checksum.parse_sidecar(text, "ubuntu.iso") == _DIGEST_B
+    text = f"{_DIGEST_B}  ./build/ubuntu.iso\n"
+    assert checksum.parse_sidecar(text, r"C:\x\ubuntu.iso") == _DIGEST_B
+
+
+def test_parse_accepts_binary_mode_marker():
+    text = f"{_DIGEST_B} *ubuntu.iso\n"
+    assert checksum.parse_sidecar(text, "ubuntu.iso") == _DIGEST_B
+
+
+def test_parse_accepts_digest_only_lines_when_name_given():
+    text = f"SHA256 hash of ubuntu.iso:\r\n{_DIGEST_B.upper()}\r\n"
+    assert checksum.parse_sidecar(text, "ubuntu.iso") == _DIGEST_B
+
+
+def test_parse_accepts_bare_digest_when_name_given():
+    assert checksum.parse_sidecar(_DIGEST_B, "ubuntu.iso") == _DIGEST_B
+
+
+def test_sidecar_digest_says_when_no_entry_is_for_this_image(tmp_path):
+    sidecar = tmp_path / "ubuntu.iso.sha256"
+    sidecar.write_text(f"{_DIGEST_A}  other.iso\n")
+
+    ok, message = checksum.sidecar_digest(sidecar, "ubuntu.iso")
+
+    assert ok is False
+    assert "no SHA-256 digest for ubuntu.iso" in message
+
+
+def test_check_sidecar_ignores_other_files_entry(tmp_path):
+    image = tmp_path / "img.iso"
+    (tmp_path / "img.iso.sha256").write_text(
+        f"{_DIGEST_A}  other.iso\n{_DIGEST_B}  img.iso\n"
+    )
+
+    assert checksum.check_sidecar(image, _DIGEST_B)[0] == "ok"
+    assert checksum.check_sidecar(image, _DIGEST_A)[0] == "mismatch"
+
+
+def test_check_sidecar_errors_when_only_other_file_listed(tmp_path):
+    image = tmp_path / "img.iso"
+    (tmp_path / "img.iso.sha256").write_text(f"{_DIGEST_A}  other.iso\n")
+
+    status, detail = checksum.check_sidecar(image, _DIGEST_A)
+
+    assert status == "error"
+    assert "for img.iso" in detail
+
+
 def test_check_sidecar_states(tmp_path):
     image = tmp_path / "img.iso"
     digest = "a" * 64

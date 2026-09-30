@@ -2,6 +2,8 @@
 
 import ctypes
 
+import pytest
+
 from core.benchmark import benchmark_read, benchmark_write, estimate_write_time
 
 
@@ -51,9 +53,18 @@ def _fake_kernel32(monkeypatch):
     return calls, fake
 
 
-def test_benchmark_write_returns_positive(monkeypatch):
+def test_benchmark_write_requires_confirm(monkeypatch):
+    """B12: writing random data over the start of a raw device must be
+    impossible to trigger by accident."""
     _fake_kernel32(monkeypatch)
-    result = benchmark_write("\\\\.\\E:", size=1024, chunk=512)
+
+    with pytest.raises(ValueError, match="would overwrite the first"):
+        benchmark_write("\\\\.\\E:", size=1024, chunk=512)
+
+
+def test_benchmark_write_confirmed_runs(monkeypatch):
+    _fake_kernel32(monkeypatch)
+    result = benchmark_write("\\\\.\\E:", size=1024, chunk=512, confirm=True)
     assert isinstance(result, float)
     assert result >= 0.0
 
@@ -65,8 +76,16 @@ def test_benchmark_read_returns_positive(monkeypatch):
     assert result >= 0.0
 
 
-def test_estimate_write_time_returns_positive(monkeypatch):
+def test_estimate_write_time_requires_confirm(monkeypatch):
+    """estimate_write_time runs a destructive benchmark_write under the
+    hood, so it carries the same guard."""
     _fake_kernel32(monkeypatch)
-    result = estimate_write_time("\\\\.\\E:", image_size=10_000_000_000)
+
+    with pytest.raises(ValueError, match="would overwrite the first"):
+        estimate_write_time("\\\\.\\E:", image_size=10_000_000_000)
+
+    result = estimate_write_time(
+        "\\\\.\\E:", image_size=10_000_000_000, confirm=True
+    )
     assert isinstance(result, float)
     assert result >= 0.0

@@ -1,12 +1,25 @@
+"""History store: JSON file on disk with a small in-process read cache.
+
+Cache contract (U13): repeated ``load_history()`` calls do not re-parse the
+file while it is unchanged.  The cache is keyed by ``(path, mtime_ns,
+size)`` -- the path is part of the key because tests (and a relocated
+install) reassign ``HISTORY_PATH`` -- and is invalidated by every write.
+The cache is a plain module global, not a lock: history is read and
+written from the GUI thread / CLI main thread only, and any cross-thread
+use would have to be serialised by the caller.
+"""
+
 import hashlib
 import json
 import logging
 import os
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core import writeback
 from core.paths import APP_DIR, file_lock
 
 logger = logging.getLogger("flint")
@@ -15,6 +28,48 @@ HISTORY_PATH = APP_DIR / "history.json"
 _HISTORY_LOCK_PATH = HISTORY_PATH.with_suffix(".lock")
 SCHEMA_VERSION = 2
 _MAX_HISTORY_ENTRIES = 10_000
+
+_HistoryKey = tuple[str, int, int] | None
+_history_cache: tuple[_HistoryKey, list[dict[str, Any]]] | None = None
+
+# U15: entries for an async save that has not landed on disk yet, as
+# ``(sequence, entries)``.  Readers see the pending list instead of the
+# file, so a save is immediately visible even though the fsync runs on
+# the background worker.  The sequence lets an older job avoid clearing
+# a newer pending list.
+_pending_entries: tuple[int, list[dict[str, Any]]] | None = None
+_pending_seq = 0
+_pending_lock = threading.Lock()
+
+
+def _set_pending(entries: list[dict[str, Any]]) -> int:
+    global _pending_entries, _pending_seq
+    with _pending_lock:
+        _pending_seq += 1
+        seq = _pending_seq
+        _pending_entries = (seq, entries)
+    return seq
+
+
+def _clear_pending(seq: int) -> None:
+    global _pending_entries
+    with _pending_lock:
+        if _pending_entries is not None and _pending_entries[0] == seq:
+            _pending_entries = None
+
+
+def _history_key(path: Path) -> _HistoryKey:
+    """Cheap freshness probe; ``None`` means "no file yet"."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _invalidate_history_cache() -> None:
+    global _history_cache
+    _history_cache = None
 
 
 def _truncate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -51,8 +106,32 @@ def _truncate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def load_history() -> list[dict[str, Any]]:
+    """Return the stored entries, re-parsing the file only when it changed.
+
+    The returned list is a fresh copy so callers may append/reorder it
+    freely (e.g. before ``save_history``); the cached list itself is never
+    handed out.  Entry dicts are shared, so callers must not mutate them
+    in place without saving afterwards.
+
+    While an async save is pending (U15), the pending entries are
+    returned — they are newer than anything on disk.
+    """
+    global _history_cache
+    pending = _pending_entries
+    if pending is not None:
+        return list(pending[1])
+    key = _history_key(HISTORY_PATH)
+    cached = _history_cache
+    if cached is not None and cached[0] == key:
+        return list(cached[1])
+    entries = _read_history(HISTORY_PATH)
+    _history_cache = (key, entries)
+    return list(entries)
+
+
+def _read_history(path: Path) -> list[dict[str, Any]]:
     try:
-        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict) and isinstance(data.get("entries"), list):
             return [e for e in data["entries"] if isinstance(e, dict)]
@@ -77,14 +156,38 @@ def _save_history_unlocked(entries: list[dict[str, Any]]) -> None:
         f.flush()
         os.fsync(f.fileno())
     tmp.replace(HISTORY_PATH)
+    # The file on disk changed: drop the read cache so the next
+    # ``load_history`` reflects what was just written (and anything a
+    # concurrent reader wrote while we held the lock).
+    _invalidate_history_cache()
 
 
 def save_history(entries: list[dict[str, Any]]) -> None:
-    """Persist history entries atomically, protected by a file lock."""
+    """Persist history entries atomically, protected by a file lock.
+
+    With ``writeback`` enabled (GUI, U15) the entries become visible to
+    readers immediately and the fsync runs on the background worker.
+    """
+    if writeback.enabled():
+        seq = _set_pending(entries)
+        writeback.submit(lambda: _persist_entries(entries, seq))
+        return
+    _persist_entries(entries)
+
+
+def _persist_entries(entries: list[dict[str, Any]], seq: int | None = None) -> None:
+    """Write ``entries`` under the file lock; clear pending on success.
+
+    When ``seq`` is given the caller was async: the pending list is only
+    dropped once the entries are actually on disk, so a failed write
+    keeps serving the in-memory state to readers.
+    """
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with file_lock(_HISTORY_LOCK_PATH):
             _save_history_unlocked(entries)
+        if seq is not None:
+            _clear_pending(seq)
     except OSError:
         # A history write must never crash a flash flow or block close:
         # log and continue with the in-memory entry.
@@ -93,12 +196,34 @@ def save_history(entries: list[dict[str, Any]]) -> None:
 
 def append_history(entry: dict[str, Any]) -> None:
     """Append a single entry to history, protected by a file lock."""
+    if writeback.enabled():
+        # U15: merge on this thread (cheap — no fsync), durable write
+        # off-thread.  The worker re-reads the file so a concurrent
+        # CLI save is never overwritten by a stale list.
+        entries = load_history()
+        entries.append(entry)
+        seq = _set_pending(entries)
+        writeback.submit(lambda: _append_on_worker(entry, seq))
+        return
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with file_lock(_HISTORY_LOCK_PATH):
             entries = load_history()
             entries.append(entry)
             _save_history_unlocked(entries)
+    except OSError:
+        logger.exception("failed to append history")
+
+
+def _append_on_worker(entry: dict[str, Any], seq: int) -> None:
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with file_lock(_HISTORY_LOCK_PATH):
+            # Bypass the pending overlay: disk is the merge base here.
+            entries = _read_history(HISTORY_PATH)
+            entries.append(entry)
+            _save_history_unlocked(entries)
+        _clear_pending(seq)
     except OSError:
         logger.exception("failed to append history")
 
@@ -119,30 +244,61 @@ def history_entry_digest(entry: dict[str, Any]) -> str:
     return hashlib.sha256(_integrity_payload(entry).encode("utf-8")).hexdigest()
 
 
+def _make_record(
+    entry: dict[str, Any], entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Hash-chained copy of ``entry`` given the current ``entries`` tail."""
+    record = dict(entry)
+    previous = next(
+        (
+            str(item["integrity_sha256"])
+            for item in reversed(entries)
+            if item.get("integrity_sha256")
+        ),
+        None,
+    )
+    if previous is not None:
+        record["integrity_prev"] = previous
+    record["integrity_sha256"] = history_entry_digest(record)
+    return record
+
+
 def append_audited_history(entry: dict[str, Any]) -> dict[str, Any]:
     """Append a hash-chained operation record and return the stored record."""
+    if writeback.enabled():
+        # U15: chain and expose the record here (callers get it back
+        # immediately), fsync off-thread.  The chain is computed against
+        # the overlay view; a concurrent cross-process append inside the
+        # few-millisecond window would need two writers at once (CLI +
+        # GUI flashing together) — accepted, and noted for the register.
+        entries = load_history()
+        record = _make_record(entry, entries)
+        seq = _set_pending([*entries, record])
+        writeback.submit(lambda: _append_record_on_worker(record, seq))
+        return record
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with file_lock(_HISTORY_LOCK_PATH):
             entries = load_history()
-            record = dict(entry)
-            previous = next(
-                (
-                    str(item["integrity_sha256"])
-                    for item in reversed(entries)
-                    if item.get("integrity_sha256")
-                ),
-                None,
-            )
-            if previous is not None:
-                record["integrity_prev"] = previous
-            record["integrity_sha256"] = history_entry_digest(record)
+            record = _make_record(entry, entries)
             entries.append(record)
             _save_history_unlocked(entries)
             return record
     except OSError:
         logger.exception("failed to append audited history")
         return entry
+
+
+def _append_record_on_worker(record: dict[str, Any], seq: int) -> None:
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with file_lock(_HISTORY_LOCK_PATH):
+            entries = _read_history(HISTORY_PATH)
+            entries.append(record)
+            _save_history_unlocked(entries)
+        _clear_pending(seq)
+    except OSError:
+        logger.exception("failed to append audited history")
 
 
 def verify_history_integrity() -> tuple[bool, int | None]:
@@ -165,6 +321,7 @@ def clear_history() -> None:
 
 
 def export_history(target_path: str | Path) -> bool:
+    writeback.flush(5.0)  # land pending async saves first (U15)
     try:
         load_history()  # validates the store is readable
         target = Path(target_path)
@@ -221,6 +378,7 @@ def export_history_markdown(target_path: str | Path) -> bool:
 
 
 def import_history(source_path: str | Path) -> tuple[bool, int]:
+    writeback.flush(5.0)  # land pending async saves first (U15)
     try:
         with open(source_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -263,13 +421,25 @@ def flash_report(
     boot_status: str | None = None,
     avg_mbps: float | None = None,
     wipe_verified: str | None = None,
+    *,
+    operation: str = "flash",
+    drive_path: str | None = None,
 ) -> dict[str, Any]:
+    """Build a history record.
+
+    ``operation`` lets the caller label the record (``"flash"``, ``"wipe"``,
+    ``"backup"``...) instead of post-assigning ``report["operation"]`` after
+    the dict is built.  ``drive_path`` records the physical device path so
+    a stick that reports no serial can still be recognised later
+    (see ``core.fleet.was_recently_flashed``).
+    """
     return {
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "operation": "flash",
+        "operation": operation,
         "iso": iso_name,
         "drive": drive_model,
         "drive_serial": drive_serial,
+        "physical_path": drive_path,
         "duration": round(duration_seconds, 1),
         "avg_mbps": round(avg_mbps, 1) if avg_mbps is not None else None,
         "verified": bool(verified),

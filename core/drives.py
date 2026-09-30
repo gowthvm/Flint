@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import winreg
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -10,6 +11,10 @@ import wmi
 from PyQt6.QtCore import QThread, pyqtSignal
 
 logger = logging.getLogger("flint")
+
+# B15: pagefile/boot-volume configuration does not change while the app
+# runs, so the extra system-disk lookups are resolved once per process.
+_OTHER_SYSTEM_CACHE: set[str] | None = None
 
 
 class DrivePoller(QThread):
@@ -69,6 +74,9 @@ class DriveDetector:
     def __init__(self) -> None:
         self.last_error: str | None = None
         self._system_disk_cache: set[str] | None = None
+        # ``None`` means "not resolved yet" for the cache and "could not be
+        # identified" for the result, so a resolved-failure needs its own flag.
+        self._system_disk_resolved = False
 
     @staticmethod
     def format_size(num_bytes: float) -> str:
@@ -123,6 +131,19 @@ class DriveDetector:
 
     def list_removable_drives(self) -> list[dict[str, Any]]:
         self._system_disk_cache = None
+        self._system_disk_resolved = False
+        # B01: if the OS disk cannot be identified, exclusion is impossible —
+        # fail closed and never enumerate drives at all.
+        unknown = "system disk could not be identified; refusing to list drives"
+        try:
+            system_disks = self._system_disk_paths()
+        except Exception:
+            logger.exception("system-disk identification failed")
+            self.last_error = unknown
+            return []
+        if system_disks is None:
+            self.last_error = unknown
+            return []
         wmi_error: Exception | None = None
         try:
             drives = self._list_with_wmi()
@@ -144,26 +165,118 @@ class DriveDetector:
             self.last_error = None
         return []
 
-    def _system_disk_paths(self) -> set[str]:
+    @staticmethod
+    def _system_drive_letter() -> str:
+        """Sanitized ``SystemDrive`` letter (single char, e.g. ``"C"``).
+
+        B15: the environment value is never trusted verbatim — only a
+        stripped ``X:`` pattern is accepted; anything else falls back to
+        ``C:`` with a warning so a malformed value cannot redirect the
+        OS-disk exclusion onto the wrong disk.
+        """
+        raw = (os.environ.get("SystemDrive") or "").strip()
+        if len(raw) == 2 and raw[1] == ":" and raw[0].isalpha():
+            return raw[0]
+        logger.warning(
+            "SystemDrive=%r is not a valid 'X:' drive; falling back to C:",
+            raw,
+        )
+        return "C"
+
+    def _other_system_disk_paths(self) -> set[str]:
+        """B15: disks hosting *other* system-managed volumes.
+
+        The OS-disk lookup covers the ``SystemDrive`` volume only, but
+        Windows can also own volumes on other disks — the pagefile
+        (registry ``PagingFiles``) and any volume flagged ``BootVolume`` /
+        ``SystemVolume`` by WMI. Flashing one of those would corrupt the
+        running system, so their disks join the exclusion.
+
+        Best effort by design: a failed lookup only *narrows* the
+        exclusion (the ``SystemDrive`` disk is still covered). Only the
+        core identification failure returns ``None`` (B01). Result is
+        cached for the process lifetime.
+        """
+        global _OTHER_SYSTEM_CACHE
+        if _OTHER_SYSTEM_CACHE is not None:
+            return set(_OTHER_SYSTEM_CACHE)
+        found: set[str] = set()
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Session Manager"
+                r"\Memory Management",
+            ) as key:
+                paging, _ = winreg.QueryValueEx(key, "PagingFiles")
+            for entry in paging or []:
+                spec = str(entry)
+                if len(spec) >= 2 and spec[1] == ":" and spec[0].isalpha():
+                    path = self._physical_drive_for_letter(spec[0].upper())
+                    if path:
+                        found.add(path)
+        except OSError:
+            # No registry value (pagefile managed automatically) is normal.
+            pass
+        try:
+            conn = wmi.WMI()
+            for vol in conn.Win32_Volume():
+                if not (
+                    getattr(vol, "BootVolume", False)
+                    or getattr(vol, "SystemVolume", False)
+                ):
+                    continue
+                letter = str(getattr(vol, "DriveLetter", "") or "")
+                if len(letter) >= 2 and letter[1] == ":":
+                    path = self._physical_drive_for_letter(letter[0])
+                    if path:
+                        found.add(path)
+        except Exception:
+            logger.debug("boot/system volume lookup failed", exc_info=True)
+        _OTHER_SYSTEM_CACHE = set(found)
+        return set(found)
+
+    def _system_disk_paths(self) -> set[str] | None:
         """DeviceIDs of the disks hosting the OS drive (never flashable).
 
         A USB boot drive or a machine whose system disk also reports
         "removable" must never appear in the target list: flashing it would
-        erase the running OS.  Result is cached per ``list_removable_drives``
-        call to avoid redundant IOCTL round-trips.
+        erase the running OS. Disks hosting other system-managed volumes
+        (pagefile, boot/system volumes) are included too (B15).
+
+        Returns ``None`` when the system disk could NOT be identified (the
+        ``SystemDrive`` letter could not be mapped to a physical disk).
+        Callers must treat ``None`` as a detection failure and refuse to
+        list drives — never fall back to an empty exclusion set (B01).
+
+        Result is cached per ``list_removable_drives`` call to avoid
+        redundant IOCTL round-trips.
         """
-        if self._system_disk_cache is not None:
+        if self._system_disk_resolved:
             return self._system_disk_cache
-        system = (os.environ.get("SystemDrive") or "C:").strip()
-        letter = system[0] if system else "C"
+        letter = self._system_drive_letter()
         physical = self._physical_drive_for_letter(letter)
-        self._system_disk_cache = {physical} if physical else set()
+        if physical:
+            disks = {physical}
+            disks.update(self._other_system_disk_paths())
+            self._system_disk_cache = disks
+        else:
+            logger.error(
+                "could not map SystemDrive letter %s to a physical disk; "
+                "OS-disk exclusion unavailable",
+                letter,
+            )
+            self._system_disk_cache = None
+        self._system_disk_resolved = True
         return self._system_disk_cache
 
     def _list_with_wmi(self) -> list[dict[str, Any]]:
+        system_disks = self._system_disk_paths()
+        if system_disks is None:
+            raise RuntimeError(
+                "system disk could not be identified; refusing to enumerate"
+            )
         conn = wmi.WMI()
         result: list[dict[str, Any]] = []
-        system_disks = self._system_disk_paths()
         for disk in conn.Win32_DiskDrive():
             if not self._is_removable(disk):
                 continue
@@ -181,6 +294,7 @@ class DriveDetector:
                     "name": getattr(disk, "Caption", "") or "",
                     "letter": letters[0] if letters else "",
                     "letters": letters,
+                    "size_bytes": size_bytes,
                     "size_gb": round(size_bytes / 1_000_000_000) if size_bytes else 0,
                     "bus_type": getattr(disk, "InterfaceType", "") or "USB",
                     "model": getattr(disk, "Model", "") or "",
@@ -219,7 +333,9 @@ class DriveDetector:
 
         handle = k32.CreateFileW(
             f"\\\\.\\{letter}:",
-            0x80000000,  # GENERIC_READ
+            0x80,  # FILE_READ_ATTRIBUTES — this IOCTL needs no read access;
+            # GENERIC_READ is denied unelevated and would break OS-disk
+            # identification for every non-admin run
             0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
             None,
             3,  # OPEN_EXISTING
@@ -247,10 +363,41 @@ class DriveDetector:
         finally:
             k32.CloseHandle(handle)
 
+    def _disk_size_bytes(self, physical_path: str, volume_total: int) -> int:
+        """Exact disk size in bytes, falling back to the volume size.
+
+        L15: the psutil path only knows a *volume* size, which under-reports
+        multi-partition sticks; query the whole disk with
+        IOCTL_DISK_GET_LENGTH_INFO (read-only open) so both enumeration
+        paths publish the same disk size.  Only an OSError from the
+        IOCTL falls back to ``shutil.disk_usage(...).total``.
+        """
+        from core.deviceio import drive_size, kernel32, open_drive
+
+        handle: Any = None
+        try:
+            handle = open_drive(physical_path, write=False)
+            return drive_size(handle)
+        except OSError:
+            logger.warning(
+                "exact disk size unavailable for %s; using volume size",
+                physical_path,
+            )
+            return volume_total
+        finally:
+            if handle is not None:
+                kernel32().CloseHandle(handle)
+
     def _list_with_psutil(self) -> list[dict[str, Any]]:
         import win32file
 
-        removable: list[tuple[str, str, int]] = []  # (letter, mountpoint, device_type)
+        system_disks = self._system_disk_paths()
+        if system_disks is None:
+            raise RuntimeError(
+                "system disk could not be identified; refusing to enumerate"
+            )
+
+        removable: list[tuple[str, str, int]] = []  # (letter, mountpoint, volume size)
         for part in psutil.disk_partitions(all=False):
             letter = self._drive_letter_from_path(part.device)
             if letter is None:
@@ -278,8 +425,8 @@ class DriveDetector:
         letters = [letter for letter, _, _ in removable]
         path_map = self._map_physical_paths(letters)
 
-        result: list[dict[str, Any]] = []
-        for letter, mountpoint, size_bytes in removable:
+        by_path: dict[str, dict[str, Any]] = {}
+        for letter, _mountpoint, volume_size in removable:
             physical = path_map.get(letter)
             if physical is None:
                 logger.warning(
@@ -287,19 +434,41 @@ class DriveDetector:
                     letter,
                 )
                 continue
-            result.append(
-                {
-                    "name": f"Drive {letter}:",
-                    "letter": letter,
-                    "size_gb": round(size_bytes / 1_000_000_000) if size_bytes else 0,
-                    "bus_type": "USB",
-                    "model": f"USB Drive {letter}:",
-                    "serial": "",
-                    "letters": [letter],
-                    "physical_path": physical,
-                }
-            )
-        return result
+            # B02: same system-disk exclusion (and log line) as the WMI path —
+            # a removable-volume OS boot drive must never be listed.
+            if physical in system_disks:
+                logger.info(
+                    "skipping system disk %s in drive listing", physical
+                )
+                continue
+            record = by_path.get(physical)
+            if record is not None:
+                # L15(b): one record per physical stick — union the letters
+                # (first letter stays the primary) and keep the first
+                # non-empty name/serial/model.
+                if letter not in record["letters"]:
+                    record["letters"].append(letter)
+                for key, value in (
+                    ("name", f"Drive {letter}:"),
+                    ("serial", ""),
+                    ("model", f"USB Drive {letter}:"),
+                ):
+                    if not record[key] and value:
+                        record[key] = value
+                continue
+            size_bytes = self._disk_size_bytes(physical, volume_size)
+            by_path[physical] = {
+                "name": f"Drive {letter}:",
+                "letter": letter,
+                "size_bytes": size_bytes,
+                "size_gb": round(size_bytes / 1_000_000_000) if size_bytes else 0,
+                "bus_type": "USB",
+                "model": f"USB Drive {letter}:",
+                "serial": "",
+                "letters": [letter],
+                "physical_path": physical,
+            }
+        return list(by_path.values())
 
     @staticmethod
     def _drive_letter_from_path(path: str) -> str | None:

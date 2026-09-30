@@ -1,213 +1,340 @@
-
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flint UI reference</title>
+<!--
+  Documentation mirror of the shipped stylesheet. Authoritative sources:
+  ui/style.py  - _PALETTES (dark / light / high-contrast) and _QSS_TEMPLATE
+  ui/chamfer.py - ChamferPanel paintEvent (chamfered fill/stroke)
+  Every color, radius, font-size and padding below is taken from those
+  files; if style.py changes, update this file to match.
+-->
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
-  .app{display:flex;height:580px;background:#0a0a0a;border-radius:12px;overflow:hidden;border:1px solid #1f1f1f;font-family:var(--font-sans);}
-  .sidebar{width:200px;background:#0a0a0a;border-right:1px solid #1f1f1f;display:flex;flex-direction:column;padding:0;}
-  .logo{padding:22px 20px;border-bottom:1px solid #1f1f1f;display:flex;align-items:center;gap:10px;}
-  .logo-mark{width:26px;height:26px;background:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;}
+
+  /* Theme palettes: 1:1 with ui/style.py _PALETTES (dark is the default). */
+  .page{
+    --bg:#0a0a0a; --card:#121212; --border:#2a2a2a; --text:#ffffff;
+    --muted:#a8a8a8; --faded:#6f6f6f; --track:#1b1b1b; --primary:#ffffff;
+    --on-primary:#000000; --error:#ff4444; --success:#2ecc71; --warning:#ffb300;
+    --win-top:#0c0c0c; --win-bottom:#090909;
+    --surface-top:#141414; --surface-bottom:#0f0f0f;
+    --hover-top:#222222; --hover-bottom:#191919;
+    --active-top:#222222; --active-bottom:#1a1a1a;
+    --pressed-top:#111111; --pressed-bottom:#0d0d0d;
+    --primary-top:#ffffff; --primary-bottom:#e6e6e6;
+    --primary-hover-top:#f4f4f4; --primary-hover-bottom:#dedede;
+    --primary-pressed-top:#e4e4e4; --primary-pressed-bottom:#d7d7d7;
+    --danger-hover:#e63c3c; --danger-pressed:#cc3333;
+    --border-highlight:rgba(255,255,255,0.04);
+    min-height:100vh; background:var(--bg);
+    font-family:"Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+  }
+  #theme-light:checked ~ .page{
+    --bg:#f2f2f2; --card:#ffffff; --border:#d0d0d0; --text:#111111;
+    --muted:#5a5a5a; --faded:#757575; --track:#e4e4e4; --primary:#111111;
+    --on-primary:#ffffff; --error:#c62828; --success:#1e8e3e; --warning:#b26a00;
+    --win-top:#f4f4f4; --win-bottom:#ebebeb;
+    --surface-top:#ffffff; --surface-bottom:#f8f8f8;
+    --hover-top:#eaeaea; --hover-bottom:#e0e0e0;
+    --active-top:#e0e0e0; --active-bottom:#d6d6d6;
+    --pressed-top:#d8d8d8; --pressed-bottom:#d0d0d0;
+    --primary-top:#333333; --primary-bottom:#111111;
+    --primary-hover-top:#444444; --primary-hover-bottom:#222222;
+    --primary-pressed-top:#222222; --primary-pressed-bottom:#111111;
+    --danger-hover:#d32f2f; --danger-pressed:#b71c1c;
+    --border-highlight:rgba(0,0,0,0.06);
+  }
+  #theme-hc:checked ~ .page{
+    --bg:#000000; --card:#000000; --border:#ffffff; --text:#ffffff;
+    --muted:#d0d0d0; --faded:#a0a0a0; --track:#3d3d3d; --primary:#ffffff;
+    --on-primary:#000000; --error:#ff5555; --success:#4cd964; --warning:#ffd54f;
+    --win-top:#000000; --win-bottom:#000000;
+    --surface-top:#111111; --surface-bottom:#0a0a0a;
+    --hover-top:#222222; --hover-bottom:#1a1a1a;
+    --active-top:#333333; --active-bottom:#282828;
+    --pressed-top:#0a0a0a; --pressed-bottom:#050505;
+    --primary-top:#ffffff; --primary-bottom:#e6e6e6;
+    --primary-hover-top:#f4f4f4; --primary-hover-bottom:#dedede;
+    --primary-pressed-top:#e4e4e4; --primary-pressed-bottom:#d7d7d7;
+    --danger-hover:#ff6666; --danger-pressed:#cc3333;
+    --border-highlight:rgba(255,255,255,0.08);
+  }
+
+  .theme-radio{position:absolute;left:-9999px;}
+  .ref-header{max-width:980px;margin:0 auto;padding:24px 24px 0;display:flex;align-items:baseline;justify-content:space-between;gap:16px;}
+  .ref-header h1{font-size:22px;font-weight:600;color:var(--text);}
+  .ref-header .sub{font-size:12px;color:var(--faded);margin-top:4px;}
+  .theme-picker{display:flex;gap:6px;}
+  .theme-picker label{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:5px 10px;cursor:pointer;}
+  .theme-picker label:hover{color:var(--text);border-color:var(--faded);}
+  #theme-dark:checked ~ .page .theme-picker label[for="theme-dark"],
+  #theme-light:checked ~ .page .theme-picker label[for="theme-light"],
+  #theme-hc:checked ~ .page .theme-picker label[for="theme-hc"]{
+    background:var(--primary);border-color:var(--primary);color:var(--on-primary);font-weight:500;
+  }
+
+  /* ---- app mock: values mirror _QSS_TEMPLATE ---- */
+  .app{display:flex;max-width:980px;height:580px;margin:20px auto 0;background:linear-gradient(180deg,var(--win-top),var(--win-bottom));overflow:hidden;}
+  .sidebar{width:200px;flex-shrink:0;background:linear-gradient(90deg,var(--win-top),var(--win-bottom));border-right:1px solid var(--border);display:flex;flex-direction:column;}
+  .logo{padding:22px 20px;display:flex;align-items:center;gap:10px;}
+  .logo-mark{width:26px;height:26px;background:var(--primary);border-radius:6px;display:flex;align-items:center;justify-content:center;} /* brand mark keeps its own fixed colors (see ui-style.md 11.4) */
   .logo-mark svg{width:14px;height:14px;}
-  .logo-name{font-size:14px;font-weight:500;color:#fff;letter-spacing:0.01em;}
-  .nav{flex:1;padding:12px 8px;}
-  .nav-item{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:6px;font-size:13px;color:#555;cursor:pointer;margin-bottom:1px;transition:color 0.1s,background 0.1s;}
-  .nav-item.active{color:#fff;background:#1a1a1a;}
-  .nav-item i{font-size:15px;}
-  .badge{margin-left:auto;font-size:10px;background:#1f1f1f;color:#555;padding:2px 6px;border-radius:10px;}
-  .badge.on{background:#fff;color:#000;}
-  .sidebar-foot{padding:12px 8px;border-top:1px solid #1f1f1f;}
-  .drive-chip{background:#111;border:1px solid #1f1f1f;border-radius:6px;padding:10px 12px;display:flex;align-items:center;gap:8px;}
-  .drive-dot{width:6px;height:6px;border-radius:50%;background:#fff;}
-  .drive-name{font-size:12px;color:#fff;font-weight:500;}
-  .drive-sub{font-size:11px;color:#444;margin-top:1px;}
-  .main{flex:1;display:flex;flex-direction:column;background:#0a0a0a;}
-  .topbar{display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid #1f1f1f;}
+  .logo-name{font-size:14px;font-weight:500;color:var(--text);}
+  .nav{flex:1;padding:12px 8px;display:flex;flex-direction:column;gap:1px;}
+  .nav-item{display:flex;align-items:center;gap:9px;padding:8px 10px;border:1px solid transparent;border-radius:6px;font-size:13px;color:var(--muted);cursor:pointer;}
+  .nav-item:hover{background:linear-gradient(180deg,var(--hover-top),var(--hover-bottom));border-color:var(--border);}
+  .nav-item.active{background:linear-gradient(180deg,var(--active-top),var(--active-bottom));border-color:var(--border);color:var(--text);}
+  .sidebar-foot{border-top:1px solid var(--border);padding:12px 8px;}
+  .chamfer{background:var(--border);padding:1px;clip-path:polygon(8px 0,calc(100% - 8px) 0,100% 8px,100% calc(100% - 8px),calc(100% - 8px) 100%,8px 100%,0 calc(100% - 8px),0 8px);}
+  .chamfer > .chamfer-fill{clip-path:polygon(7px 0,calc(100% - 7px) 0,100% 7px,100% calc(100% - 7px),calc(100% - 7px) 100%,7px 100%,0 calc(100% - 7px),0 7px);}
+  .drive-chip.chamfer-fill{background:var(--card);padding:8px 10px;display:flex;align-items:center;gap:8px;cursor:pointer;} /* ChamferPanel paints card fill + border stroke */
+  .chamfer:hover{background:var(--muted);}
+  .chamfer:hover > .chamfer-fill{background:var(--track);}
+  .drive-dot{width:6px;height:6px;border-radius:3px;background:var(--primary);flex-shrink:0;}
+  .drive-name{font-size:13px;font-weight:500;color:var(--text);}
+  .drive-sub{font-size:11px;color:var(--muted);margin-top:1px;}
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;background:linear-gradient(180deg,var(--win-top),var(--win-bottom));}
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--border);} /* 1px #hdiv under the topbar */
   .tb-left{display:flex;flex-direction:column;gap:2px;}
-  .tb-title{font-size:14px;font-weight:500;color:#fff;}
-  .tb-sub{font-size:11px;color:#333;}
+  .tb-title{font-size:15px;font-weight:600;color:var(--text);}
+  .tb-sub{font-size:11px;color:var(--faded);}
   .tb-actions{display:flex;gap:6px;}
-  .ib{width:30px;height:30px;border-radius:6px;background:#111;border:1px solid #1f1f1f;display:flex;align-items:center;justify-content:center;color:#444;cursor:pointer;}
-  .ib i{font-size:15px;}
+  .ib{width:30px;height:30px;border-radius:6px;background:linear-gradient(180deg,var(--surface-top),var(--surface-bottom));border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;cursor:pointer;}
+  .ib:hover{background:linear-gradient(180deg,var(--hover-top),var(--hover-bottom));border-color:var(--faded);color:var(--text);}
   .content{flex:1;padding:20px 24px;display:flex;flex-direction:column;gap:14px;overflow:hidden;}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-  .section-label{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;}
-  .iso-zone{border:1px solid #1f1f1f;border-radius:8px;padding:20px;display:flex;align-items:center;gap:14px;cursor:pointer;background:#0e0e0e;}
-  .iso-icon{width:38px;height:38px;background:#111;border:1px solid #1f1f1f;border-radius:7px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;flex-shrink:0;}
-  .iso-name{font-size:13px;font-weight:500;color:#fff;}
-  .iso-meta{font-size:11px;color:#333;margin-top:3px;}
-  .iso-check{margin-left:auto;font-size:16px;color:#fff;}
-  .block{background:#0e0e0e;border:1px solid #1f1f1f;border-radius:8px;padding:14px 16px;}
+  .section-label{font-family:"Cascadia Mono","Cascadia Code","Consolas","Courier New",monospace;font-size:10px;font-weight:600;color:var(--faded);text-transform:uppercase;letter-spacing:0.08em;padding-bottom:2px;margin-bottom:8px;}
+  .iso-zone{border:1px solid var(--border);border-radius:8px;padding:20px;display:flex;align-items:center;gap:14px;cursor:pointer;background:linear-gradient(180deg,var(--surface-top),var(--surface-bottom));} /* [loaded="true"] = solid border (dashed is the empty state) */
+  .iso-icon{width:38px;height:38px;background:var(--card);border:1px solid var(--border);border-radius:7px;display:flex;align-items:center;justify-content:center;color:var(--text);font-size:16px;flex-shrink:0;}
+  .iso-name{font-size:13px;font-weight:500;color:var(--text);}
+  .iso-meta{font-size:11px;color:var(--faded);margin-top:3px;}
+  .iso-check{margin-left:auto;font-size:16px;color:var(--text);}
+  .block{background:linear-gradient(180deg,var(--surface-top),var(--surface-bottom));border:1px solid var(--border);border-top:1px solid var(--border-highlight);border-radius:8px;padding:14px 12px;}
   .seg{display:flex;gap:4px;}
-  .seg-btn{flex:1;padding:7px 0;font-size:12px;border-radius:5px;border:1px solid #1f1f1f;background:transparent;color:#444;cursor:pointer;text-align:center;}
-  .seg-btn.on{background:#fff;color:#000;border-color:#fff;}
-  .progress-area{background:#0e0e0e;border:1px solid #1f1f1f;border-radius:8px;padding:16px 18px;}
+  .seg-btn{flex:1;padding:7px 0;font-size:12px;border-radius:5px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;text-align:center;}
+  .seg-btn:hover{background:var(--track);color:var(--text);}
+  .seg-btn.on{background:var(--primary);color:var(--on-primary);border-color:var(--primary);font-weight:500;}
+  .seg-btn.on:hover{background:var(--muted);}
+  .fixed-strip{background:var(--bg);padding:8px 24px;}
+  .progress-area.chamfer-fill{background:var(--card);padding:14px;} /* ChamferPanel: card fill, border stroke, 8px cuts */
   .prog-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px;}
-  .prog-title{font-size:13px;font-weight:500;color:#fff;}
-  .prog-pct{font-size:22px;font-weight:500;color:#fff;}
-  .prog-track{height:2px;background:#1a1a1a;border-radius:1px;overflow:hidden;}
-  .prog-fill{height:100%;width:67%;background:#fff;border-radius:1px;}
+  .prog-title{font-size:11px;font-weight:500;color:var(--text);}
+  .prog-pct{font-family:"Cascadia Mono","Cascadia Code","Consolas","Courier New",monospace;font-size:14px;font-weight:500;color:var(--text);}
+  .prog-track{height:4px;background:var(--track);border-radius:3px;overflow:hidden;}
+  .prog-fill{height:100%;width:67%;background:var(--primary);border-radius:3px;}
   .prog-stats{display:flex;justify-content:space-between;margin-top:10px;}
-  .stat{font-size:11px;color:#333;}
-  .stat span{color:#666;display:block;font-size:10px;margin-bottom:2px;}
-  .bottombar{padding:14px 24px;border-top:1px solid #1f1f1f;display:flex;gap:8px;align-items:center;}
-  .btn-sec{padding:9px 16px;border-radius:7px;border:1px solid #1f1f1f;background:transparent;color:#555;font-size:13px;cursor:pointer;}
-  .btn-pri{flex:1;padding:10px;border-radius:7px;border:none;background:#fff;color:#000;font-size:13px;font-weight:500;cursor:pointer;}
-  .verify{display:flex;align-items:center;gap:7px;font-size:11px;color:#333;}
-  .tog{width:28px;height:16px;background:#fff;border-radius:8px;position:relative;cursor:pointer;}
-  .tog::after{content:'';position:absolute;width:12px;height:12px;border-radius:50%;background:#000;top:2px;right:2px;}
-</style>
+  .stat{display:flex;flex-direction:column;gap:2px;}
+  .stat .cap{font-size:10px;color:var(--muted);}
+  .stat .val{font-family:"Cascadia Mono","Cascadia Code","Consolas","Courier New",monospace;font-size:11px;color:var(--faded);}
+  .bottombar{padding:14px 24px;display:flex;gap:8px;align-items:center;}
+  .btn-sec{padding:9px 16px;border-radius:7px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:13px;font-family:inherit;cursor:pointer;}
+  .btn-sec:hover{background:var(--track);color:var(--text);}
+  .btn-sec:active{background:var(--border);color:var(--text);}
+  .btn-pri{padding:10px;border-radius:7px;border:none;background:linear-gradient(180deg,var(--primary-top),var(--primary-bottom));color:var(--on-primary);font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;flex:1;}
+  .btn-pri:hover{background:linear-gradient(180deg,var(--primary-hover-top),var(--primary-hover-bottom));}
+  .btn-pri:active{background:linear-gradient(180deg,var(--primary-pressed-top),var(--primary-pressed-bottom));}
+  .verify{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--faded);margin-left:auto;}
+  .tog{width:28px;height:16px;background:var(--primary);border-radius:8px;border:1px solid var(--muted);position:relative;cursor:pointer;} /* the #toggleSwitch:focus rule matches unconditionally (see ui/style.py) */
+  .tog:hover{background:var(--text);}
+  .tog::after{content:'';position:absolute;width:12px;height:12px;border-radius:6px;background:var(--on-primary);top:2px;right:2px;}
+  .tog.off{background:var(--track);border-color:var(--muted);}
+  .tog.off:hover{background:var(--card);}
+  .tog.off::after{background:var(--muted);left:2px;right:auto;}
+  .tog.disabled{background:var(--muted);} /* disabled = explicit palette swap (C14) */
+  .tog.disabled::after{background:var(--faded);}
+  .tog.disabled.off{background:var(--card);}
+  .tog.disabled.off::after{background:var(--faded);}
 
-<div class="app">
-  <div class="sidebar">
-    <div class="logo">
-      <div class="logo-mark">
-        <svg viewBox="0 0 14 14" fill="none"><path d="M7 1.5L12 4.5V9.5L7 12.5L2 9.5V4.5L7 1.5Z" fill="#0a0a0a" stroke="#0a0a0a" stroke-width="0.5"/><circle cx="7" cy="7" r="2" fill="#0a0a0a"/></svg>
-      </div>
-      <span class="logo-name">Flint</span>
-    </div>
-    <div class="nav">
-      <div class="nav-item active"><i class="ti ti-usb" aria-hidden="true"></i> Write USB <span class="badge on">1</span></div>
-      <div class="nav-item"><i class="ti ti-device-floppy" aria-hidden="true"></i> Disk image</div>
-      <div class="nav-item"><i class="ti ti-shield-check" aria-hidden="true"></i> Verify</div>
-      <div class="nav-item"><i class="ti ti-history" aria-hidden="true"></i> History</div>
-      <div class="nav-item"><i class="ti ti-settings" aria-hidden="true"></i> Settings</div>
-    </div>
-    <div class="sidebar-foot">
-      <div class="drive-chip">
-        <div class="drive-dot"></div>
-        <div>
-          <div class="drive-name">SanDisk Ultra</div>
-          <div class="drive-sub">64 GB · USB 3.0 · F:</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="main">
-    <div class="topbar">
-      <div class="tb-left">
-        <div class="tb-title">Write bootable USB</div>
-        <div class="tb-sub">SanDisk Ultra · 64 GB selected</div>
-      </div>
-      <div class="tb-actions">
-        <div class="ib"><i class="ti ti-refresh" aria-hidden="true"></i></div>
-        <div class="ib"><i class="ti ti-dots" aria-hidden="true"></i></div>
-      </div>
-    </div>
-
-    <div class="content">
-      <div>
-        <div class="section-label">Image source</div>
-        <div class="iso-zone">
-          <div class="iso-icon"><i class="ti ti-file-zip" aria-hidden="true"></i></div>
-          <div>
-            <div class="iso-name">ubuntu-24.04-desktop-amd64.iso</div>
-            <div class="iso-meta">5.7 GB · SHA256 verified · Ubuntu 24.04 LTS</div>
-          </div>
-          <div class="iso-check"><i class="ti ti-circle-check" aria-hidden="true"></i></div>
-        </div>
-      </div>
-
-      <div class="row2">
-        <div class="block">
-          <div class="section-label">Partition scheme</div>
-          <div class="seg">
-            <div class="seg-btn on">GPT</div>
-            <div class="seg-btn">MBR</div>
-          </div>
-        </div>
-        <div class="block">
-          <div class="section-label">Target system</div>
-          <div class="seg">
-            <div class="seg-btn on">UEFI</div>
-            <div class="seg-btn">BIOS</div>
-            <div class="seg-btn">Both</div>
-          </div>
-        </div>
-        <div class="block">
-          <div class="section-label">File system</div>
-          <div class="seg">
-            <div class="seg-btn">FAT32</div>
-            <div class="seg-btn on">NTFS</div>
-            <div class="seg-btn">exFAT</div>
-          </div>
-        </div>
-        <div class="block">
-          <div class="section-label">Write mode</div>
-          <div class="seg">
-            <div class="seg-btn on">ISO image</div>
-            <div class="seg-btn">DD image</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="progress-area">
-        <div class="prog-head">
-          <div class="prog-title">Writing…</div>
-          <div class="prog-pct">67%</div>
-        </div>
-        <div class="prog-track"><div class="prog-fill"></div></div>
-        <div class="prog-stats">
-          <div class="stat"><span>Written</span>3.8 GB / 5.7 GB</div>
-          <div class="stat"><span>Speed</span>118 MB/s</div>
-          <div class="stat"><span>Remaining</span>~42 s</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="bottombar">
-      <button class="btn-sec">Cancel</button>
-      <button class="btn-pri">Flash drive</button>
-      <div class="verify"><div class="tog"></div> Verify after write</div>
-    </div>
-  </div>
-</div>
-
-<style>
-  body{background:#0a0a0a;color:#bbb;font-family:Segoe UI,system-ui,sans-serif;margin:0;}
-  .ref{max-width:780px;margin:0 auto;padding:32px 24px 72px;}
-  .ref h1{font-size:22px;color:#fff;margin:0 0 4px;}
-  .ref .sub{color:#666;font-size:12px;margin:0 0 28px;}
-  .ref h2{font-size:16px;color:#fff;border-bottom:1px solid #1f1f1f;padding-bottom:8px;margin:30px 0 10px;}
-  .ref p{font-size:13px;line-height:1.6;color:#999;margin:8px 0;}
-  .ref b{color:#ddd;}
-  .ref code{background:#141414;border:1px solid #222;border-radius:4px;padding:1px 6px;font-size:12px;color:#eee;}
-  .ref .warn{background:#181206;border:1px solid #4d3a00;color:#d9b45a;border-radius:6px;padding:10px 14px;font-size:12px;line-height:1.5;margin:12px 0;}
-  .ref .warn b{color:#e8c87a;}
+  /* ---- prose reference ---- */
+  .ref{max-width:980px;margin:0 auto;padding:32px 24px 72px;}
+  .ref h2{font-size:16px;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:8px;margin:30px 0 10px;}
+  .ref p{font-size:13px;line-height:1.6;color:var(--muted);margin:8px 0;}
+  .ref b{color:var(--text);}
+  .ref code{background:var(--surface-top);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:12px;color:var(--text);}
+  .ref .warn{background:var(--card);border:1px solid var(--warning);color:var(--warning);border-radius:6px;padding:10px 14px;font-size:12px;line-height:1.5;margin:12px 0;}
+  .ref .warn b{color:var(--warning);}
   .ref a{color:#7fb2ff;}
+  .legend{max-width:980px;margin:0 auto;padding:12px 24px 0;font-size:11px;color:var(--faded);line-height:1.6;}
+  .legend code{background:var(--surface-top);border:1px solid var(--border);border-radius:4px;padding:0 4px;font-size:11px;color:var(--muted);}
 </style>
+</head>
+<body>
+<input class="theme-radio" type="radio" name="flint-theme" id="theme-dark" checked>
+<input class="theme-radio" type="radio" name="flint-theme" id="theme-light">
+<input class="theme-radio" type="radio" name="flint-theme" id="theme-hc">
 
-<div class="ref">
-  <h1>Flint reference</h1>
-  <p class="sub">Help for the advanced and verification options. Flint writes images to physical drives — read the data-loss warning at the bottom.</p>
+<div class="page">
+  <header class="ref-header">
+    <div>
+      <h1>Flint UI reference</h1>
+      <div class="sub">Style values mirror <code>ui/style.py</code> (_PALETTES + _QSS_TEMPLATE); chamfered panels mirror <code>ui/chamfer.py</code>.</div>
+    </div>
+    <div class="theme-picker">
+      <label for="theme-dark">dark</label>
+      <label for="theme-light">light</label>
+      <label for="theme-hc">high-contrast</label>
+    </div>
+  </header>
 
-  <h2 id="partition-scheme">Partition scheme</h2>
-  <p>Controls how the drive is partitioned when image contents are copied onto it (file-copy mode): <b>GPT</b> for modern UEFI systems, <b>MBR</b> for older BIOS/legacy systems, <b>Auto</b> picks GPT for UEFI targets and MBR otherwise. Raw (DD) writes are byte-for-byte copies of the image and ignore this setting.</p>
+  <div class="app">
+    <div class="sidebar">
+      <div class="logo">
+        <div class="logo-mark">
+          <svg viewBox="0 0 14 14" fill="none"><path d="M7 1.5L12 4.5V9.5L7 12.5L2 9.5V4.5L7 1.5Z" fill="#0a0a0a" stroke="#0a0a0a" stroke-width="0.5"/><circle cx="7" cy="7" r="2" fill="#0a0a0a"/></svg>
+        </div>
+        <span class="logo-name">Flint</span>
+      </div>
+      <div class="nav">
+        <div class="nav-item active">Write</div>
+        <div class="nav-item">Verify</div>
+        <div class="nav-item">History</div>
+        <div class="nav-item">Settings</div>
+      </div>
+      <div class="sidebar-foot">
+        <div class="chamfer">
+          <div class="drive-chip chamfer-fill">
+            <div class="drive-dot"></div>
+            <div>
+              <div class="drive-name">SanDisk Ultra</div>
+              <div class="drive-sub">64 GB · USB 3.0 · F:</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-  <h2 id="target-system">Target system</h2>
-  <p>Select <b>UEFI</b> for firmware using the EFI boot path, <b>Legacy</b> for BIOS boot, or <b>Auto</b>. This influences the partition scheme and where boot files are placed in file-copy mode. Windows To Go always installs boot files for both (UEFI and BIOS).</p>
+    <div class="main">
+      <div class="topbar">
+        <div class="tb-left">
+          <div class="tb-title">Write bootable USB</div>
+          <div class="tb-sub">SanDisk Ultra · 64 GB selected</div>
+        </div>
+        <div class="tb-actions">
+          <div class="ib" title="Refresh drives (F5)">&#8635;</div>
+          <div class="ib" title="Open settings">&#8943;</div>
+        </div>
+      </div>
 
-  <h2 id="filesystem">Filesystem choice</h2>
-  <p><b>FAT32</b> is the most widely bootable (required by many firmware ESPs) but cannot store files over 4 GB. <b>NTFS</b> supports large files and is required for Windows To Go. <b>exFAT</b> handles large files with fewer restrictions but is not bootable on all machines. The filesystem only matters in file-copy mode; raw writes keep the image's own layout.</p>
+      <div class="content">
+        <div>
+          <div class="section-label">Image source</div>
+          <div class="iso-zone">
+            <div class="iso-icon">&#9636;</div>
+            <div>
+              <div class="iso-name">ubuntu-24.04-desktop-amd64.iso</div>
+              <div class="iso-meta">5.7 GB · SHA256 verified · Ubuntu 24.04 LTS</div>
+            </div>
+            <div class="iso-check">&#10003;&#65038;</div>
+          </div>
+        </div>
 
-  <h2 id="write-mode">Write mode</h2>
-  <p><b>Raw (DD)</b> copies the image bytes to the drive exactly as-is — fastest and safest for bootable images. <b>File copy</b> repartitions and formats the drive, then copies the ISO contents onto it. Hybrid ISOs (ISO9660 + bootable MBR) are always written raw so their boot record survives.</p>
+        <div class="row2">
+          <div class="block">
+            <div class="section-label">Partition scheme</div>
+            <div class="seg">
+              <div class="seg-btn on">GPT</div>
+              <div class="seg-btn">MBR</div>
+            </div>
+          </div>
+          <div class="block">
+            <div class="section-label">Target system</div>
+            <div class="seg">
+              <div class="seg-btn on">UEFI</div>
+              <div class="seg-btn">BIOS</div>
+              <div class="seg-btn">Both</div>
+            </div>
+          </div>
+          <div class="block">
+            <div class="section-label">File system</div>
+            <div class="seg">
+              <div class="seg-btn">FAT32</div>
+              <div class="seg-btn on">NTFS</div>
+              <div class="seg-btn">exFAT</div>
+            </div>
+          </div>
+          <div class="block">
+            <div class="section-label">Write mode</div>
+            <div class="seg">
+              <div class="seg-btn on">ISO image</div>
+              <div class="seg-btn">DD image</div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  <h2 id="persistence">Persistence</h2>
-  <p>Keeps changes between reboots on Linux live sticks. Ubuntu-style images get a <code>casper-rw</code> ext4 image at the drive root and the boot config is patched with the <code>persistent</code> kernel option; Debian-live images get a <code>live/persistence.conf</code> overlay instead. Formatting the ext4 image needs <code>wsl mke2fs</code> or a system <code>mke2fs</code>/<code>makefs</code>; if none is available the image is created but left unformatted — an explicit warning is shown and you must format it as ext4 manually for persistence to work.</p>
+      <div class="fixed-strip">
+        <div class="chamfer">
+          <div class="progress-area chamfer-fill">
+            <div class="prog-head">
+              <div class="prog-title">Writing…</div>
+              <div class="prog-pct">67%</div>
+            </div>
+            <div class="prog-track"><div class="prog-fill"></div></div>
+            <div class="prog-stats">
+              <div class="stat"><span class="cap">Written</span><span class="val">3.8 GB / 5.7 GB</span></div>
+              <div class="stat"><span class="cap">Speed</span><span class="val">118 MB/s</span></div>
+              <div class="stat"><span class="cap">Remaining</span><span class="val">~42 s</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  <h2 id="windows-to-go">Windows To Go</h2>
-  <p>Applies a Windows installation ISO to the drive with <code>dism /Apply-Image /Index:1</code> and installs boot files with <code>bcdboot ... /f ALL</code> so the stick boots as a portable Windows install. Requires NTFS (selected automatically), file-copy mode and elevation; the first edition in the image (index 1) is used. Windows To Go and Persistence are mutually exclusive.</p>
+      <div class="bottombar">
+        <button class="btn-sec">Wipe drive</button>
+        <div class="ib" title="Wipe method">&#9662;</div>
+        <button class="btn-sec">Cancel</button>
+        <button class="btn-pri">Flash drive</button>
+        <div class="verify"><div class="tog"></div> Verify after write</div>
+      </div>
+    </div>
+  </div>
 
-  <h2 id="verify-sha256">Verify SHA256</h2>
-  <p>After a raw write, Flint reads the drive back and compares its SHA-256 digest against the image, reporting the offsets of any mismatched regions (up to 20) and the read speed in MB/s. Verification can take as long as the write itself. It is skipped after file-copy writes because the drive is not byte-identical to the image.</p>
+  <div class="legend">
+    Toggle states (28×16, r8, knob 12×12 r6, 2px inset): on = <code>primary</code>/<code>on-primary</code>;
+    off = <code>track</code> + <code>border</code> knob <code>muted</code>;
+    disabled = explicit palette swap (<code>muted</code>/<code>card</code> track, <code>faded</code> knob) —
+    Qt ignores <code>opacity</code> in QSS, so <code>ui/style.py</code> colors it directly.
+    Chamfered panels (<code>driveChip</code>, <code>progressArea</code>) are cut 8px on all four
+    corners: <code>ChamferPanel.paintEvent</code> paints the fill/stroke, the QSS rule only
+    contributes the box model (see the comment in <code>ui/style.py</code>).
+  </div>
 
-  <h2 id="bad-block-scan">Bad-block scan</h2>
-  <p>Re-reads the drive looking for unreadable sectors. Failed reads are retried up to the configured number of times (1–10, default 3); sectors that never read back are reported at 4 KiB-aligned offsets. If mismatches or unreadable sectors are found, Flint offers to retry the write or abort.</p>
+  <div class="ref">
+    <h2 id="partition-scheme">Partition scheme</h2>
+    <p>Controls how the drive is partitioned when image contents are copied onto it (file-copy mode): <b>GPT</b> for modern UEFI systems, <b>MBR</b> for older BIOS/legacy systems, <b>Auto</b> picks GPT for UEFI targets and MBR otherwise. Raw (DD) writes are byte-for-byte copies of the image and ignore this setting.</p>
 
-  <h2 id="chunk-size-native-writer">Chunk size &amp; native writer</h2>
-  <p>Raw writes are buffered in chunks — 8 MiB by default, configurable from 4–64 MiB in Expert mode. The <b>native writer</b> uses Windows <code>CreateFile</code>/<code>WriteFile</code> with <code>FILE_FLAG_NO_BUFFERING</code> and sector-aligned buffers for the highest throughput. Build it with <code>python setup.py build_ext --inplace</code> (the CI workflow does this before packaging); when it is not built, writes automatically fall back to the pure-Python writer. Toggle it on in Expert mode to use it.</p>
+    <h2 id="target-system">Target system</h2>
+    <p>Select <b>UEFI</b> for firmware using the EFI boot path, <b>Legacy</b> for BIOS boot, or <b>Auto</b>. This influences the partition scheme and where boot files are placed in file-copy mode. Windows To Go always installs boot files for both (UEFI and BIOS).</p>
 
-  <h2 id="signing-releases">How to sign releases</h2>
-  <p>The CI workflow (`.github/workflows/build-windows.yml`) builds <code>flint.exe</code>, computes its SHA-256 checksum (<code>certutil -hashfile dist\flint.exe SHA256</code>) and uploads both as workflow artifacts and release assets on every run. Code signing is optional: set the <code>WINDOWS_SIGNING_PFX</code> (base64-encoded PFX) and <code>WINDOWS_SIGNING_PASSWORD</code> repository secrets and CI imports the certificate, signs with <code>signtool sign /fd SHA256 /a</code> and removes it again. Without the secrets, the build logs a clear "signing skipped" warning and still publishes the unsigned EXE with its checksum. Download signed builds from the <a href="https://github.com/gowthvm/Flint/releases/latest">releases page</a>.</p>
+    <h2 id="filesystem">Filesystem choice</h2>
+    <p><b>FAT32</b> is the most widely bootable (required by many firmware ESPs) but cannot store files over 4 GB. <b>NTFS</b> supports large files and is required for Windows To Go. <b>exFAT</b> handles large files with fewer restrictions but is not bootable on all machines. The filesystem only matters in file-copy mode; raw writes keep the image's own layout.</p>
 
-  <div class="warn"><b>Data loss warning.</b> Flint writes raw images directly to physical disks. Everything on the target drive is irreversibly erased — always confirm the target and back up important data first. A wrong drive letter or a hybrid image written with the wrong mode can destroy data with no recovery.</div>
+    <h2 id="write-mode">Write mode</h2>
+    <p><b>Raw (DD)</b> copies the image bytes to the drive exactly as-is — fastest and safest for bootable images. <b>File copy</b> repartitions and formats the drive, then copies the ISO contents onto it. Hybrid ISOs (ISO9660 + bootable MBR) are always written raw so their boot record survives.</p>
+
+    <h2 id="persistence">Persistence</h2>
+    <p>Keeps changes between reboots on Linux live sticks. Ubuntu-style images get a <code>casper-rw</code> ext4 image at the drive root and the boot config is patched with the <code>persistent</code> kernel option; Debian-live images get a <code>live/persistence.conf</code> overlay instead. Formatting the ext4 image needs <code>wsl mke2fs</code> or a system <code>mke2fs</code>/<code>makefs</code>; if none is available the image is created but left unformatted — an explicit warning is shown and you must format it as ext4 manually for persistence to work.</p>
+
+    <h2 id="windows-to-go">Windows To Go</h2>
+    <p>Applies a Windows installation ISO to the drive with <code>dism /Apply-Image /Index:1</code> and installs boot files with <code>bcdboot ... /f ALL</code> so the stick boots as a portable Windows install. Requires NTFS (selected automatically), file-copy mode and elevation; the first edition in the image (index 1) is used. Windows To Go and Persistence are mutually exclusive.</p>
+
+    <h2 id="verify-sha256">Verify SHA256</h2>
+    <p>After a raw write, Flint reads the drive back and compares its SHA-256 digest against the image, reporting the offsets of any mismatched regions (up to 20) and the read speed in MB/s. Verification can take as long as the write itself. It is skipped after file-copy writes because the drive is not byte-identical to the image.</p>
+
+    <h2 id="bad-block-scan">Bad-block scan</h2>
+    <p>Re-reads the drive looking for unreadable sectors. Failed reads are retried up to the configured number of times (1–10, default 3); sectors that never read back are reported at 4 KiB-aligned offsets. If mismatches or unreadable sectors are found, Flint offers to retry the write or abort.</p>
+
+    <h2 id="chunk-size-native-writer">Chunk size &amp; native writer</h2>
+    <p>Raw writes are buffered in chunks — 8 MiB by default, configurable from 4–64 MiB in Expert mode. The <b>native writer</b> uses Windows <code>CreateFile</code>/<code>WriteFile</code> with <code>FILE_FLAG_NO_BUFFERING</code> and sector-aligned buffers for the highest throughput. Build it with <code>python setup.py build_ext --inplace</code> (the CI workflow does this before packaging); when it is not built, writes automatically fall back to the pure-Python writer. Toggle it on in Expert mode to use it.</p>
+
+    <h2 id="signing-releases">How to sign releases</h2>
+    <p>The CI workflow (<code>.github/workflows/build-windows.yml</code>) builds <code>flint.exe</code>, computes its SHA-256 checksum (<code>certutil -hashfile dist\flint.exe SHA256</code>) and uploads both as workflow artifacts and release assets on every run. Code signing is optional: set the <code>WINDOWS_SIGNING_PFX</code> (base64-encoded PFX) and <code>WINDOWS_SIGNING_PASSWORD</code> repository secrets and CI imports the certificate, signs with <code>signtool sign /fd SHA256 /a</code> and removes it again. Without the secrets, the build logs a clear "signing skipped" warning and still publishes the unsigned EXE with its checksum. Download signed builds from the <a href="https://github.com/gowthvm/Flint/releases/latest">releases page</a>.</p>
+
+    <div class="warn"><b>Data loss warning.</b> Flint writes raw images directly to physical disks. Everything on the target drive is irreversibly erased — always confirm the target and back up important data first. A wrong drive letter or a hybrid image written with the wrong mode can destroy data with no recovery.</div>
+  </div>
 </div>
+</body>
+</html>

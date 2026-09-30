@@ -2,9 +2,9 @@ import json
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Any
 
+from core import writeback
 from core.paths import APP_DIR, file_lock
 
 logger = logging.getLogger("flint")
@@ -12,6 +12,10 @@ logger = logging.getLogger("flint")
 SETTINGS_PATH = APP_DIR / "settings.json"
 _LOCK_PATH = SETTINGS_PATH.with_suffix(".lock")
 _lock = threading.RLock()
+
+# C10: settings.json is versioned so future formats can be migrated
+# deterministically instead of relying only on per-key type checks.
+SETTINGS_SCHEMA_VERSION = 1
 
 _DEFAULTS: dict[str, Any] = {
     "theme": "dark",
@@ -35,6 +39,11 @@ _DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "auto_eject": False,
     "max_history_entries": 10_000,
+    # U21: fleet "skip already-flashed" toggle (UI reads/writes this key).
+    "fleet_skip_flashed": False,
+    # U09: recent image selections offered back in the drop zone.
+    "recent_images": [],
+    "schema_version": SETTINGS_SCHEMA_VERSION,
 }
 
 # Settings whose values must have a specific type. Corrupted or hand-edited
@@ -62,6 +71,9 @@ _TYPE_CHECK: dict[str, type] = {
     "log_level": str,
     "auto_eject": bool,
     "max_history_entries": int,
+    "fleet_skip_flashed": bool,
+    "recent_images": list,
+    "schema_version": int,
 }
 
 # Range / semantic validators.  Each callable receives the proposed value
@@ -74,11 +86,44 @@ _VALIDATORS: dict[str, Any] = {
 }
 
 
+# C10 migration dispatch: keyed by the schema version being migrated *from*
+# (0 = files written before settings.json was versioned).  Each step takes a
+# settings dict and returns the dict upgraded by one version.
+def _migrate_v0_to_v1(data: dict[str, Any]) -> dict[str, Any]:
+    """Pre-versioned settings: the defaults-merge already supplies every key
+    that v1 introduced, so no per-key rewriting is needed."""
+    return data
+
+
+_MIGRATIONS: dict[int, Any] = {0: _migrate_v0_to_v1}
+
+
+def _migrate(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring a stored settings dict up to ``SETTINGS_SCHEMA_VERSION``.
+
+    Missing or hand-corrupted versions are treated as 0 (pre-versioned).
+    A dict from a *newer* Flint skips the loop and is stamped with the
+    current version; its unknown keys survive the defaults-merge that
+    follows, so loading stays backward- and forward-tolerant.
+    """
+    raw = data.get("schema_version")
+    version = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+    while version < SETTINGS_SCHEMA_VERSION:
+        step = _MIGRATIONS.get(version)
+        if step is None:
+            break
+        data = step(data)
+        version += 1
+    data["schema_version"] = SETTINGS_SCHEMA_VERSION
+    return data
+
+
 def _load() -> dict[str, Any]:
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
+            data = _migrate(data)
             merged = dict(_DEFAULTS)
             merged.update(data)
             for key, typ in _TYPE_CHECK.items():
@@ -119,6 +164,10 @@ def set_many(**values: Any) -> None:
     Uses a threading lock for in-process safety and a file lock for
     inter-process (multi-instance) safety. Invalid values are rejected.
     Persistence failures are logged and swallowed.
+
+    The in-memory cache is updated synchronously; the durable write runs
+    on the caller's thread, or on the background write-back worker when
+    ``writeback`` is enabled (GUI only, U15).
     """
     with _lock:
         data = _ensure_loaded()
@@ -147,52 +196,37 @@ def set_many(**values: Any) -> None:
         data.update(clean)
         snapshot = dict(data)
     try:
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        with file_lock(_LOCK_PATH):
-            # Re-read from disk under file lock to merge with any
-            # changes written by another process since our last load.
-            disk_data = _load()
-            disk_data.update(snapshot)
-            with _lock:
-                global _CACHE
-                _CACHE = disk_data
-            tmp = SETTINGS_PATH.with_suffix(".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(disk_data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            tmp.replace(SETTINGS_PATH)
+        if writeback.enabled():
+            # U15: the cache above already reflects the new values, so
+            # callers see them immediately; only the fsync+replace runs
+            # off-thread (FIFO with every other queued save).
+            writeback.submit(lambda: _persist_snapshot(snapshot))
+        else:
+            _persist_snapshot(snapshot)
     except OSError:
         logger.exception("failed to persist settings")
 
 
-def export_settings(target_path: str | Path) -> bool:
-    """Export current settings to a JSON file atomically."""
-    try:
+def _persist_snapshot(snapshot: dict[str, Any]) -> None:
+    """Merge ``snapshot`` into the on-disk file (fsync + atomic replace).
+
+    Runs on the caller's thread (CLI, tests) or on the write-back worker
+    when ``writeback`` is enabled; ordering is FIFO either way.
+    """
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    with file_lock(_LOCK_PATH):
+        # Re-read from disk under file lock to merge with any
+        # changes written by another process since our last load.
+        disk_data = _load()
+        disk_data.update(snapshot)
+        # C10: every save stamps the current schema version.
+        disk_data["schema_version"] = SETTINGS_SCHEMA_VERSION
         with _lock:
-            data = _ensure_loaded()
-            snapshot = dict(data)
-        target = Path(target_path)
-        tmp = target.with_suffix(".tmp")
+            global _CACHE
+            _CACHE = disk_data
+        tmp = SETTINGS_PATH.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2)
+            json.dump(disk_data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        tmp.replace(target)
-        return True
-    except OSError:
-        return False
-
-
-def import_settings(source_path: str | Path) -> tuple[bool, int]:
-    """Import settings from a JSON file. Returns (ok, count_imported)."""
-    try:
-        with open(source_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return False, 0
-        valid = {k: v for k, v in data.items() if k in _DEFAULTS}
-        set_many(**valid)
-        return True, len(valid)
-    except (OSError, json.JSONDecodeError):
-        return False, 0
+        tmp.replace(SETTINGS_PATH)

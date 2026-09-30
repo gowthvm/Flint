@@ -256,7 +256,10 @@ Every feature is available headless (command-line only, no GUI) for imaging
 labs, scripts, and CI. In the examples below, `flint` is the CLI — whether
 from the downloaded `flint.exe` or the pip-installed launcher. Commands that
 need it relaunch elevated automatically (one UAC prompt); `list`, `doctor`,
-and `completions` need no privileges at all. The older `--cli` flag is still
+`report`, `completions`, `help`, and the read-only `deploy --status |
+--cancel | --retry` job sub-commands need no privileges at all —
+`deploy --run` performs a raw disk write, so it elevates exactly like
+`flash`. The older `--cli` flag is still
 accepted as a compatibility alias:
 
 ```text
@@ -349,7 +352,7 @@ The complete symptom guide lives in the
 
 - Windows 10/11 (64-bit) — Flint is Windows-native (uses pywin32, wmi, and
   raw disk access).
-- Python 3.10–3.13 (64-bit).
+- Python 3.10 or later (64-bit).
 - Git for Windows.
 - A C compiler (Visual Studio Build Tools or MSVC) to optionally build the
   native writer extension. Without it, Flint falls back to a pure-Python write
@@ -432,7 +435,6 @@ Flint/
 ├── tests/                # pytest suite (unit + pytest-qt)
 ├── scripts/
 │   └── sign.ps1          # Code-signing helper
-├── flint-web/            # Docs / marketing website (Vercel)
 ├── setup.py              # Builds the optional C extension only
 ├── pyproject.toml        # Build config, project metadata, ruff config
 ├── flint.spec            # PyInstaller spec
@@ -443,7 +445,7 @@ Flint/
 
 ## Contributing
 
-1. **Fork & branch** off `main`. Use a descriptive branch name
+1. **Fork & branch** off `master`. Use a descriptive branch name
    (`fix/drive-detection`, `feat/ntfs-label`).
 2. **Install all dependencies** (runtime + dev) and build the native extension
    as shown above.
@@ -456,7 +458,7 @@ Flint/
    python -m pytest -q
    ```
    All three must pass.
-5. **Open a PR** against `main`. CI runs the same gates on Windows with Python
+5. **Open a PR** against `master`. CI runs the same gates on Windows with Python
    3.11.
 
 **What to include in a PR:**
@@ -469,7 +471,8 @@ Flint/
 
 - Unpinned dependency bumps (pin versions and re-run the gates).
 - Secrets, keys, or signing credentials in code or commits.
-- Changes to `flint-web/` unless directly related to your feature.
+- Changes to the website (the separate sibling repo `..\flint-web`, branch
+  `main`) unless directly related to your feature.
 
 ## Support
 

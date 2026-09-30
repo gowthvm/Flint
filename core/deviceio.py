@@ -103,7 +103,7 @@ def kernel32() -> Any:
     return _K32
 
 
-def open_drive(path: str, *, write: bool, flags: int = 0) -> Any:
+def open_drive(path: str, *, write: bool, flags: int = 0, exclusive: bool = False) -> Any:
     """Open a raw disk (or volume) handle; raise OSError when it fails.
 
     Parameters
@@ -116,13 +116,18 @@ def open_drive(path: str, *, write: bool, flags: int = 0) -> Any:
         Additional ``CreateFileW`` flags.  Pass
         ``FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH`` for direct
         sector-aligned I/O.
+    exclusive:
+        Request full sharing denial (``dwShareMode = 0``).  Callers writing
+        to a drive with no mounted volumes (no letters to FSCTL-lock) must
+        pass ``exclusive=True`` so the open handle itself acts as the lock;
+        nothing else can open the device until the handle is closed.
     """
     k32 = kernel32()
     access = GENERIC_READ | (GENERIC_WRITE if write else 0)
     handle = k32.CreateFileW(
         path,
         access,
-        FILE_SHARE_READ,
+        0 if exclusive else FILE_SHARE_READ,
         None,
         OPEN_EXISTING,
         flags,

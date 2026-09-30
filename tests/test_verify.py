@@ -277,7 +277,7 @@ def test_verify_skips_bad_chunk_and_keeps_comparing_the_tail(tmp_path, monkeypat
 
 def test_verify_worker_run_never_dies_silently(qapp, monkeypatch):
     """H1 regression: an unexpected exception inside VerifyWorker.run must
-    be reported through finished() so the UI never stays locked."""
+    be reported through done() so the UI never stays locked."""
     results: list[tuple[bool, str]] = []
 
     def boom(drive_path, size, expected_sha256, progress=None, is_cancelled=None):
@@ -285,7 +285,7 @@ def test_verify_worker_run_never_dies_silently(qapp, monkeypatch):
 
     monkeypatch.setattr(verify, "hash_drive", boom)
     worker = verify.VerifyWorker(r"\\.\PHYSICALDRIVE9", "digest", 1000)
-    worker.finished.connect(lambda ok, msg: results.append((ok, msg)))
+    worker.done.connect(lambda ok, msg: results.append((ok, msg)))
 
     worker.run()
 

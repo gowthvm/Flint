@@ -2,6 +2,7 @@
 cancellation and error paths (no real hardware)."""
 
 import ctypes
+import itertools
 
 from core.clone import CloneWorker
 
@@ -90,7 +91,7 @@ def _run(worker: CloneWorker) -> dict[str, list]:
         "total_bytes",
         "eta_seconds",
         "phase",
-        "finished",
+        "done",
     ):
         events[name] = []
 
@@ -123,7 +124,7 @@ def test_clone_copies_source_to_target(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(True, "")]
+    assert events["done"] == [(True, "")]
     assert b"".join(fake.written) == payload
     assert events["written_bytes"][-1] == (len(payload),)
     assert events["total_bytes"][-1] == (len(payload),)
@@ -139,7 +140,7 @@ def test_clone_refuses_smaller_target_without_writing(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "target drive is smaller than the source")]
+    assert events["done"] == [(False, "target drive is smaller than the source")]
     assert fake.written == []
 
 
@@ -159,7 +160,7 @@ def test_clone_cancel_midway(monkeypatch):
     worker._read_chunk = cancel_then_read  # type: ignore[method-assign]
     events = _run(worker)
 
-    assert events["finished"] == [(False, "cancelled")]
+    assert events["done"] == [(False, "cancelled")]
     assert len(b"".join(fake.written)) < len(payload)
 
 
@@ -172,7 +173,7 @@ def test_clone_reports_source_read_failure(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, "simulated source read failure")]
+    assert events["done"] == [(False, "simulated source read failure")]
     assert 2001 in closed and 2002 in closed
 
 
@@ -189,7 +190,7 @@ def test_clone_reports_target_open_failure(monkeypatch):
 
     events = _run(worker)
 
-    assert events["finished"] == [(False, r"could not open \\.\PHYSICALDRIVE6 for write")]
+    assert events["done"] == [(False, r"could not open \\.\PHYSICALDRIVE6 for write")]
     assert 2001 in closed
 
 
@@ -210,6 +211,186 @@ def test_clone_reports_readback_mismatch(monkeypatch):
     worker._read_target_chunk = corrupt_readback  # type: ignore[method-assign]
     events = _run(worker)
 
-    assert events["finished"][0][0] is False
-    assert "clone verification failed at byte 0" in events["finished"][0][1]
+    assert events["done"][0][0] is False
+    assert "clone verification failed at byte 0" in events["done"][0][1]
     assert 2001 in closed and 2002 in closed
+
+
+def test_clone_opens_letterless_drives_exclusively(monkeypatch):
+    """B03: letterless source/target are opened with exclusive=True (the
+    handle itself is the lock); with letters the volume locks do it and the
+    handles stay shareable."""
+    import core.clone as clone_mod
+
+    calls: list[dict] = []
+
+    def fake_open(path, *, write, flags=0, exclusive=False):
+        calls.append({"path": path, "write": write, "exclusive": exclusive})
+        return ctypes.c_void_p(2001)
+
+    monkeypatch.setattr(clone_mod, "open_drive", fake_open)
+
+    letterless = CloneWorker(r"\\.\PHYSICALDRIVE5", r"\\.\PHYSICALDRIVE6")
+    letterless._open_source()
+    letterless._open_target()
+    assert calls[-2] == {
+        "path": r"\\.\PHYSICALDRIVE5",
+        "write": False,
+        "exclusive": True,
+    }
+    assert calls[-1] == {
+        "path": r"\\.\PHYSICALDRIVE6",
+        "write": True,
+        "exclusive": True,
+    }
+
+    lettered = CloneWorker(
+        r"\\.\PHYSICALDRIVE5",
+        r"\\.\PHYSICALDRIVE6",
+        source_letters=["F"],
+        target_letters=["G"],
+    )
+    lettered._open_source()
+    lettered._open_target()
+    assert calls[-2]["exclusive"] is False
+    assert calls[-1]["exclusive"] is False
+
+
+def test_clone_zero_fills_tail_and_verifies_full_target(monkeypatch):
+    """B08: a larger target has its tail zero-filled and the tail verified;
+    L17: progress never restarts (monotonic, nothing re-emitted in verify)."""
+    payload = bytes(range(256)) * 400  # 102 400 bytes
+    tail = 30 * 1024
+    fake = _FakeCopy(payload, target_size=len(payload) + tail)
+    worker = _make_worker(fake)
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["done"] == [(True, "")]
+    assert b"".join(fake.written) == payload + b"\x00" * tail
+    assert events["total_bytes"][-1] == (len(payload) + tail,)
+    assert events["written_bytes"][-1] == (len(payload) + tail,)
+
+    progress = [value for (value,) in events["progress"]]
+    assert progress[-1] == 100.0
+    assert all(
+        later >= earlier for earlier, later in itertools.pairwise(progress)
+    ), "progress must stay monotonic across clone/zero-fill/verify"
+    written = [value for (value,) in events["written_bytes"]]
+    assert all(
+        later >= earlier for earlier, later in itertools.pairwise(written)
+    )
+
+    phases = [value for (value,) in events["phase"]]
+    assert "Zero-filling" in phases
+    assert "Verifying clone" in phases
+
+    # L17: once verification starts, progress must not be emitted again.
+    order: list[tuple[str, object]] = []
+    worker2 = _make_worker(_FakeCopy(payload, target_size=len(payload) + tail))
+    _patch_kernel(monkeypatch)
+    for name in ("progress", "phase"):
+        getattr(worker2, name).connect(
+            lambda *args, _n=name: order.append((_n, args))
+        )
+    worker2.run()
+    verify_at = next(
+        i for i, (kind, args) in enumerate(order)
+        if kind == "phase" and args and args[0] == "Verifying clone"
+    )
+    assert not any(kind == "progress" for kind, _ in order[verify_at:])
+
+
+def test_clone_zero_tail_can_be_disabled(monkeypatch):
+    """zero_tail=False keeps the old contract: only source_size bytes are
+    written and only that range is verified."""
+    payload = b"\x42" * (64 * 1024)
+    fake = _FakeCopy(payload, target_size=len(payload) + 16 * 1024)
+
+    def make():
+        worker = _make_worker(fake)
+        worker.zero_tail = False
+        return worker
+
+    worker = make()
+    _patch_kernel(monkeypatch)
+
+    events = _run(worker)
+
+    assert events["done"] == [(True, "")]
+    assert b"".join(fake.written) == payload
+    assert events["total_bytes"][-1] == (len(payload),)
+
+
+def test_clone_verification_detects_stale_tail_bytes(monkeypatch):
+    """B08: if the tail is not all zeros the full-target verification fails
+    at the offending byte."""
+    payload = bytes(range(256)) * 100  # 25 600 bytes, contains no all-zero chunk
+    tail = 8 * 1024
+    fake = _FakeCopy(payload, target_size=len(payload) + tail)
+    worker = _make_worker(fake)
+    _patch_kernel(monkeypatch)
+
+    original_write = fake._write_chunk
+    written = bytearray()
+
+    def dirty_tail(handle, data: bytes) -> None:
+        written.extend(data)
+        if len(written) > len(payload):
+            buf = bytearray(data)
+            buf[0] = 0x5A
+            original_write(handle, bytes(buf))
+        else:
+            original_write(handle, data)
+
+    worker._write_chunk = dirty_tail  # type: ignore[method-assign]
+    events = _run(worker)
+
+    assert events["done"][0][0] is False
+    assert (
+        f"clone verification failed at byte {len(payload):,}"
+        in events["done"][0][1]
+    )
+
+
+def test_clone_cancel_during_zero_fill(monkeypatch):
+    """Cancellation between the copy and the tail is honored: no flush, no
+    verify, one "cancelled" result."""
+    payload = b"\x11" * (100 * 1024)
+    fake = _FakeCopy(payload, target_size=len(payload) + 32 * 1024)
+    worker = _make_worker(fake)
+    _patch_kernel(monkeypatch)
+
+    original_write = worker._write_chunk
+    written = bytearray()
+
+    def cancel_on_tail(handle, data: bytes) -> None:
+        if len(written) >= len(payload):
+            worker.cancel()
+            return
+        written.extend(data)
+        return original_write(handle, data)
+
+    worker._write_chunk = cancel_on_tail  # type: ignore[method-assign]
+    events = _run(worker)
+
+    assert events["done"] == [(False, "cancelled")]
+    assert len(written) == len(payload)
+
+
+def test_clone_emits_finished_once_when_unlock_raises(monkeypatch):
+    """L04: run()'s outer except must not re-emit after _run_inner already
+    reported success."""
+    payload = b"\x33" * (16 * 1024)
+    fake = _FakeCopy(payload)
+    worker = _make_worker(fake)
+    _patch_kernel(monkeypatch)
+
+    def angry_unlock(held) -> None:
+        raise OSError("volume unlock failed")
+
+    worker._unlock_volumes = angry_unlock  # type: ignore[method-assign]
+    events = _run(worker)
+
+    assert events["done"] == [(True, "")]

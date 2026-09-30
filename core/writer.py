@@ -18,6 +18,7 @@ from core.deviceio import (
     ES_SYSTEM_REQUIRED,
     FILE_FLAG_NO_BUFFERING,
     FILE_FLAG_WRITE_THROUGH,
+    _Cancelled,
     drive_size,
     flush,
     kernel32,
@@ -31,6 +32,12 @@ from core.deviceio import (
 logger = logging.getLogger("flint")
 
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+
+# Manifest checkpoint cadence: one durable save per 10 MiB of source bytes.
+CHECKPOINT_INTERVAL = 10 * 1024 * 1024
+
+# ``open_drive`` reports failures as "(error <winerror>)" in the message.
+_SHARING_VIOLATION = "(error 32)"
 
 
 class _NativeCancel(Exception):
@@ -110,7 +117,7 @@ class UsbWriter(QThread):
     mode = pyqtSignal(str)
     note = pyqtSignal(str)
     verify_result = pyqtSignal(bool, str, dict)
-    finished = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str)
 
     SPEED_WINDOW = 5
     _SECTOR_SIZE = 4096
@@ -176,7 +183,29 @@ class UsbWriter(QThread):
         )
 
     def _open_drive(self) -> int:
-        return int(open_drive(self.drive_path, write=True, flags=FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH))
+        # B03: with no mounted letters there are no volumes to FSCTL-lock, so
+        # the open handle itself must be the lock (dwShareMode = 0).  When
+        # letters exist the volume locks taken by run() do the locking and the
+        # handle stays shareable, exactly as before.
+        exclusive = not self.letters
+        try:
+            return int(
+                open_drive(
+                    self.drive_path,
+                    write=True,
+                    flags=FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                    exclusive=exclusive,
+                )
+            )
+        except OSError as exc:
+            if _SHARING_VIOLATION in str(exc):
+                raise OSError(
+                    f"could not open {self.drive_path}: the drive is in use "
+                    "by another program (sharing violation). Close any "
+                    "windows or tools using it (Explorer, disk utilities, "
+                    "antivirus) and try again."
+                ) from exc
+            raise
 
     def _drive_size(self, handle: int) -> int:
         return drive_size(handle)
@@ -221,7 +250,7 @@ class UsbWriter(QThread):
                     self._verify_after_write(skip_source_iso=True)
                 if self._finished:
                     return
-                self.finished.emit(True, "")
+                self.done.emit(True, "")
                 return
             self.phase.emit("Locking drive")
             volumes = self._lock_volumes()
@@ -236,63 +265,148 @@ class UsbWriter(QThread):
                     self._verify_after_write()
                 if self._finished:
                     return
-                self.finished.emit(True, "")
+                self.done.emit(True, "")
             finally:
                 self._unlock_volumes(volumes)
         except Exception as exc:
             logger.exception("UsbWriter.run failed")
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
     def _run_filecopy(self) -> None:
         """Repartition the drive, format it, then copy ISO contents."""
-        if self._cancel_requested():
-            self._finish_cancelled()
-            return
-        self.phase.emit("Preparing partition")
-        letter = diskpart.prepare_partition(
-            diskpart.drive_number_from_path(self.drive_path),
-            self.partition_scheme,
-            self.filesystem,
-        )
-        self.progress.emit(10.0)
-        if self._cancel_requested():
-            self._finish_cancelled()
-            return
-        if self.windows_to_go:
-            self.phase.emit("Applying Windows image")
-            diskpart.apply_windows_image(self.iso_path, letter)
-        else:
-            self.phase.emit("Copying files")
-            diskpart.copy_iso_files(self.iso_path, letter)
-        if self._cancel_requested():
-            self._finish_cancelled()
-            return
-        if self.persistence and not self.windows_to_go:
-            self.phase.emit("Creating persistence")
-            paths = iso_mod.list_iso_paths(self.iso_path)
-            ok, message = persistence.create_persistence(
-                f"{letter}:\\", self.persistence_size_mb, paths
+        # L10: a fleet manifest may already exist when the write mode later
+        # resolves to filecopy; load it (best effort) so success removes it
+        # and every failure path records a resumable error instead of leaving
+        # it stuck in "writing".
+        manifest = self._load_filecopy_manifest()
+        try:
+            if self._cancel_requested():
+                self._finish_cancelled(manifest)
+                return
+            self.phase.emit("Preparing partition")
+            letter = diskpart.prepare_partition(
+                diskpart.drive_number_from_path(self.drive_path),
+                self.partition_scheme,
+                self.filesystem,
             )
-            if ok:
-                logger.info("persistence: %s", message)
+            self.progress.emit(10.0)
+            if self._cancel_requested():
+                self._finish_cancelled(manifest)
+                return
+            if self.windows_to_go:
+                self.phase.emit("Applying Windows image")
+                diskpart.apply_windows_image(
+                    self.iso_path,
+                    letter,
+                    is_cancelled=self._cancel_requested,
+                )
             else:
-                logger.warning("persistence partial: %s", message)
-            self.note.emit(message)
-        if self.bypass_tpm:
-            self.phase.emit("Patching TPM bypass")
-            from core.tpm_bypass import patch_boot_wim_on_usb
+                self.phase.emit("Copying files")
+                diskpart.copy_iso_files(
+                    self.iso_path,
+                    letter,
+                    is_cancelled=self._cancel_requested,
+                )
+            if self._cancel_requested():
+                self._finish_cancelled(manifest)
+                return
+            if self.persistence and not self.windows_to_go:
+                self.phase.emit("Creating persistence")
+                paths = iso_mod.list_iso_paths(self.iso_path)
+                ok, message = persistence.create_persistence(
+                    f"{letter}:\\", self.persistence_size_mb, paths
+                )
+                self.note.emit(message)
+                if not ok:
+                    # L12: an unformatted casper-rw is not a usable flash —
+                    # the job must fail instead of reporting success.
+                    self._fail_filecopy(
+                        manifest, f"persistence setup failed: {message}"
+                    )
+                    return
+                logger.info("persistence: %s", message)
+            if self._cancel_requested():
+                self._finish_cancelled(manifest)
+                return
+            if self.bypass_tpm:
+                self.phase.emit("Patching TPM bypass")
+                from core.tpm_bypass import patch_boot_wim_on_usb
 
-            patch_boot_wim_on_usb(letter)
-            self.note.emit(
-                "TPM / Secure Boot / RAM checks bypassed in boot.wim"
+                patch_boot_wim_on_usb(letter)
+                self.note.emit(
+                    "TPM / Secure Boot / RAM checks bypassed in boot.wim"
+                )
+            if self._cancel_requested():
+                self._finish_cancelled(manifest)
+                return
+            self._discard_filecopy_manifest()
+            self.progress.emit(100.0)
+        except _Cancelled:
+            # L22: cancel arrived while robocopy/dism was running — the
+            # child tool was killed; report "cancelled", not a tool error.
+            logger.info("file copy cancelled; child tool killed")
+            self._finish_cancelled(manifest)
+        except Exception as exc:
+            # A tool failure (diskpart/robocopy/dism) must persist the
+            # manifest before run() reports it; run() emits the single
+            # done(False, ...) for the raised exception.
+            self._save_filecopy_manifest(
+                manifest, str(exc) or "file copy failed"
             )
-        self.progress.emit(100.0)
+            raise
 
-    def _finish_cancelled(self) -> None:
+    def _load_filecopy_manifest(self) -> jobs.JobManifest | None:
+        """Best-effort load of a pre-existing manifest; corrupt files are
+        ignored (their cleanup belongs to the jobs pruner)."""
+        if not self.manifest_path or not os.path.isfile(self.manifest_path):
+            return None
+        try:
+            return jobs.load_manifest(self.manifest_path)
+        except Exception:
+            logger.warning(
+                "UsbWriter: ignoring unreadable manifest %s",
+                self.manifest_path,
+                exc_info=True,
+            )
+            return None
+
+    def _save_filecopy_manifest(
+        self, manifest: jobs.JobManifest | None, error: str
+    ) -> None:
+        if manifest is None:
+            return
+        manifest.state = "resumable"
+        manifest.error = error
+        try:
+            jobs.save_manifest(self.manifest_path, manifest)
+        except OSError:
+            logger.exception(
+                "UsbWriter: failed to save resumable file-copy manifest"
+            )
+
+    def _discard_filecopy_manifest(self) -> None:
+        """Remove the manifest once the file copy fully succeeded (mirrors
+        the raw/DD path, which deletes it after the final checkpoint)."""
+        if not self.manifest_path:
+            return
+        try:
+            os.unlink(self.manifest_path)
+        except OSError:
+            pass
+
+    def _fail_filecopy(self, manifest: jobs.JobManifest | None, message: str) -> None:
+        self._save_filecopy_manifest(manifest, message)
         self._finished = True
-        self.finished.emit(False, "cancelled")
+        self.done.emit(False, message)
+
+    def _finish_cancelled(
+        self, manifest: jobs.JobManifest | None = None
+    ) -> None:
+        self._save_filecopy_manifest(manifest, "write cancelled")
+        self._finished = True
+        self.done.emit(False, "cancelled")
 
     def _run_inner(self) -> None:
         handle = None
@@ -304,14 +418,14 @@ class UsbWriter(QThread):
             target_capacity = self._drive_size(handle)
             if target_capacity < total:
                 self._finished = True
-                self.finished.emit(
+                self.done.emit(
                     False, "drive is too small for this image"
                 )
                 return
         except Exception as exc:
             logger.exception("UsbWriter._run_inner: setup failed")
             self._finished = True
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
             return
         finally:
             if handle is not None and self._finished:
@@ -328,13 +442,14 @@ class UsbWriter(QThread):
         if self.use_native and not self.resume:
             native_mod = _load_native_writer()
             if native_mod is not None:
-                try:
-                    self._run_native(native_mod, total)
-                finally:
-                    # The extension opens its own handles; this Python-side
-                    # drive handle must still be released (it is only closed
-                    # by the Python-path finally below).
-                    kernel32().CloseHandle(handle)
+                # L01: the extension reopens the device with dwShareMode = 0,
+                # so this Python-side pre-flight handle (FILE_SHARE_READ) must
+                # be released FIRST or the native open fails with
+                # ERROR_SHARING_VIOLATION (32).  handle = None also keeps the
+                # later finally blocks from double-closing it.
+                kernel32().CloseHandle(handle)
+                handle = None
+                self._run_native(native_mod, total)
                 return
 
         source_written = 0
@@ -353,6 +468,22 @@ class UsbWriter(QThread):
                     }
                     if os.path.isfile(self.manifest_path):
                         manifest = jobs.load_manifest(self.manifest_path)
+                        if (
+                            manifest.checkpoint_bytes == 0
+                            and manifest.target_size != target_capacity
+                        ):
+                            # The detector reports capacity rounded to whole
+                            # GB (size_gb) or as a volume size rather than the
+                            # raw disk; with nothing written yet the exact
+                            # IOCTL capacity is authoritative. Identity checks
+                            # (source, fingerprint, options) still run below.
+                            logger.info(
+                                "UsbWriter: adopting exact drive size %d "
+                                "(manifest recorded %d)",
+                                target_capacity,
+                                manifest.target_size,
+                            )
+                            manifest.target_size = target_capacity
                         manifest.validate_resume(
                             source_path=self.iso_path,
                             source_size=total,
@@ -378,13 +509,22 @@ class UsbWriter(QThread):
                         aligned = saved - (saved % self._SECTOR_SIZE)
                         if aligned <= 0:
                             aligned = saved
+                        # L02: drive and source must seek to the SAME offset,
+                        # otherwise an unaligned checkpoint silently shifts
+                        # the rest of the image.
                         self._seek_drive(handle, aligned)
-                        source.seek(saved)
-                        source_written = saved
-                        self.note.emit(f"Resuming from byte {saved:,}")
+                        source.seek(aligned)
+                        source_written = aligned
+                        self.note.emit(f"Resuming from byte {aligned:,}")
                     elif saved == total:
                         raise ValueError("cannot resume: job is already complete")
 
+                # L03: gate checkpoints on an explicit threshold — one
+                # durable save per CHECKPOINT_INTERVAL of source bytes —
+                # instead of the fuzzy `source_written % interval <
+                # chunk_size` modulo, which fired whenever the residue
+                # landed inside one chunk (~80% of chunks at 8 MiB default).
+                next_checkpoint = source_written + CHECKPOINT_INTERVAL
                 while chunk := source.read(self.chunk_size):
                     if self._cancel_requested():
                         break
@@ -399,11 +539,11 @@ class UsbWriter(QThread):
                     durations.append(time.perf_counter() - chunk_start)
                     sizes.append(len(chunk))
                     source_written += source_chunk_len
-                    if manifest is not None and (
-                        source_written % (10 * 1024 * 1024) < self.chunk_size
-                    ):
+                    if manifest is not None and source_written >= next_checkpoint:
                         manifest.checkpoint_bytes = source_written
                         jobs.save_manifest(self.manifest_path, manifest)
+                        while next_checkpoint <= source_written:
+                            next_checkpoint += CHECKPOINT_INTERVAL
 
                     window_bytes = sum(sizes)
                     window_time = sum(durations)
@@ -434,9 +574,25 @@ class UsbWriter(QThread):
                 manifest.state = "resumable"
                 manifest.error = "write cancelled"
                 jobs.save_manifest(self.manifest_path, manifest)
-        except OSError as exc:
-            logger.exception("UsbWriter._run_inner: IO error")
-            if manifest is not None:
+        except _Cancelled:
+            # B06: cancel fired inside write_bytes_retry's retry loop; the
+            # bare _Cancelled is neither OSError nor ValueError, so it needs an
+            # explicit handler (run()'s catch-all would otherwise report an
+            # empty failure and leave the manifest stuck at state="writing").
+            logger.info("UsbWriter._run_inner: write cancelled mid-retry")
+            if manifest is not None and manifest.state != "written":
+                manifest.state = "resumable"
+                manifest.error = "write cancelled"
+                try:
+                    jobs.save_manifest(self.manifest_path, manifest)
+                except OSError:
+                    logger.exception("failed to save cancelled job manifest")
+            self._finished = True
+            self.done.emit(False, "cancelled")
+            return
+        except (OSError, ValueError) as exc:
+            logger.exception("UsbWriter._run_inner: write failed")
+            if manifest is not None and manifest.state != "written":
                 manifest.state = "resumable"
                 manifest.error = str(exc)
                 try:
@@ -444,7 +600,7 @@ class UsbWriter(QThread):
                 except OSError:
                     logger.exception("failed to save resumable job manifest")
             self._finished = True
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
             return
         finally:
             if handle is not None:
@@ -452,7 +608,7 @@ class UsbWriter(QThread):
 
         if self._cancel_requested():
             self._finished = True
-            self.finished.emit(False, "cancelled")
+            self.done.emit(False, "cancelled")
             return
 
     def _run_native(self, native_mod: Any, total: int) -> None:
@@ -500,12 +656,12 @@ class UsbWriter(QThread):
             )
         except _NativeCancel:
             self._finished = True
-            self.finished.emit(False, "cancelled")
+            self.done.emit(False, "cancelled")
             return
         except OSError as exc:
             logger.exception("UsbWriter._run_native: IO error")
             self._finished = True
-            self.finished.emit(False, str(exc))
+            self.done.emit(False, str(exc))
             return
         self.written_bytes.emit(written)
         self.progress.emit(100.0)
@@ -557,16 +713,16 @@ class UsbWriter(QThread):
             # a false success and does not write a "verified" history entry.
             self._finished = True
             self.verify_result.emit(False, "cancelled", result)
-            self.finished.emit(False, "cancelled")
+            self.done.emit(False, "cancelled")
             return
         message = self._verify_message(result)
         self.verify_result.emit(result["ok"], message, result)
         if not result["ok"]:
             # A failed verification is a failed flash. Consumers that only
-            # listen to ``finished`` must never see a (True, "") success
+            # listen to ``done`` must never see a (True, "") success
             # after the write-back check reported problems.
             self._finished = True
-            self.finished.emit(False, message)
+            self.done.emit(False, message)
 
     def _verify_message(self, result: dict[str, Any]) -> str:
         mismatches = len(result["mismatches"])

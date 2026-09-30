@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Flint pre-commit hook — fast gate (lint + types). The full pytest suite
+# stays a manual/CI gate (~4½ min); run it per commits.md §2 before pushing.
+# Activate once per clone (documented in commits.md §9):
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+echo "[pre-commit] ruff..."
+ruff check .
+
+echo "[pre-commit] mypy..."
+mypy core ui main.py --ignore-missing-imports
+
+echo "[pre-commit] OK (run 'python -m pytest -q' before pushing)"

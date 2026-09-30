@@ -2,8 +2,11 @@
 
 import logging
 import os
+import sys
 
-from core.log import setup_logging
+import pytest
+
+from core.log import apply_log_level, setup_cli_logging, setup_logging
 
 
 def test_setup_logging_returns_logger(tmp_path, monkeypatch):
@@ -32,3 +35,78 @@ def test_setup_logging_level(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "environ", {**os.environ, "APPDATA": str(tmp_path)})
     logger = setup_logging("flint_test_level", "WARNING")
     assert logger.level == logging.WARNING
+
+
+def _fresh_cli_logger(name: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+    return logger
+
+
+def test_setup_cli_logging_idempotent_and_suppresses_last_resort(monkeypatch):
+    """L21: one stderr handler at WARNING, lastResort disabled, safe to
+    call twice."""
+    monkeypatch.setattr(logging, "lastResort", logging.lastResort)
+    name = "flint_cli_test_idempotent"
+    logger = _fresh_cli_logger(name)
+
+    first = setup_cli_logging(name)
+    second = setup_cli_logging(name)
+
+    assert first is second
+    cli_handlers = [
+        h
+        for h in logger.handlers
+        if getattr(h, "_flint_cli_handler", False)
+    ]
+    assert len(cli_handlers) == 1, "handler must not be duplicated"
+    handler = cli_handlers[0]
+    assert handler.level == logging.WARNING
+    assert isinstance(handler, logging.StreamHandler)
+    assert handler.stream is sys.stderr
+    assert logging.lastResort is None
+
+
+def test_setup_cli_logging_only_passes_warnings_and_above(
+    monkeypatch, capsys
+):
+    """The stderr handler sits at WARNING so INFO noise never reaches the
+    console next to stdout data."""
+    name = "flint_cli_test_levels"
+    logger = _fresh_cli_logger(name)
+    setup_cli_logging(name)
+
+    logger.info("quiet info")
+    logger.warning("loud warning")
+
+    captured = capsys.readouterr()
+    assert "quiet info" not in captured.err
+    assert "loud warning" in captured.err
+
+
+def test_apply_log_level_sets_logger_level():
+    name = "flint_level_test"
+    try:
+        assert apply_log_level("debug", name=name) == "DEBUG"
+        assert logging.getLogger(name).level == logging.DEBUG
+        assert apply_log_level("  warning ", name=name) == "WARNING"
+        assert logging.getLogger(name).level == logging.WARNING
+    finally:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+
+
+def test_apply_log_level_default_target_is_flint_logger():
+    previous = logging.getLogger("flint").level
+    try:
+        assert apply_log_level("info") == "INFO"
+        assert logging.getLogger("flint").level == logging.INFO
+    finally:
+        logging.getLogger("flint").setLevel(previous)
+
+
+def test_apply_log_level_rejects_unknown_names():
+    with pytest.raises(ValueError, match="unknown log level"):
+        apply_log_level("LOUDER", name="flint_level_test")
+    with pytest.raises(ValueError, match="unknown log level"):
+        apply_log_level("", name="flint_level_test")

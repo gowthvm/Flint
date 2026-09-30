@@ -155,10 +155,12 @@ def test_writer_wtg_dispatches_to_dism(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(
         diskpart,
         "apply_windows_image",
-        lambda iso_path, letter: applied.append((iso_path, letter)),
+        lambda iso_path, letter, **_kw: applied.append((iso_path, letter)),
     )
     monkeypatch.setattr(
-        diskpart, "copy_iso_files", lambda iso_path, letter: copied.append(letter)
+        diskpart,
+        "copy_iso_files",
+        lambda iso_path, letter, **_kw: copied.append(letter),
     )
 
     path = tmp_path / "windows.iso"
@@ -171,7 +173,7 @@ def test_writer_wtg_dispatches_to_dism(qapp, monkeypatch, tmp_path):
         filesystem="ntfs",
     )
     finished = []
-    writer.finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    writer.done.connect(lambda ok, msg: finished.append((ok, msg)))
     writer.run()
 
     assert finished == [(True, "")]
