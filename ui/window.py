@@ -322,6 +322,12 @@ class MainWindow(QMainWindow):
             # W7: the wipe split-button was never part of _controls, so it
             # stayed clickable while an operation was running.
             self._wipe_menu_btn,
+            # The three drive-picker triggers: they only guard in code, so
+            # without this they stayed fully live mid-write and a click on
+            # "Change drive" did nothing at all.
+            self._chip,
+            self._target_card,
+            self._target_change,
             # U01: fleet Stop stays out of _controls so it survives
             # _set_controls_enabled(False) during a write.
         ]
@@ -370,10 +376,24 @@ class MainWindow(QMainWindow):
         # selections, but the zone's own in-flight hash never does - it is
         # cancelled by clear/load themselves.
         self._iso_zone.set_guards(
-            clear=lambda: self._op_busy(), browse=lambda: self._op_busy()
+            clear=lambda: self._op_busy(),
+            browse=lambda: self._op_busy(),
+            notice=self._refuse_busy,
         )
         self._verify_zone.set_guards(
-            clear=lambda: self._op_busy(), browse=lambda: self._op_busy()
+            clear=lambda: self._op_busy(),
+            browse=lambda: self._op_busy(),
+            notice=self._refuse_busy,
+        )
+        # F11: the Verify page never subscribed to its own inputs, so
+        # _verify_ready() kept whatever it computed at launch - selecting
+        # an image, finishing its hash or pasting a digest left "Run
+        # verification" at the wrong enablement until some unrelated
+        # event happened to call _update_controls_state().
+        self._verify_zone.iso_selected.connect(self._on_verify_source_changed)
+        self._verify_zone.hash_done.connect(self._on_verify_source_changed)
+        self._verify_sha_input.textChanged.connect(
+            self._on_verify_source_changed
         )
         QShortcut(QKeySequence("F5"), self).activated.connect(
             self._request_scan
@@ -588,6 +608,16 @@ class MainWindow(QMainWindow):
         """
         return self._op_busy() or self._zone_busy()
 
+    def _refuse_busy(self) -> None:
+        """Standard refusal notice for a busy-blocked action.
+
+        Qt ApplicationShortcuts, the keyboard-reachable menu entries and
+        the drop zones' click handlers all bypass the disabled-button
+        state, so every one of those guards reports through here instead
+        of returning silently.
+        """
+        self._progress.set_warning(_MSG_BUSY)
+
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
@@ -679,6 +709,7 @@ class MainWindow(QMainWindow):
 
     def _show_drive_picker(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         menu = QMenu(self)
         if not self._drives:
@@ -793,7 +824,7 @@ class MainWindow(QMainWindow):
         self._fake_worker = None
         self._retire(worker)
         if suspicious:
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="error",
                 title="Possible counterfeit drive",
@@ -806,7 +837,7 @@ class MainWindow(QMainWindow):
                 buttons=[("Close", "primary", "close")],
             )
             return
-        dialogs.completion(
+        self._completion(
             self,
             kind="success",
             title="Capacity probe passed",
@@ -1028,8 +1059,15 @@ class MainWindow(QMainWindow):
         lines = [identity]
         if iso_path:
             iso_name = os.path.basename(iso_path)
-            iso_size = DriveDetector.format_size(os.path.getsize(iso_path))
-            lines.append(f"Image: {iso_name} ({iso_size})")
+            # The source can be unlinked (temp extraction cleaned up,
+            # archive removed) between selection and this confirmation;
+            # the dialog must still open, just without the size.
+            try:
+                iso_size = DriveDetector.format_size(os.path.getsize(iso_path))
+            except OSError:
+                lines.append(f"Image: {iso_name}")
+            else:
+                lines.append(f"Image: {iso_name} ({iso_size})")
         content = self._drive_content_summary(drive)
         if content:
             lines.append(content)
@@ -1149,6 +1187,7 @@ class MainWindow(QMainWindow):
 
     def _request_scan(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         self._poller.request_scan()
 
@@ -1311,7 +1350,7 @@ class MainWindow(QMainWindow):
         # U10: the menu is navigation, not a resumable side path — it used
         # to stay fully live mid-write while the drive picker blocked.
         if self._busy():
-            self._progress.set_warning(_MSG_BUSY)
+            self._refuse_busy()
             return
         self._build_dots_menu().exec(QCursor.pos())
 
@@ -1807,7 +1846,18 @@ class MainWindow(QMainWindow):
                 return
             expected, size = pasted, None
         elif iso and digest:
-            expected, size = digest, os.path.getsize(iso)
+            expected = digest
+            try:
+                size = os.path.getsize(iso)
+            except OSError:
+                # F12: the image vanished after it was hashed - report it
+                # the way every other verify refusal is reported instead of
+                # letting the OSError escape the slot.
+                self._verify_progress.set_error(
+                    "The selected image is no longer available - re-select it"
+                )
+                self._scroll_to_verify_progress()
+                return
         else:
             self._verify_progress.set_error(
                 "Select an image \u2014 or paste a SHA-256 \u2014 first"
@@ -1866,7 +1916,7 @@ class MainWindow(QMainWindow):
             self._verify_hash_value.setText(message)
             self._verify_hash_copy.setEnabled(True)
             self._verify_hash_frame.setVisible(True)
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="success",
                 title="Verification passed",
@@ -1876,7 +1926,7 @@ class MainWindow(QMainWindow):
         elif message == "cancelled":
             self._verify_progress.set_error("Verification cancelled")
             self._verify_hash_frame.setVisible(False)
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="warning",
                 title="Verification cancelled",
@@ -1888,7 +1938,7 @@ class MainWindow(QMainWindow):
                 self._friendly_error(message or "Verification failed")
             )
             self._verify_hash_frame.setVisible(False)
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="error",
                 title="Verification failed",
@@ -1930,10 +1980,6 @@ class MainWindow(QMainWindow):
         self._pages.setCurrentIndex(page)
         self._bottombar.setVisible(page == 0)
         self._fixed_strip.setVisible(page == 0)
-
-    def _set_active_nav(self, index: int) -> None:
-        for i, item in enumerate(self._nav_items):
-            item.set_active(i == index)
 
     def _reload_history(self) -> None:
         self._history_list.clear()
@@ -2265,6 +2311,24 @@ class MainWindow(QMainWindow):
         blocks the application exit, so those dialogs are dropped instead.
         """
         return self._shutdown_done
+
+    def _completion(self, *args: Any, **kwargs: Any) -> str | None:
+        """Every outcome popup goes through here (W8).
+
+        ``_shutdown`` pumps the event loop while it joins the workers, so
+        a worker can still finish and reach ``_finish_flash`` /
+        ``_on_wipe_finished`` from inside that pump. The modal dialog they
+        would open runs its own event loop and blocks the very exit the
+        user just asked for, so once shutdown has started the dialog is
+        dropped and the handler carries on with its state cleanup.
+        """
+        if self._dialogs_suppressed():
+            logger.info(
+                "dropping completion dialog during shutdown: %s",
+                kwargs.get("title", ""),
+            )
+            return None
+        return dialogs.completion(*args, **kwargs)
 
     def _shutdown(self) -> None:
         if self._shutdown_done:
@@ -3347,9 +3411,6 @@ class MainWindow(QMainWindow):
                 self._help_bubble = None
         super().hideEvent(event)
 
-    def _build_iso_zone(self) -> QFrame:
-        return IsoDropZone()
-
     def _current_drive_path(self) -> str | None:
         return self._drive_path_for(self._current_drive)
 
@@ -3480,6 +3541,15 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _on_verify_source_changed(self, *_args: Any) -> None:
+        """Re-evaluate the Verify page whenever its inputs change.
+
+        Serves ``iso_selected(str)``, ``hash_done(str, bool, str)`` and
+        ``QLineEdit.textChanged(str)`` alike - the payload is irrelevant,
+        only "something the start button depends on just moved" matters.
+        """
+        self._update_controls_state()
+
     def _on_cancel_clicked(self) -> bool:
         """Abort the in-flight operation(s)f
 
@@ -3542,6 +3612,7 @@ class MainWindow(QMainWindow):
 
     def _on_flash_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         if self._refuse_if_system_disk(self._current_drive):
             return
@@ -3863,6 +3934,12 @@ class MainWindow(QMainWindow):
             writer_kwargs,
             drive,
         )
+        # W4: remember what is actually being written. Queue/fleet items
+        # never pass through the drop zone, and the zone can be cleared or
+        # re-pointed while a write runs, so the report, the history entry
+        # and the boot probe must not read it back.
+        self._active_write_image = iso
+        self._active_write_drive = drive
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Writing\u2026")
 
@@ -4139,9 +4216,16 @@ class MainWindow(QMainWindow):
         self._verify_hint.setVisible(True)
         if self._tray is not None:
             self._tray.setToolTip("Flint \u2014 Verifying\u2026")
-        verifier = VerifyWorker(
-            drive_path, digest, os.path.getsize(iso)
-        )
+        try:
+            iso_size = os.path.getsize(iso)
+        except OSError:
+            self._finish_flash(
+                False,
+                "Verification couldn't start: the image is no longer there",
+                None,
+            )
+            return
+        verifier = VerifyWorker(drive_path, digest, iso_size)
         self._verifier = verifier
         verifier.progress.connect(self._on_verify_progress)
         verifier.stats.connect(self._on_verify_stats)
@@ -4187,6 +4271,7 @@ class MainWindow(QMainWindow):
 
     def _on_wipe_clicked(self, method: str = "zero") -> None:
         if self._busy():
+            self._refuse_busy()
             return
         if self._refuse_if_system_disk(self._current_drive):
             return
@@ -4325,7 +4410,7 @@ class MainWindow(QMainWindow):
             )
             append_audited_history(report)
         # Copy-report must offer the wipe report (not a previous flash's).
-        self._last_report = report
+        self._set_last_report(report)
         if self._tray is not None:
             self._tray.setToolTip(
                 "Flint \u2014 Wipe done" if ok else "Flint"
@@ -4338,7 +4423,7 @@ class MainWindow(QMainWindow):
                 "ones, random).",
             }
             method = getattr(self, "_wipe_method", "zero")
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="success",
                 title="Drive wiped",
@@ -4352,7 +4437,7 @@ class MainWindow(QMainWindow):
                 buttons=[("Close", "primary", "close")],
             )
         elif message == "cancelled":
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="warning",
                 title="Wipe cancelled",
@@ -4363,7 +4448,7 @@ class MainWindow(QMainWindow):
                 buttons=[("Close", "primary", "close")],
             )
         else:
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="error",
                 title="Wipe failed",
@@ -4424,6 +4509,7 @@ class MainWindow(QMainWindow):
 
     def _on_queue_add_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -4453,6 +4539,7 @@ class MainWindow(QMainWindow):
 
     def _on_queue_remove_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         for item in self._queue_list.selectedItems():
             self._queue_list.takeItem(self._queue_list.row(item))
@@ -4461,6 +4548,7 @@ class MainWindow(QMainWindow):
 
     def _on_queue_clear_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         self._queue_list.clear()
         self._update_queue_badge()
@@ -4602,7 +4690,7 @@ class MainWindow(QMainWindow):
             )
             return
         downloadable = asset.get("browser_download_url") or ""
-        result = dialogs.completion(
+        result = self._completion(
             self,
             kind="warning",
             title="Update available",
@@ -4630,7 +4718,6 @@ class MainWindow(QMainWindow):
         if digest_url:
             self._pending_update_url = url
             self._pending_update_dest = dest
-            self._pending_update_release = release
             self._digest_fetcher = DigestFetchWorker(digest_url)
             self._digest_fetcher.done.connect(self._on_digest_fetched)
             self._digest_fetcher.start()
@@ -4674,7 +4761,7 @@ class MainWindow(QMainWindow):
             self._progress.set_error(
                 self._friendly_error(result or "Update download failed")
             )
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="error",
                 title="Update download failed",
@@ -4684,7 +4771,7 @@ class MainWindow(QMainWindow):
             return
         self._progress.set_done()
         self._progress.set_title("Update ready")
-        choice = dialogs.completion(
+        choice = self._completion(
             self,
             kind="success",
             title="Update downloaded",
@@ -4739,6 +4826,7 @@ class MainWindow(QMainWindow):
 
     def _on_flash_queue_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         images = self._queue_images()
         if not images:
@@ -4910,13 +4998,20 @@ class MainWindow(QMainWindow):
         )
 
     def _fail_queue(self, reason: str) -> None:
+        # A fleet pass runs through the queue machinery, so every queue
+        # failure path must be able to end a fleet too - otherwise
+        # _fleet_busy stays set with nothing running, and _fleet_tick
+        # refuses to advance forever.
+        if self._fleet_busy:
+            self._disarm_fleet(reason)
+            return
         self._queue_active = False
         self._writing = False
         self._poller.resume()
         self._set_controls_enabled(True)
         self._cancel_btn.setEnabled(False)
         self._progress.set_error(self._friendly_error(reason or "Queue failed"))
-        dialogs.completion(
+        self._completion(
             self,
             kind="error",
             title="Queue failed",
@@ -4941,14 +5036,15 @@ class MainWindow(QMainWindow):
                 self._start_queue_item(self._queue_index)
             else:
                 self._queue_active = False
-                dialogs.completion(
+                self._completion(
                     self,
                     kind="success",
                     title="Queue complete",
                     message=(
-                        f"All {len(self._queue_items)} image"
+                        f"{self._queue_ok} of {len(self._queue_items)} image"
                         f"{'s' if len(self._queue_items) != 1 else ''} "
-                        "were written to "
+                        f"{'were' if len(self._queue_items) != 1 else 'was'} "
+                        "written to "
                         f"{(self._active_write_drive or self._current_drive or {}).get('model') or 'the drive'}."
                     ),
                     buttons=[("Close", "primary", "close")],
@@ -4962,7 +5058,7 @@ class MainWindow(QMainWindow):
                     f"{index + 1} of {len(self._queue_items)}"
                 )
             )
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="error",
                 title="Queue stopped",
@@ -5006,6 +5102,9 @@ class MainWindow(QMainWindow):
             )
             return
         if self._busy():
+            # The toggle has already flipped itself back off by now, so
+            # without a notice the click looks like it never happened.
+            self._refuse_busy()
             self._fleet_toggle.setChecked(False)
             return
         typed, accepted = dialogs.input_text(
@@ -5041,7 +5140,6 @@ class MainWindow(QMainWindow):
     def _disarm_fleet(self, reason: str | None = None) -> None:
         if self._fleet is None and not self._fleet_busy:
             return
-        was_busy = self._fleet_busy
         self._fleet = None
         self._fleet_busy = False
         self._fleet_image_index = 0
@@ -5051,7 +5149,10 @@ class MainWindow(QMainWindow):
         self._fleet_status.clear()
         if self._fleet_toggle.isChecked():
             self._fleet_toggle.setChecked(False)
-        if reason and not was_busy:
+        # Always surface why the pass stopped: this is the only feedback
+        # a mid-pass failure gets (the banner that carried the context is
+        # gone by the time we get here).
+        if reason:
             self._progress.set_error(reason)
 
     def _fleet_tick(self) -> None:
@@ -5102,7 +5203,7 @@ class MainWindow(QMainWindow):
                 self._fleet_update_status(drive, "failed")
             self._fleet_drive = None
             self._disarm_fleet()
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="error",
                 title="Fleet stopped",
@@ -5184,6 +5285,7 @@ class MainWindow(QMainWindow):
 
     def _on_backup_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         drive = self._current_drive
         if drive is None:
@@ -5237,6 +5339,7 @@ class MainWindow(QMainWindow):
 
     def _on_clone_clicked(self) -> None:
         if self._busy():
+            self._refuse_busy()
             return
         source = self._current_drive
         if source is None:
@@ -5387,6 +5490,7 @@ class MainWindow(QMainWindow):
         target = self._backup_drive if is_backup else self._clone_target
         source = self._clone_source if not is_backup else None
         operation = "backup" if is_backup else "clone"
+        report: dict[str, Any] | None = None
         if target is not None:
             report = flash_report(
                 f"\u2014 {operation} \u2014",
@@ -5402,14 +5506,16 @@ class MainWindow(QMainWindow):
             if source is not None:
                 report["source_drive_serial"] = source.get("serial")
             append_audited_history(report)
-            self._last_report = report
+        # Never leave the *previous* operation's report behind: Copy report
+        # would then silently hand out stale data.
+        self._set_last_report(report)
         self._backup_out = ""
         self._backup_drive = None
         self._clone_source = None
         self._clone_target = None
         self._update_controls_state()
         if not ok:
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="warning" if message == "cancelled" else "error",
                 title=(
@@ -5435,7 +5541,7 @@ class MainWindow(QMainWindow):
             self._drive_capacity(target or {})
         )
         if is_backup:
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="success",
                 title="Backup complete",
@@ -5453,7 +5559,7 @@ class MainWindow(QMainWindow):
                 or (source or {}).get("name")
                 or "the source drive"
             )
-            dialogs.completion(
+            self._completion(
                 self,
                 kind="success",
                 title="Clone complete",
@@ -5574,8 +5680,17 @@ class MainWindow(QMainWindow):
             )
         return message
 
+    def _set_last_report(self, report: dict[str, Any] | None) -> None:
+        """Publish the report Copy report will offer (``None`` hides it)."""
+        self._last_report = report
+        self._copy_btn.setVisible(report is not None)
+
     def _on_copy_report_clicked(self) -> None:
         if self._last_report is None:
+            # The button is hidden when there is no report, but the
+            # completion dialog wires a "copy" button straight to this
+            # slot - it must never be a silent no-op.
+            self._progress.set_warning("There is no report to copy yet")
             return
         text = self._build_report_text(self._last_report)
         clipboard = QApplication.clipboard()
@@ -5635,14 +5750,20 @@ class MainWindow(QMainWindow):
         self._update_controls_state()
 
         target = self._active_write_drive or self._current_drive
+        # W4: the image that was actually written - never the drop zone's
+        # current selection (queue/fleet never load it there, and the zone
+        # may have been cleared while the write ran).
+        image = self._active_write_image or (self._iso_zone.path or "")
+        digest: str | None = None
+        if image:
+            if image == self._iso_zone.path:
+                digest = self._iso_zone.digest
+            if digest is None:
+                digest = self._iso_sha256_cache.get(image)
 
         boot: str | None = None
         boot_status: str | None = None
-        if (
-            succeeded
-            and target is not None
-            and self._iso_zone.path is not None
-        ):
+        if succeeded and target is not None and image:
             try:
                 probe = probe_bootability(self._drive_path_for(target) or "")
                 boot_status = str(probe.get("status") or "warning")
@@ -5710,20 +5831,27 @@ class MainWindow(QMainWindow):
             self._done_summary.setToolTip("")
 
         report: dict[str, Any] | None = None
-        if target is not None and self._iso_zone.path is not None:
-            iso_size = os.path.getsize(self._iso_zone.path)
+        if target is not None and image:
+            try:
+                iso_size = os.path.getsize(image)
+            except OSError:
+                # The image can legitimately be gone by the time the write
+                # finishes (temp extraction cleaned up, source unplugged);
+                # that must not abort _finish_flash, which still has queue
+                # and fleet state to unwind.
+                iso_size = 0
             avg_mbps = (
                 iso_size / 1_000_000 / self._write_duration
-                if self._write_duration > 0
+                if self._write_duration > 0 and iso_size > 0
                 else None
             )
             report = flash_report(
-                os.path.basename(self._iso_zone.path),
+                os.path.basename(image),
                 target["model"] or target["name"],
                 self._write_duration,
                 verified=verified_sha is not None and succeeded,
                 success=succeeded,
-                iso_sha256=self._iso_zone.digest,
+                iso_sha256=digest,
                 written_sha256=verified_sha if succeeded else None,
                 drive_serial=target.get("serial"),
                 bootable=boot,
@@ -5732,7 +5860,8 @@ class MainWindow(QMainWindow):
                 drive_path=target.get("physical_path"),
             )
             append_audited_history(report)
-        self._last_report = report
+        self._set_last_report(report)
+        self._active_write_image = ""
         self._active_write_drive = None
         # U04: exactly one system notification per finish — the tray
         # message every other flow (wipe/backup/clone) uses.
@@ -5804,7 +5933,7 @@ class MainWindow(QMainWindow):
             if succeeded and settings.get("auto_eject"):
                 self._on_eject_clicked()
             elif succeeded:
-                result = dialogs.completion(
+                result = self._completion(
                     self, kind=kind, title=title, message=detail
                 )
                 if result == "eject":
@@ -5820,7 +5949,7 @@ class MainWindow(QMainWindow):
                         ("Close", "primary", "close"),
                     ]
                 )
-                dialogs.completion(
+                self._completion(
                     self,
                     kind=kind,
                     title=title,

@@ -452,6 +452,7 @@ class IsoDropZone(QFrame):
         self._retired_workers: list[QThread] = []
         self._clear_guard: Callable[[], bool] | None = None
         self._browse_guard: Callable[[], bool] | None = None
+        self._busy_notice: Callable[[], None] | None = None
         self.setToolTip("Drop an ISO or click to browse (Ctrl+O)")
 
         self._empty = self._build_empty_state()
@@ -643,8 +644,18 @@ class IsoDropZone(QFrame):
     def _browse_blocked(self) -> bool:
         return self._browse_guard is not None and self._browse_guard()
 
+    def _notify_busy(self) -> None:
+        """Say why a click did nothing (Ctrl+O, click-to-browse, (X)).
+
+        Drag-and-drop already gets native feedback (the event is ignored),
+        so only the explicit clicks route through here.
+        """
+        if self._busy_notice is not None:
+            self._busy_notice()
+
     def _browse(self) -> None:
         if self._browse_blocked():
+            self._notify_busy()
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -660,17 +671,21 @@ class IsoDropZone(QFrame):
         self,
         clear: Callable[[], bool] | None = None,
         browse: Callable[[], bool] | None = None,
+        notice: Callable[[], None] | None = None,
     ) -> None:
         """C11: install the busy guards through a declared API.
 
         ``None`` leaves a guard unchanged (so a caller can install just
         one of the two); the backing attributes stay the names tests and
-        ``load_iso`` already read.
+        ``load_iso`` already read. ``notice`` is what the zone says when a
+        guarded click was refused, so a blocked click is never silent.
         """
         if clear is not None:
             self._clear_guard = clear
         if browse is not None:
             self._browse_guard = browse
+        if notice is not None:
+            self._busy_notice = notice
 
     def browse(self) -> None:
         """C11: public entry point for the file dialog (Ctrl+O)."""
@@ -709,6 +724,7 @@ class IsoDropZone(QFrame):
 
     def clear_iso(self) -> None:
         if self._clear_guard is not None and self._clear_guard():
+            self._notify_busy()
             return
         old = self._worker
         if old is not None and old.isRunning():
@@ -755,6 +771,7 @@ class IsoDropZone(QFrame):
             self._drop_timer.start(5000)
             return
         if self._browse_blocked():
+            self._notify_busy()
             return
         self._drop_error.setVisible(False)
         self._drop_timer.stop()
@@ -1416,6 +1433,11 @@ class ProgressArea(ChamferPanel):
     def set_done(self) -> None:
         self._smooth_timer.stop()
         self._target_pct = 100.0
+        # F10: a refusal raised while the operation ran (nav/drive picker
+        # guarded mid-write) lives on this same label. Leaving it visible
+        # under "Done" reads as a problem with a successful operation, so
+        # the panel starts clean and any real follow-up note re-shows it.
+        self._error.setVisible(False)
         self._title.setText("Done")
         self._pct.setText("100%")
         self._bar.setValue(100)
