@@ -157,7 +157,7 @@ def _clean_queue_path(text: str) -> str:
     return text
 
 # C15: the sidebar rows and the stacked pages are ordered differently
-# (nav: write/verify/history/settings, pages: content/history/verify/settings)f
+# (nav: write/verify/history/settings, pages: content/history/verify/settings)
 # One table, defined once, instead of a fresh inline dict every click.
 _NAV_PAGE = {0: 0, 1: 2, 2: 1, 3: 3}
 _NAV_TITLES = {
@@ -166,6 +166,12 @@ _NAV_TITLES = {
     2: "Flash history",
     3: "Settings",
 }
+
+# T7: threads that outlived the shutdown grace period. Module-level on
+# purpose - see MainWindow.__init__. Kept for the life of the process so a
+# running QThread is never destroyed while its run() is on the stack.
+_SHUTDOWN_ZOMBIES: list[QThread] = []
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -253,7 +259,11 @@ class MainWindow(QMainWindow):
         # Threads that refused to stop within the shutdown grace period.
         # Destroying a running QThread aborts the process mid-write, so they
         # are kept referenced until process exit instead of being deleted.
-        self._zombies: list[QThread] = []
+        # T7: module-level, not per-instance - after app.quit() the caller
+        # drops the last reference to this window, and an instance-owned
+        # list would be collected together with it, destroying a running
+        # QThread. One shared list keeps everything alive to process exit.
+        self._zombies = _SHUTDOWN_ZOMBIES
         self._shutdown_done = False
         self._last_report: dict[str, Any] | None = None
         self._controls: list[QWidget] = []
@@ -1196,7 +1206,7 @@ class MainWindow(QMainWindow):
         if getattr(self._iso_zone, "compressed_source", False):
             # B04: the sidecar belongs to the flashable image, not to the
             # archive the user just picked — defer until the extracted
-            # file has been hashed (see _on_iso_hash_ready)f
+            # file has been hashed (see _on_iso_hash_ready)
             self._sidecar_status, self._sidecar_detail = "missing", ""
             self._update_sidecar_label()
         else:
@@ -1218,7 +1228,7 @@ class MainWindow(QMainWindow):
         source = getattr(self._iso_zone, "source_path", None) or path
         if ok and digest:
             # U09: remember the selection the user actually made (the
-            # archive for a compressed pick, never the temp extract)f
+            # archive for a compressed pick, never the temp extract)
             self._remember_recent(str(source))
         # B04: for a compressed selection the extracted file lives in a
         # temp dir while its sidecar sits next to the original archive.
@@ -2399,7 +2409,10 @@ class MainWindow(QMainWindow):
                 continue
             else:
                 self._retire(worker)
-        if not self._poller.wait(2000):
+        # T7: the poller sleeps interval_ms (2000) per iteration, so a
+        # 2000 ms wait frequently times out for reasons that have nothing to
+        # do with the thread being stuck. Three intervals give it room.
+        if not self._poller.wait(6000):
             self._zombies.append(self._poller)
         for retired in self._retired_workers:
             if retired is not None and not retired.isRunning():
@@ -3524,7 +3537,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         # Verify page start button: disabled while busy or with no drive.
-        # U07: also requires an image (pasted digest or a hashed selection)f
+        # U07: also requires an image (pasted digest or a hashed selection)
         try:
             if hasattr(self, "_verify_start_btn"):
                 self._verify_start_btn.setEnabled(
@@ -3557,10 +3570,10 @@ class MainWindow(QMainWindow):
         self._update_controls_state()
 
     def _on_cancel_clicked(self) -> bool:
-        """Abort the in-flight operation(s)f
+        """Abort the in-flight operation(s)
 
         U02: aborting a destructive write asks first; returns False when
-        the user declines (nothing is cancelled)f
+        the user declines (nothing is cancelled)
         """
         if (
             self._writer is not None
@@ -3822,7 +3835,7 @@ class MainWindow(QMainWindow):
         Also used to retry a flash after a failed verification.
         """
         # U12: the manifest needs the image digest and the cache can miss
-        # (queue/fleet items were never dropped through the hash zone)f
+        # (queue/fleet items were never dropped through the hash zone)
         # Hashing a multi-GB image here froze the GUI — do it on a worker
         # and re-enter this method when it lands.
         if (
@@ -4141,7 +4154,7 @@ class MainWindow(QMainWindow):
         # this same toggle above, which is handled earlierf What remains
         # is the honest "verify was requested but never ran" outcome,
         # which the legacy regression script drives directly (it finishes
-        # a write without `_begin_write` ever arming the in-writer verify)f
+        # a write without `_begin_write` ever arming the in-writer verify)
         self._finish_flash(
             True, "", None, skipped_verify=self._verify_toggle.isChecked()
         )
@@ -4655,12 +4668,26 @@ class MainWindow(QMainWindow):
             return
         worker = UpdateCheckWorker()
         self._update_checker = worker
-        worker.finished_check.connect(self._on_update_check_done)
+        worker.finished_check.connect(
+            lambda ok, msg, rel, w=worker: self._on_update_check_done(
+                ok, msg, rel, w
+            )
+        )
         worker.start()
 
     def _on_update_check_done(
-        self, ok: bool, message: str, release: object
+        self,
+        ok: bool,
+        message: str,
+        release: object,
+        worker: QThread | None = None,
     ) -> None:
+        # T4: retire instead of dropping the last reference - the signal is
+        # emitted as the last statement of run(), so letting the QThread be
+        # garbage-collected here can destroy it while run() is still on the
+        # stack. Every other completion handler already uses _retire.
+        if worker is not None:
+            self._retire(worker)
         self._update_checker = None
         if not ok:
             dialogs.inform(
@@ -4696,14 +4723,26 @@ class MainWindow(QMainWindow):
             )
             return
         downloadable = asset.get("browser_download_url") or ""
+        # T5: only promise a checksum comparison when the release actually
+        # publishes one.
+        if sidecar_digest_url(data):
+            promise = (
+                "The new version will be downloaded and its SHA-256 "
+                "verified before you can run it."
+            )
+        else:
+            promise = (
+                "The new version will be downloaded for you. This release "
+                "publishes no checksum, so compare the file against the "
+                "release page before running it."
+            )
         result = self._completion(
             self,
             kind="warning",
             title="Update available",
             message=(
                 f"Flint {latest} is available (you have {APP_VERSION}).\n\n"
-                "The new version will be downloaded and its SHA-256 "
-                f"verified before you can run it."
+                f"{promise}"
             ),
             buttons=[
                 ("Download", "primary", "download"),
@@ -4718,7 +4757,11 @@ class MainWindow(QMainWindow):
     def _start_update_download(
         self, url: str, dest: str, release: dict[str, Any]
     ) -> None:
-        if self._update_downloader is not None:
+        # T6: guard the digest fetch too. The one-shot auto-check timer can
+        # fire while this dialog's result is still being processed, and
+        # overwriting a live _digest_fetcher would destroy a running QThread
+        # and leave both 'done' signals connected.
+        if self._update_downloader is not None or self._digest_fetcher is not None:
             return
         digest_url = sidecar_digest_url(release)
         if digest_url:
@@ -4749,8 +4792,15 @@ class MainWindow(QMainWindow):
         worker = UpdateDownloadWorker(url, dest, digest)
         self._update_downloader = worker
         self._pending_update_path = dest
+        # T5: only claim verification when a digest actually exists - the
+        # release may ship no flint.exe.sha256 asset, or the sidecar fetch
+        # may have failed, and download_and_verify skips the comparison for
+        # expected_sha256=None while still returning ok=True.
+        self._pending_update_verified = digest is not None
         worker.progress.connect(self._on_update_download_progress)
-        worker.finished_download.connect(self._on_update_download_done)
+        worker.finished_download.connect(
+            lambda ok, res, w=worker: self._on_update_download_done(ok, res, w)
+        )
         worker.start()
         self._progress.reset()
         self._progress.set_phase("Downloading update\u2026")
@@ -4760,7 +4810,12 @@ class MainWindow(QMainWindow):
         self._progress.set_progress(pct)
         self._set_taskbar_progress(pct)
 
-    def _on_update_download_done(self, ok: bool, result: str) -> None:
+    def _on_update_download_done(
+        self, ok: bool, result: str, worker: QThread | None = None
+    ) -> None:
+        # T4: see _on_update_check_done - retire, never drop the reference.
+        if worker is not None:
+            self._retire(worker)
         self._update_downloader = None
         self._set_taskbar_progress(None)
         if not ok:
@@ -4777,12 +4832,23 @@ class MainWindow(QMainWindow):
             return
         self._progress.set_done()
         self._progress.set_title("Update ready")
+        if getattr(self, "_pending_update_verified", False):
+            verified = (
+                "The new Flint was downloaded and its SHA-256 verified."
+            )
+        else:
+            # T5: never claim verification that did not happen.
+            verified = (
+                "The new Flint was downloaded. No release checksum was "
+                "published for it, so the file was not verified - compare "
+                "it against the release page before running it."
+            )
         choice = self._completion(
             self,
             kind="success",
             title="Update downloaded",
             message=(
-                "The new Flint was downloaded and its SHA-256 verified.\n\n"
+                f"{verified}\n\n"
                 "Close Flint and run the new executable to update."
             ),
             buttons=[
@@ -4916,7 +4982,7 @@ class MainWindow(QMainWindow):
             return
         # U14: per-item safety — an unreadable or mismatching sidecar
         # blocks the item cheaply (digest unknown here; the writer hashes
-        # the image itself during verification)f Locating one is a stat;
+        # the image itself during verification). Locating one is a stat;
         # evaluating it is a file read, so that part runs on a worker and
         # resumes through _on_queue_sidecar_checked.
         if checksum_mod.find_sidecar(image) is None:
@@ -5555,7 +5621,7 @@ class MainWindow(QMainWindow):
                 title="Backup complete",
                 message=(
                     f"{name} ({size}) was read into "
-                    f"{os.path.basename(backup_out)}f\n\n"
+                    f"{os.path.basename(backup_out)}\n\n"
                     "Flash the image to another drive whenever you need "
                     "a copy."
                 ),
@@ -5572,7 +5638,7 @@ class MainWindow(QMainWindow):
                 kind="success",
                 title="Clone complete",
                 message=(
-                    f"{src_name} \u2192 {name} ({size})f\n\n"
+                    f"{src_name} \u2192 {name} ({size})\n\n"
                     f"{name} now holds an exact copy \u2014 eject it and "
                     "boot from it."
                 ),
@@ -5957,13 +6023,18 @@ class MainWindow(QMainWindow):
                         ("Close", "primary", "close"),
                     ]
                 )
-                self._completion(
+                # T2: the failure dialog offers Copy report, so its result
+                # has to be routed like the success path's - dropping it
+                # made the button a dead click.
+                failed = self._completion(
                     self,
                     kind=kind,
                     title=title,
                     message=detail,
                     buttons=buttons,
                 )
+                if failed == "copy":
+                    self._on_copy_report_clicked()
 
         if self._queue_active:
             self._queue_last_succeeded = succeeded

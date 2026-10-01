@@ -98,20 +98,27 @@ def download_and_verify(
     expected_sha256: str | None,
     progress: Callable[[int, int], None] | None = None,
     timeout: float = 30.0,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> tuple[bool, str]:
     """Stream ``url`` to ``dest`` and verify its SHA-256 when provided.
 
-    Returns ``(True, digest)`` on success or ``(False, message)``.
+    Returns ``(True, digest)`` on success, ``(False, "cancelled")`` when
+    ``is_cancelled()`` turns true mid-stream (the partial file is removed),
+    or ``(False, message)`` on failure.
     """
     target = Path(dest)
     request = urllib.request.Request(url, headers={"User-Agent": _UA})
     digest = hashlib.sha256()
+    cancelled = False
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             total = int(response.headers.get("Content-Length") or 0)
             done = 0
             with open(target, "wb") as out:
                 while True:
+                    if is_cancelled is not None and is_cancelled():
+                        cancelled = True
+                        break
                     chunk = response.read(256 * 1024)
                     if not chunk:
                         break
@@ -126,6 +133,13 @@ def download_and_verify(
         except OSError:
             pass
         return False, f"download failed ({exc})"
+    if cancelled:
+        # Never leave a half-written executable behind for the user to run.
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, "cancelled"
     hexdigest = digest.hexdigest()
     if expected_sha256 and hexdigest != expected_sha256.lower():
         try:
@@ -150,9 +164,21 @@ class UpdateCheckWorker(QThread):
     def __init__(self, url: str | None = None) -> None:
         super().__init__()
         self._url = url
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """T1: shutdown calls this on every live worker.
+
+        The HTTP call itself is bounded by ``fetch_latest``'s 8 s timeout,
+        so this only guarantees no signal is delivered into a window that
+        is being torn down.
+        """
+        self._cancelled = True
 
     def run(self) -> None:
         ok, result = fetch_latest(self._url)
+        if self._cancelled:
+            return
         self.finished_check.emit(ok, "" if ok else str(result), result)
 
 
@@ -169,6 +195,11 @@ class UpdateDownloadWorker(QThread):
         self._url = url
         self._dest = dest
         self._expected = expected_sha256
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Stop the stream between chunks and drop the partial file."""
+        self._cancelled = True
 
     def run(self) -> None:
         ok, result = download_and_verify(
@@ -176,7 +207,12 @@ class UpdateDownloadWorker(QThread):
             self._dest,
             self._expected,
             progress=lambda done, total: self.progress.emit(done, total),
+            is_cancelled=lambda: self._cancelled,
         )
+        if self._cancelled and not ok:
+            # Shutdown asked for this: do not pop an error dialog over a
+            # window that is already closing.
+            return
         self.finished_download.emit(ok, result)
 
 
@@ -188,9 +224,16 @@ class DigestFetchWorker(QThread):
     def __init__(self, url: str | None) -> None:
         super().__init__()
         self._url = url
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """See ``UpdateCheckWorker.cancel`` — suppresses the late signal."""
+        self._cancelled = True
 
     def run(self) -> None:
         digest = fetch_sidecar_digest(self._url)
+        if self._cancelled:
+            return
         self.done.emit(self._url or "", digest or "")
 
 

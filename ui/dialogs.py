@@ -131,11 +131,22 @@ class FlintDialog(QDialog):
         self.accept()
 
     def run(self) -> str | None:
-        """Execute modally and return the clicked button's result."""
+        """Execute modally and return the clicked button's result.
+
+        T3: schedules the dialog for deletion before returning. Every
+        module-level helper below runs one of these and discards it, so
+        without the deferred delete each popup stayed a child of the window
+        for the whole session - a long session with a chatty history page
+        accumulated dozens of live dialogs. Callers that need state after
+        ``run()`` (``inform``'s checkbox) must read it on the very next
+        statement, before the deferred delete is processed.
+        """
         self._result = None
         self.adjustSize()
         self.exec()
-        return self._result
+        result = self._result
+        self.deleteLater()
+        return result
 
     def checked(self) -> bool:
         return bool(self._check is not None and self._check.isChecked())
