@@ -92,8 +92,12 @@ def read_json_or_quarantine(path: Path) -> tuple[Any, bool]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             parsed = json.load(handle)
-    except json.JSONDecodeError as exc:
-        logger.error("%s is not valid JSON (%s)", path, exc)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, not a JSONDecodeError: a file
+        # full of binary noise must be quarantined too, not escape as an
+        # unhandled exception from a plain read.
+        logger.error("%s could not be decoded (%s: %s)", path,
+                     type(exc).__name__, exc)
         quarantine_corrupt(path)
         return None, True
     except OSError as exc:

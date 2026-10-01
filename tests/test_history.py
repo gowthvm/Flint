@@ -306,3 +306,29 @@ def test_export_history_csv_unions_mixed_entry_keys(tmp_path, monkeypatch):
     lines = out.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 4  # header + 3 rows
     assert "integrity_sha256" in lines[0]
+
+
+def test_binary_noise_history_is_quarantined(tmp_path, monkeypatch):
+    """UnicodeDecodeError is a ValueError, not a JSONDecodeError: raw
+    bytes that are not UTF-8 must be quarantined like any other damage."""
+    path = tmp_path / "h.json"
+    monkeypatch.setattr(h, "HISTORY_PATH", path)
+    path.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+
+    assert h.load_history() == []
+    assert len(list(tmp_path.glob("h.json.corrupt-*"))) == 1
+
+
+def test_import_history_with_binary_source_reports_failure(
+    tmp_path, monkeypatch
+):
+    """H4: an un-decodable import file used to escape as an unhandled
+    UnicodeDecodeError instead of reporting (False, 0)."""
+    monkeypatch.setattr(h, "HISTORY_PATH", tmp_path / "h.json")
+    h.clear_history()
+    src = tmp_path / "bad.json"
+    src.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+
+    ok, count = h.import_history(src)
+
+    assert ok is False and count == 0

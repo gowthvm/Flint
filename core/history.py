@@ -457,7 +457,10 @@ def import_history(source_path: str | Path) -> tuple[bool, int]:
                 pass
         save_history(entries)
         return True, len(entries)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError):
+        # UnicodeDecodeError/JSONDecodeError are both ValueErrors; without
+        # them a source file in the wrong encoding escaped as an unhandled
+        # traceback instead of reporting a failed import (H4).
         return False, 0
 
 
