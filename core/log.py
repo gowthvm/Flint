@@ -1,8 +1,8 @@
 import logging
 import logging.handlers
-import os
 import sys
-from pathlib import Path
+
+from core import paths
 
 _CLI_HANDLER_ATTR = "_flint_cli_handler"
 
@@ -70,25 +70,33 @@ def apply_log_level(level: str, name: str = "flint") -> str:
 
 
 def setup_logging(name: str = "flint", level: str = "INFO") -> logging.Logger:
-    temp = os.environ.get("TEMP", ".")
-    log_path = Path(temp) / f"{name}-startup.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # C02: the startup log belongs with the rest of the app data, next to
+    # settings.json/history.json, not in %TEMP%. `paths.APP_DIR` is read
+    # dynamically so the conftest redirection covers it.
+    log_path = paths.APP_DIR / f"{name}-startup.log"
 
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
     log_level = getattr(logging, level.upper(), logging.INFO)
     logger.setLevel(log_level)
-
-    handler = logging.handlers.RotatingFileHandler(
-        str(log_path), maxBytes=1024 * 1024, backupCount=3, encoding="utf-8"
-    )
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    handler.setFormatter(fmt)
-    logger.addHandler(handler)
+
+    # A read-only APP_DIR must degrade to console logging, never stop the
+    # app from starting.
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = logging.handlers.RotatingFileHandler(
+            str(log_path), maxBytes=1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+    except OSError:
+        logger.warning("could not open %s; logging to console only", log_path)
+    else:
+        handler.setFormatter(fmt)
+        logger.addHandler(handler)
 
     # also add a console handler for debug convenience
     console = logging.StreamHandler()

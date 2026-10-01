@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core import paths
 from core.history import load_history
 from core.version import APP_VERSION
 
@@ -109,12 +110,13 @@ def build_diagnostics(
         )
     lines.append("")
 
-    temp = Path(os.environ.get("TEMP", "."))
+    # C02: the startup log moved to APP_DIR with everything else.
     for suffix in ("", ".1", ".2", ".3"):
-        log = temp / f"flint-startup.log{suffix}"
+        log = paths.APP_DIR / f"flint-startup.log{suffix}"
         lines.append(f"--- {log} ---")
         lines.append(_read_tail(log))
         lines.append("")
+    temp = Path(os.environ.get("TEMP", "."))
     crash_dir = Path(os.environ.get("LOCALAPPDATA", str(temp))) / "Flint"
     crash = crash_dir / "crash.log"
     lines.append(f"--- {crash} ---")

@@ -1,5 +1,6 @@
 """Themed dialog tests: FlintDialog structure, run results, and the
-completion popups fired at the end of flash / verify / wipe."""
+completion popups fired at the end of flash / verify / wipe. Also U02's
+Esc cancel shortcut and C02's app-dir lifecycle log."""
 
 import pytest
 
@@ -336,6 +337,69 @@ def test_cancel_write_asks_for_confirmation(qapp, tmp_path, monkeypatch):
         assert not confirms, "an idle cancel must not ask for confirmation"
     finally:
         w._writer = None
+        w._shutdown()
+
+
+def test_escape_shortcut_cancels_only_while_busy(qapp, tmp_path, monkeypatch):
+    """U02: Esc is bound, guarded on _op_busy(), and yields to a modal."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QKeySequence, QShortcut
+
+    w = _make_window(qapp, tmp_path)
+    esc = [
+        s for s in w.findChildren(QShortcut) if s.key() == QKeySequence("Esc")
+    ]
+    assert esc, "U02: Esc must be bound as a shortcut"
+    assert esc[0].context() == Qt.ShortcutContext.ApplicationShortcut
+    calls: list[str] = []
+
+    class _Worker:
+        def cancel(self) -> None:
+            calls.append("cancel")
+
+    try:
+        monkeypatch.setattr(
+            "ui.window.MainWindow._on_cancel_clicked",
+            lambda self: calls.append("clicked") or True,
+        )
+
+        esc[0].activated.emit()
+        assert not calls, "an idle Esc must do nothing"
+
+        w._writer = _Worker()  # type: ignore[assignment]
+        esc[0].activated.emit()
+        assert calls == ["clicked"], "a busy Esc must cancel"
+
+        calls.clear()
+
+        class _Modal:
+            @staticmethod
+            def activeModalWidget():
+                return object()
+
+        monkeypatch.setattr("ui.window.QApplication", _Modal)
+        esc[0].activated.emit()
+        assert not calls, "Esc must not re-enter while a dialog owns it"
+    finally:
+        w._writer = None
+        w._shutdown()
+
+
+def test_lifecycle_log_writes_into_app_dir(qapp, tmp_path, monkeypatch):
+    """C02: the lifecycle log lives in APP_DIR, not in %TEMP%."""
+    from core import paths
+
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    monkeypatch.setenv("TEMP", str(temp_dir))
+    w = _make_window(qapp, tmp_path)
+    try:
+        w._lifecycle_log("unit-test marker")
+        target = paths.APP_DIR / "flint-startup.log"
+        assert target.exists(), "C02: lifecycle log must go to APP_DIR"
+        assert "unit-test marker" in target.read_text(encoding="utf-8")
+        assert not list(temp_dir.iterdir()), "nothing may land in %TEMP%"
+    finally:
         w._shutdown()
 
 

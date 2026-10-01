@@ -37,6 +37,33 @@ def test_setup_logging_level(tmp_path, monkeypatch):
     assert logger.level == logging.WARNING
 
 
+def test_setup_logging_writes_into_app_dir(tmp_path, monkeypatch):
+    """C02: the startup log belongs in APP_DIR, not in %TEMP%."""
+    from core import paths
+
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    monkeypatch.setenv("TEMP", str(temp_dir))
+    name = "flint_test_appdir"
+    logger = logging.getLogger(name)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    try:
+        setup_logging(name, "INFO")
+        logger.info("app-dir marker")
+        for handler in logger.handlers:
+            handler.flush()
+        target = paths.APP_DIR / f"{name}-startup.log"
+        assert target.exists(), "C02: the startup log must go to APP_DIR"
+        assert "app-dir marker" in target.read_text(encoding="utf-8")
+        assert not list(temp_dir.iterdir()), "nothing may land in %TEMP%"
+    finally:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
+
+
 def _fresh_cli_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     for handler in list(logger.handlers):

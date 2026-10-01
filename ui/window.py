@@ -414,6 +414,11 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(
             self._on_flash_clicked
         )
+        # U02: Esc is the universal cancel key. Guarded on _op_busy() so an
+        # idle Esc does nothing at all (the cancel button is disabled then).
+        QShortcut(QKeySequence("Esc"), self).activated.connect(
+            self._on_cancel_shortcut
+        )
         for s in self.findChildren(QShortcut):
             s.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.setWindowIcon(self._make_flint_icon())
@@ -1131,7 +1136,7 @@ class MainWindow(QMainWindow):
     def _on_drives_ready(self, drives: list[dict[str, Any]]) -> None:
         if not drives and self._detector.last_error:
             # U18: a transient detection failure must not wipe a list that
-            # is still valid — keep the previous drives and selectionf An
+            # is still valid — keep the previous drives and selection. An
             # empty list with no error means everything really was
             # unplugged and clears as usual.
             drives = self._drives
@@ -2527,10 +2532,12 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _lifecycle_log(self, message: str) -> None:
+        # C02: the lifecycle log lives with the rest of the app data, not
+        # in %TEMP% - `paths.APP_DIR` read dynamically so the conftest
+        # redirection covers it (same trick as _persist_queue).
         try:
-            log_path = os.path.join(
-                os.environ.get("TEMP", "."), "flint-startup.log"
-            )
+            log_path = paths.APP_DIR / "flint-startup.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"window pid={os.getpid()}: {message}\n")
         except OSError:
@@ -3584,7 +3591,7 @@ class MainWindow(QMainWindow):
             kind="warning",
             title="Cancel write?",
             message=(
-                "The write is still in progressf Cancelling now leaves "
+                "The write is still in progress. Cancelling now leaves "
                 "the target drive partially written \u2014 it may be "
                 "unusable until it is flashed again."
             ),
@@ -3609,6 +3616,19 @@ class MainWindow(QMainWindow):
         if self._clone_worker is not None:
             self._clone_worker.cancel()
         return True
+
+    def _on_cancel_shortcut(self) -> None:
+        """Esc (U02): cancel the in-flight operation, nothing when idle.
+
+        Qt's ApplicationShortcut context fires Esc even while a modal
+        dialog is up, so ``_on_cancel_clicked``'s own confirm could be
+        opened a second time by the same key press. An active modal
+        widget means that dialog is already handling Esc (rejecting it),
+        so the shortcut must stay out of the way.
+        """
+        if not self._op_busy() or QApplication.activeModalWidget() is not None:
+            return
+        self._on_cancel_clicked()
 
     def _recheck_drive(self, drive: dict[str, Any]) -> dict[str, Any] | None:
         current = next(
@@ -4151,7 +4171,7 @@ class MainWindow(QMainWindow):
             return
         # C05: the old standalone `_start_verify()` call here could never
         # fire on the write path — `_verification_in_writer` is set from
-        # this same toggle above, which is handled earlierf What remains
+        # this same toggle above, which is handled earlier. What remains
         # is the honest "verify was requested but never ran" outcome,
         # which the legacy regression script drives directly (it finishes
         # a write without `_begin_write` ever arming the in-writer verify)
