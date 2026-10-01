@@ -198,3 +198,46 @@ def test_required_size_prefers_usable_gzip_hint(tmp_path):
     expected = dc._required_expanded_size(str(compressible), ".gz")
     assert expected == 50_000
     assert expected > compressible.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# zip has a declared size, so it gets the guard gz/xz/zst already had
+# ---------------------------------------------------------------------------
+
+
+def _zip_file(content: bytes) -> str:
+    import zipfile
+
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        path = tmp.name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("image.iso", content)
+    return path
+
+
+def test_zip_refuses_to_extract_without_free_space(monkeypatch):
+    """10a: zip used to go straight to copyfileobj and only surface the
+    problem as a bare "No space left on device" part-way through the
+    extract. Its central directory declares the uncompressed size, so the
+    guard does not even have to estimate."""
+    path = _zip_file(b"\x00" * 20_000)
+    try:
+        _fake_free(monkeypatch, 10_000)
+        with pytest.raises(OSError) as excinfo, decompress_image(path):
+            pass
+        message = str(excinfo.value)
+        assert "free space to expand" in message
+        assert "declared entry size" in message
+        assert "20,000 B" in message
+    finally:
+        os.unlink(path)
+
+
+def test_zip_extracts_when_the_declared_size_fits(monkeypatch):
+    path = _zip_file(b"zip image content " * 100)
+    try:
+        _fake_free(monkeypatch, 20_000)
+        with decompress_image(path) as result, open(result, "rb") as f:
+            assert f.read() == b"zip image content " * 100
+    finally:
+        os.unlink(path)

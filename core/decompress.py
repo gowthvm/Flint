@@ -71,25 +71,34 @@ def _required_expanded_size(path: str, fmt: str) -> int:
     return compressed * _EXPANSION_RATIO
 
 
-def _ensure_temp_space(source: str, tmp_dir: str, fmt: str) -> None:
+def _ensure_temp_space(
+    source: str, tmp_dir: str, fmt: str, required: int | None = None
+) -> None:
     """Refuse to expand an archive that does not fit in the temp drive.
+
+    ``required`` skips the estimate for callers that already know the
+    output size exactly - a zip central directory declares each entry's
+    uncompressed size, so nothing has to be guessed (10a).
 
     gz/xz/zst carry no declared size, so the guard is an estimate: the
     gzip footer when it is usable, otherwise ``_EXPANSION_RATIO`` times
     the compressed size.  Raises ``OSError`` with the numbers when the
-    estimate exceeds the free space on the temp volume; an unmeasurable
+    requirement exceeds the free space on the temp volume; an unmeasurable
     volume (``disk_usage`` failing) is not a blocker.
     """
-    try:
+    if required is None:
         required = _required_expanded_size(source, fmt)
+        basis = f"{_EXPANSION_RATIO}x compressed size or the gzip size hint"
+    else:
+        basis = "declared entry size"
+    try:
         free = int(shutil.disk_usage(tmp_dir).free)
     except (OSError, ValueError):
         return
     if required and free < required:
         raise OSError(
             f"not enough free space to expand {os.path.basename(source)}: "
-            f"needs about {_fmt_bytes(required)} "
-            f"({_EXPANSION_RATIO}x compressed size or the gzip size hint), "
+            f"needs about {_fmt_bytes(required)} ({basis}), "
             f"only {_fmt_bytes(free)} free in {tmp_dir}. Free up temp "
             "space or move the image to a larger drive."
         )
@@ -195,6 +204,12 @@ def _decompress_zip(zip_path: str, tmp_dir: str) -> str:
                 f"{target.file_size / (1024**3):.1f} GiB — "
                 "extraction limit is 16 GiB (possible zip bomb)"
             )
+        # 10a: gz/xz/zst check free space before streaming; zip used to go
+        # straight to copyfileobj and only surfaced the problem as a bare
+        # "No space left on device" part-way through a multi-GiB extract.
+        _ensure_temp_space(
+            zip_path, tmp_dir, ".zip", required=target.file_size
+        )
         extracted = os.path.join(tmp_dir, os.path.basename(target.filename))
         with zf.open(target) as src, open(extracted, "wb") as dst:
             shutil.copyfileobj(src, dst)
