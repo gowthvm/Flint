@@ -526,10 +526,15 @@ class UsbWriter(QThread):
                         jobs.save_manifest(self.manifest_path, manifest)
                     saved = manifest.checkpoint_bytes
                     if 0 < saved < total:
-                        # Align DOWN to sector boundary for FILE_FLAG_NO_BUFFERING.
+                        # Align DOWN to the sector boundary for
+                        # FILE_FLAG_NO_BUFFERING: a multiple of _SECTOR_SIZE
+                        # is what the next read/write needs. The old
+                        # `aligned <= 0 -> aligned = saved` fallback
+                        # re-introduced an unaligned seek for checkpoints
+                        # below one sector (0 < saved < 4096) - SetFilePointerEx
+                        # accepts it, the subsequent I/O does not. Aligning
+                        # down to 0 simply replays the first sector.
                         aligned = saved - (saved % self._SECTOR_SIZE)
-                        if aligned <= 0:
-                            aligned = saved
                         # L02: drive and source must seek to the SAME offset,
                         # otherwise an unaligned checkpoint silently shifts
                         # the rest of the image.

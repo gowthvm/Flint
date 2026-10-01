@@ -82,7 +82,13 @@ class WipeWorker(QThread):
         self._canceled = True
 
     def _open_drive(self) -> int:
-        return int(open_drive(self.drive_path, write=True))
+        # R5/B03: a letterless stick has no volumes to FSCTL-lock, so the
+        # open handle has to be the lock itself - exactly what the writer,
+        # backup and clone workers already do. Without it two processes can
+        # hold \\.\PHYSICALDRIVEn for writing at the same time.
+        return int(
+            open_drive(self.drive_path, write=True, exclusive=not self.letters)
+        )
 
     def _drive_size(self, handle: int) -> int:
         return drive_size(ctypes.c_void_p(handle))

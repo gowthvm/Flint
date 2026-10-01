@@ -371,3 +371,30 @@ def test_wipe_verification_reports_read_failure(monkeypatch):
 
     assert events["verified"] == [(False, "read error: simulated read failure")]
     assert events["done"] == [(False, "simulated read failure")]
+
+
+def test_wipe_open_drive_is_exclusive_only_for_letterless_drives(monkeypatch):
+    """R5/B03: the writer, backup and clone workers pass
+    ``exclusive=not letters`` so a letterless stick is locked by the handle
+    itself. Wipe was the one worker left out - nothing else holds it, so
+    two processes could write the same physical drive at once."""
+    import core.wipe as wipe_mod
+
+    calls: list[dict] = []
+
+    def fake_open(path, *, write, flags=0, exclusive=False):
+        calls.append({"path": path, "write": write, "exclusive": exclusive})
+        return 4242
+
+    monkeypatch.setattr(wipe_mod, "open_drive", fake_open)
+
+    letterless = WipeWorker(r"\\.\PHYSICALDRIVE9")
+    assert letterless.letters == []
+    assert letterless._open_drive() == 4242
+
+    lettered = WipeWorker(r"\\.\PHYSICALDRIVE9", letters=["E"])
+    assert lettered._open_drive() == 4242
+
+    assert [c["exclusive"] for c in calls] == [True, False]
+    assert all(c["write"] for c in calls)
+    assert all(c["path"] == r"\\.\PHYSICALDRIVE9" for c in calls)

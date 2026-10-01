@@ -987,6 +987,45 @@ def test_resume_seeks_source_and_drive_to_same_offset(tmp_path, monkeypatch):
     assert w._finished is False
 
 
+def test_resume_below_one_sector_falls_back_to_zero(tmp_path, monkeypatch):
+    """R2: a checkpoint at 0 < saved < 4096 must align DOWN to 0.
+
+    The drive handle is opened FILE_FLAG_NO_BUFFERING, so it must never be
+    left at an unaligned offset - SetFilePointerEx accepts the seek, the
+    next ReadFile/WriteFile does not. The old `aligned <= 0 -> saved`
+    fallback re-introduced exactly that for sub-sector checkpoints.
+    """
+    from core import jobs
+
+    payload = _blob(32 * 1024, seed=7)
+    src = tmp_path / "iso.bin"
+    src.write_bytes(payload)
+    w = writer.UsbWriter(
+        str(src), r"\\.\PHYSICALDRIVE9", chunk_size=4096, resume=True
+    )
+    monkeypatch.setattr(w, "_open_drive", lambda: ctypes.c_void_p(12345))
+    monkeypatch.setattr(w, "_drive_size", lambda handle: 10_000_000)
+    monkeypatch.setattr(w, "_flush", lambda handle: None)
+    seek_calls: list[int] = []
+    monkeypatch.setattr(
+        w, "_seek_drive", lambda handle, offset: seek_calls.append(offset)
+    )
+    chunks: list[bytes] = []
+    monkeypatch.setattr(w, "_write_chunk", lambda handle, data: chunks.append(data))
+    jobs.save_manifest(
+        w.manifest_path,
+        _resume_manifest(
+            w, payload, checkpoint_bytes=1000, target_size=10_000_000
+        ),
+    )
+
+    w._run_inner()
+
+    assert seek_calls == [0]  # sector-aligned, never 1000
+    assert chunks[0] == payload[0:4096]
+    assert w._finished is False
+
+
 def test_checkpoint_saves_once_per_interval(tmp_path, monkeypatch):
     """L03: checkpoints are gated by an explicit next_checkpoint threshold —
     one durable save per 10 MiB of source bytes, independent of chunk size
