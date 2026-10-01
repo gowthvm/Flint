@@ -201,3 +201,83 @@ def test_set_many_lands_after_flush_with_real_writeback(_isolated_settings):
         assert on_disk.get("theme") == "light"
     finally:
         writeback.disable()
+
+
+# ---------------------------------------------------------------------------
+# S1: a settings file we cannot decode is quarantined, not replaced
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_settings_are_quarantined_not_overwritten(_isolated_settings):
+    path = Path(s.SETTINGS_PATH)
+    path.write_text("{ this is not json", encoding="utf-8")
+    s._CACHE = None
+    try:
+        # We run on defaults for this session...
+        assert s.get("theme") == "dark"
+        # ...but the damaged bytes were moved aside, not overwritten.
+        assert not path.exists()
+        leftovers = list(_isolated_settings.glob("settings.json.corrupt-*"))
+        assert len(leftovers) == 1
+        assert (
+            leftovers[0].read_text(encoding="utf-8")
+            == "{ this is not json"
+        )
+
+        # Once it is quarantined the store is genuinely empty again, so a
+        # later save may publish a fresh one.
+        s.set_many(theme="light")
+        assert json.loads(path.read_text(encoding="utf-8"))["theme"] == "light"
+    finally:
+        s._CACHE = None
+
+
+def test_unreadable_settings_refuse_the_save_that_would_clobber_them(
+    _isolated_settings, monkeypatch
+):
+    path = Path(s.SETTINGS_PATH)
+    path.write_text("{ this is not json", encoding="utf-8")
+    s._CACHE = None
+
+    def denied(self, target):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(Path, "replace", denied)
+    try:
+        assert s.get("theme") == "dark"
+        assert path.exists()  # quarantine failed, bytes are still here
+
+        s.set_many(theme="light")
+
+        assert path.read_text(encoding="utf-8") == "{ this is not json"
+    finally:
+        s._CACHE = None
+
+
+# ---------------------------------------------------------------------------
+# S2: only the keys this call changed are written back
+# ---------------------------------------------------------------------------
+
+
+def test_set_many_does_not_clobber_untouched_keys(_isolated_settings):
+    """A full snapshot made the read-merge-write in _persist_snapshot a
+    no-op: every key we held was written back, so a change another Flint
+    instance made to a key we never touched was silently reverted."""
+    path = Path(s.SETTINGS_PATH)
+    s._CACHE = None
+    try:
+        assert s.get("theme") == "dark"  # our process loaded defaults
+
+        # A second instance writes its own choice for a key we never set.
+        path.write_text(
+            json.dumps({"schema_version": 1, "theme": "light"}),
+            encoding="utf-8",
+        )
+
+        s.set_many(auto_eject=True)
+
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert on_disk["theme"] == "light"
+        assert on_disk["auto_eject"] is True
+    finally:
+        s._CACHE = None

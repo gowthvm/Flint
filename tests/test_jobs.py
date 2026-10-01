@@ -208,17 +208,21 @@ def test_prune_manifests_only_touches_terminal_states(tmp_path):
     directory = tmp_path / "jobs"
     directory.mkdir()
     old = time.time() - 40 * 86400
-    for state in ("written", "failed", "writing", "resumable", "queued"):
+    terminal = ("written", "failed", "passed", "cancelled")
+    active = ("writing", "resumable", "queued")
+    for state in (*terminal, *active):
         _write_manifest(directory, f"{state}.json", state, mtime=old)
 
     removed = prune_manifests(directory, max_age_days=30)
 
-    assert removed == 2
-    assert not (directory / "written.json").exists()
-    assert not (directory / "failed.json").exists()
-    assert (directory / "writing.json").exists()
-    assert (directory / "resumable.json").exists()
-    assert (directory / "queued.json").exists()
+    # J1: passed (what CampaignRunner writes after the writer unlinked the
+    # manifest) and cancelled were terminal but not prunable, so campaign
+    # and cancelled-job manifests accumulated forever.
+    assert removed == len(terminal)
+    for state in terminal:
+        assert not (directory / f"{state}.json").exists()
+    for state in active:
+        assert (directory / f"{state}.json").exists()
 
 
 def test_prune_manifests_keeps_fresh_files(tmp_path):

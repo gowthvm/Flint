@@ -1,11 +1,16 @@
 import json
 import logging
-import os
 import threading
 from typing import Any
 
 from core import writeback
-from core.paths import APP_DIR, file_lock
+from core.paths import (
+    APP_DIR,
+    atomic_write_text,
+    file_lock,
+    quarantine_corrupt,
+    read_json_or_quarantine,
+)
 
 logger = logging.getLogger("flint")
 
@@ -122,24 +127,49 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+class _Unreadable(Exception):
+    """settings.json exists but could not be returned as a settings dict."""
+
+
 def _load() -> dict[str, Any]:
+    """Parse settings.json.
+
+    A missing file is not an error - it is a first run. A file that exists
+    but cannot be decoded raises :class:`_Unreadable` *after* being moved
+    aside, so the caller can tell "nothing stored yet" apart from "the
+    store is damaged" (S1): conflating the two would let the next save
+    write defaults over settings that were still on disk.
+    """
+    data, corrupt = read_json_or_quarantine(SETTINGS_PATH)
+    if corrupt:
+        raise _Unreadable(str(SETTINGS_PATH))
+    if data is None:
+        return dict(_DEFAULTS)
+    if not isinstance(data, dict):
+        logger.error("settings: %s is not a JSON object", SETTINGS_PATH)
+        quarantine_corrupt(SETTINGS_PATH)
+        raise _Unreadable(str(SETTINGS_PATH))
+    data = _migrate(data)
+    merged = dict(_DEFAULTS)
+    merged.update(data)
+    for key, typ in _TYPE_CHECK.items():
+        if key in merged and not isinstance(merged[key], typ):
+            merged[key] = _DEFAULTS.get(key)
+    for key, validator in _VALIDATORS.items():
+        if key in merged and not validator(merged[key]):
+            merged[key] = _DEFAULTS.get(key)
+    return merged
+
+
+def _load_or_defaults() -> dict[str, Any]:
     try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            data = _migrate(data)
-            merged = dict(_DEFAULTS)
-            merged.update(data)
-            for key, typ in _TYPE_CHECK.items():
-                if key in merged and not isinstance(merged[key], typ):
-                    merged[key] = _DEFAULTS.get(key)
-            for key, validator in _VALIDATORS.items():
-                if key in merged and not validator(merged[key]):
-                    merged[key] = _DEFAULTS.get(key)
-            return merged
-    except (OSError, json.JSONDecodeError):
-        pass
-    return dict(_DEFAULTS)
+        return _load()
+    except _Unreadable:
+        logger.error(
+            "settings: %s is unreadable; running with defaults for now",
+            SETTINGS_PATH,
+        )
+        return dict(_DEFAULTS)
 
 
 # In-memory cache to avoid repeated disk reads.
@@ -152,7 +182,11 @@ def _ensure_loaded() -> dict[str, Any]:
         return _CACHE
     with _lock:
         if _CACHE is None:
-            _CACHE = _load()
+            # S1: cache whatever we could read (defaults when the store is
+            # unreadable). _persist_snapshot refuses to write over an
+            # unreadable file, so a damaged store is never replaced by the
+            # defaults we are running on.
+            _CACHE = _load_or_defaults()
         return _CACHE
 
 
@@ -198,7 +232,11 @@ def set_many(**values: Any) -> None:
         if not clean:
             return
         data.update(clean)
-        snapshot = dict(data)
+        # S2: persist only the keys this call changed. A full snapshot
+        # overwrote every key on disk, which made the read-merge-write in
+        # _persist_snapshot a no-op - a concurrent process's change to any
+        # untouched key was always clobbered by ours.
+        snapshot = dict(clean)
     try:
         if writeback.enabled():
             # U15: the cache above already reflects the new values, so
@@ -212,16 +250,30 @@ def set_many(**values: Any) -> None:
 
 
 def _persist_snapshot(snapshot: dict[str, Any]) -> None:
-    """Merge ``snapshot`` into the on-disk file (fsync + atomic replace).
+    """Merge the changed keys in ``snapshot`` into the on-disk file.
 
     Runs on the caller's thread (CLI, tests) or on the write-back worker
-    when ``writeback`` is enabled; ordering is FIFO either way.
+    when ``writeback`` is enabled; ordering is FIFO either way. The
+    read-merge-write happens under the inter-process file lock so a change
+    made by another Flint instance to a key this call did not touch
+    survives.
     """
     APP_DIR.mkdir(parents=True, exist_ok=True)
     with file_lock(_LOCK_PATH):
         # Re-read from disk under file lock to merge with any
         # changes written by another process since our last load.
-        disk_data = _load()
+        try:
+            disk_data = _load()
+        except _Unreadable:
+            if SETTINGS_PATH.is_file():
+                # Quarantine failed earlier: the damaged bytes are still
+                # there. Refuse rather than replace them with defaults.
+                logger.error(
+                    "settings: refusing to overwrite unreadable %s",
+                    SETTINGS_PATH,
+                )
+                return
+            disk_data = dict(_DEFAULTS)
         disk_data.update(snapshot)
         # C10: every save stamps at least the current schema version -
         # but never talks a file written by a *newer* Flint down, which
@@ -230,12 +282,12 @@ def _persist_snapshot(snapshot: dict[str, Any]) -> None:
         stored = disk_data.get("schema_version")
         stored = stored if isinstance(stored, int) else SETTINGS_SCHEMA_VERSION
         disk_data["schema_version"] = max(stored, SETTINGS_SCHEMA_VERSION)
-        with _lock:
-            global _CACHE
-            _CACHE = disk_data
-        tmp = SETTINGS_PATH.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(disk_data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.replace(SETTINGS_PATH)
+        # H2: a fixed .tmp name is shared with every other Flint process,
+        # so two writers could publish a torn document.
+        atomic_write_text(SETTINGS_PATH, json.dumps(disk_data, indent=2))
+    # Only adopt the merged view once the bytes really landed: if the
+    # write threw, the in-memory cache still holds what the caller set and
+    # is closer to the truth than the file is.
+    with _lock:
+        global _CACHE
+        _CACHE = disk_data

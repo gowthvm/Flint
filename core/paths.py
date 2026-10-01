@@ -5,15 +5,108 @@ All modules that need the per-user data directory should import
 """
 
 import contextlib
+import json
 import logging
 import os
+import tempfile
 import time as _time
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("flint")
 
 APP_DIR: Path = Path(os.getenv("APPDATA", str(Path.home()))) / "Flint"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Publish ``text`` at ``path`` atomically (fsync + same-dir replace).
+
+    H2: a fixed ``path.with_suffix('.tmp')`` name is shared by every
+    process, so two Flint instances writing at the same time truncate each
+    other's temporary file and one of them publishes a torn JSON document.
+    ``mkstemp`` gives each writer its own file in the destination directory
+    (same volume, so ``os.replace`` is atomic); the loser's temp file is
+    removed on failure.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def quarantine_corrupt(path: Path) -> Path | None:
+    """Move an unreadable store aside instead of overwriting it.
+
+    Returns the new path, or ``None`` when the rename failed. Callers
+    treat a corrupt store as empty, so without this the next append would
+    publish a fresh file on top of the damaged one and the bytes that
+    might still be recoverable would be gone forever.
+    """
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.corrupt-{stamp}")
+    # Never clobber an earlier quarantine from the same second.
+    counter = 0
+    while dest.exists():
+        counter += 1
+        dest = path.with_name(f"{path.name}.corrupt-{stamp}-{counter}")
+    try:
+        path.replace(dest)
+    except OSError:
+        logger.exception("could not quarantine unreadable %s", path)
+        return None
+    logger.error(
+        "unreadable %s preserved as %s; continuing with an empty store",
+        path,
+        dest,
+    )
+    return dest
+
+
+def read_json_or_quarantine(path: Path) -> tuple[Any, bool]:
+    """Return ``(data, corrupt)`` for a JSON store.
+
+    ``corrupt`` is ``True`` when the file exists but could not be parsed -
+    in that case ``data`` is ``None``. A missing file is *not* corrupt: it
+    yields ``(None, False)`` and simply means "nothing stored yet".
+
+    A ``JSONDecodeError`` means the bytes are permanently damaged, so they
+    are moved aside first and can be inspected later. Any other ``OSError``
+    may be transient (a lock, an antivirus handle) and is only logged: no
+    rename is attempted, but the caller still must not treat the file as an
+    empty store and write over it.
+    """
+    if not path.is_file():
+        return None, False
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except json.JSONDecodeError as exc:
+        logger.error("%s is not valid JSON (%s)", path, exc)
+        quarantine_corrupt(path)
+        return None, True
+    except OSError as exc:
+        logger.error("cannot read %s (%s)", path, exc)
+        return None, True
+    if parsed is None:
+        # The file exists and decodes to JSON null - not "no file", and
+        # not a usable store either.
+        logger.error("%s contains JSON null", path)
+        quarantine_corrupt(path)
+        return None, True
+    return parsed, False
+
 
 
 def _try_lock(fd: int, retries: int, delay: float) -> bool:

@@ -18,7 +18,12 @@ logger = logging.getLogger("flint")
 JOB_SCHEMA_VERSION = 1
 
 # L10: only terminal states are garbage; anything still in flight is kept.
-PRUNEABLE_STATES = frozenset({"written", "failed"})
+# J1: ``passed`` (a finished deployment job) and ``cancelled`` are terminal
+# too - they were missing, so campaign runs (CampaignRunner._publish writes
+# ``passed`` after the writer has already unlinked the manifest on success)
+# and cancelled CLI jobs accumulated files that prune_manifests never
+# reclaimed. ``resumable`` stays: it is still retryable.
+PRUNEABLE_STATES = frozenset({"written", "failed", "passed", "cancelled"})
 
 
 @dataclass
@@ -146,8 +151,9 @@ def prune_manifests(directory: str | Path, *, max_age_days: int = 30) -> int:
 
     A manifest is removed only when **both** hold:
 
-    * its ``state`` is ``written`` or ``failed`` (active states —
-      ``writing``/``resumable``/``queued`` — are never touched), and
+    * its ``state`` is terminal - ``written``, ``failed``, ``passed`` or
+      ``cancelled`` (in-flight states - ``writing``/``resumable``/
+      ``queued`` - are never touched), and
     * its file mtime is at least ``max_age_days`` old.
 
     Files that cannot be parsed (or are not manifest objects) are skipped

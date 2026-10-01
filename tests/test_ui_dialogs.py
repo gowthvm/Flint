@@ -201,6 +201,36 @@ def test_flash_fail_popup(qapp, tmp_path, monkeypatch):
         w._shutdown()
 
 
+def test_flash_fail_popup_copy_report_is_not_a_dead_click(
+    qapp, tmp_path, monkeypatch
+):
+    """The failure dialog offers Copy report; its result used to be
+    discarded, so the button did nothing."""
+    w = _make_window(qapp, tmp_path)
+    try:
+        copied: list[bool] = []
+        monkeypatch.setattr(
+            w, "_on_copy_report_clicked", lambda: copied.append(True)
+        )
+
+        import ui.dialogs as dialogs_mod
+
+        offered: list = []
+
+        def fake_completion(parent, *, kind, title, message, buttons=None):
+            offered.extend(buttons or [])
+            return "copy"
+
+        monkeypatch.setattr(dialogs_mod, "completion", fake_completion)
+
+        w._finish_flash(False, "write failed: 87", None)
+
+        assert ("Copy report", "ghost", "copy") in offered
+        assert copied == [True]
+    finally:
+        w._shutdown()
+
+
 def test_page_verify_popups(qapp, tmp_path, monkeypatch):
     w = _make_window(qapp, tmp_path)
     try:

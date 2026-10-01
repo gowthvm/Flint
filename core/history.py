@@ -12,7 +12,6 @@ use would have to be serialised by the caller.
 import hashlib
 import json
 import logging
-import os
 import shutil
 import threading
 from datetime import datetime
@@ -20,7 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from core import writeback
-from core.paths import APP_DIR, file_lock
+from core.paths import (
+    APP_DIR,
+    atomic_write_text,
+    file_lock,
+    quarantine_corrupt,
+    read_json_or_quarantine,
+)
 
 logger = logging.getLogger("flint")
 
@@ -124,42 +129,68 @@ def load_history() -> list[dict[str, Any]]:
     cached = _history_cache
     if cached is not None and cached[0] == key:
         return list(cached[1])
-    entries = _read_history(HISTORY_PATH)
+    entries, writable = _read_history(HISTORY_PATH)
+    if not writable:
+        # H1: a failed read must never be cached. The file key still
+        # matches, so caching "empty" here would hide the damage from
+        # every later call and make verify_history_integrity() pass
+        # vacuously.
+        _invalidate_history_cache()
+        return []
     _history_cache = (key, entries)
     return list(entries)
 
 
-def _read_history(path: Path) -> list[dict[str, Any]]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get("entries"), list):
-            return [e for e in data["entries"] if isinstance(e, dict)]
-        if isinstance(data, list):
-            return [e for e in data if isinstance(e, dict)]
-    except (OSError, json.JSONDecodeError):
-        pass
-    return []
+def _read_history(path: Path) -> tuple[list[dict[str, Any]], bool]:
+    """Parse the store; return ``(entries, safe_to_write_over)``.
+
+    ``safe_to_write_over`` is ``False`` only when the file exists, could
+    not be parsed, *and* could not be moved aside - publishing a fresh
+    store on top of it would destroy the only copy (H1). A missing file is
+    ``( [], True )``: nothing stored yet.
+    """
+    data, corrupt = read_json_or_quarantine(path)
+    if corrupt:
+        return [], not path.is_file()
+    if data is None:
+        return [], True
+    if isinstance(data, dict) and isinstance(data.get("entries"), list):
+        return [e for e in data["entries"] if isinstance(e, dict)], True
+    if isinstance(data, list):
+        return [e for e in data if isinstance(e, dict)], True
+    # Valid JSON, wrong shape - just as unreadable as a truncated file.
+    logger.error("history: %s has an unexpected shape", path)
+    quarantine_corrupt(path)
+    return [], not path.is_file()
 
 
-def _save_history_unlocked(entries: list[dict[str, Any]]) -> None:
-    """Write history to disk. Caller must already hold the file lock."""
+def _save_history_unlocked(entries: list[dict[str, Any]]) -> bool:
+    """Write history to disk. Caller must already hold the file lock.
+
+    Returns ``False`` when the destination is unreadable and could not be
+    quarantined; callers must then keep their in-memory state instead of
+    reporting a successful save (H1).
+    """
+    if HISTORY_PATH.is_file() and not _read_history(HISTORY_PATH)[1]:
+        logger.error(
+            "history: refusing to overwrite unreadable %s", HISTORY_PATH
+        )
+        return False
     entries = _truncate_entries(entries)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
         "entries": entries,
     }
-    tmp = HISTORY_PATH.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(HISTORY_PATH)
+    # H2: a fixed .tmp name is shared with every other Flint process, so
+    # two writers could publish a torn document. atomic_write_text gives
+    # each writer its own temporary file.
+    atomic_write_text(HISTORY_PATH, json.dumps(payload, indent=2))
     # The file on disk changed: drop the read cache so the next
     # ``load_history`` reflects what was just written (and anything a
     # concurrent reader wrote while we held the lock).
     _invalidate_history_cache()
+    return True
 
 
 def save_history(entries: list[dict[str, Any]]) -> None:
@@ -185,8 +216,11 @@ def _persist_entries(entries: list[dict[str, Any]], seq: int | None = None) -> N
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with file_lock(_HISTORY_LOCK_PATH):
-            _save_history_unlocked(entries)
-        if seq is not None:
+            saved = _save_history_unlocked(entries)
+        if seq is not None and saved:
+            # H1: only drop the overlay once the bytes really landed. A
+            # refused save (unreadable destination) leaves readers on the
+            # in-memory state instead of silently reverting them to disk.
             _clear_pending(seq)
     except OSError:
         # A history write must never crash a flash flow or block close:
@@ -220,10 +254,16 @@ def _append_on_worker(entry: dict[str, Any], seq: int) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with file_lock(_HISTORY_LOCK_PATH):
             # Bypass the pending overlay: disk is the merge base here.
-            entries = _read_history(HISTORY_PATH)
+            entries, writable = _read_history(HISTORY_PATH)
+            if not writable:
+                logger.error(
+                    "history: append skipped, %s is unreadable", HISTORY_PATH
+                )
+                return
             entries.append(entry)
-            _save_history_unlocked(entries)
-        _clear_pending(seq)
+            saved = _save_history_unlocked(entries)
+        if saved:
+            _clear_pending(seq)
     except OSError:
         logger.exception("failed to append history")
 
@@ -282,7 +322,8 @@ def append_audited_history(entry: dict[str, Any]) -> dict[str, Any]:
             entries = load_history()
             record = _make_record(entry, entries)
             entries.append(record)
-            _save_history_unlocked(entries)
+            if not _save_history_unlocked(entries):
+                return entry
             return record
     except OSError:
         logger.exception("failed to append audited history")
@@ -293,10 +334,16 @@ def _append_record_on_worker(record: dict[str, Any], seq: int) -> None:
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with file_lock(_HISTORY_LOCK_PATH):
-            entries = _read_history(HISTORY_PATH)
+            entries, writable = _read_history(HISTORY_PATH)
+            if not writable:
+                logger.error(
+                    "history: append skipped, %s is unreadable", HISTORY_PATH
+                )
+                return
             entries.append(record)
-            _save_history_unlocked(entries)
-        _clear_pending(seq)
+            saved = _save_history_unlocked(entries)
+        if saved:
+            _clear_pending(seq)
     except OSError:
         logger.exception("failed to append audited history")
 
@@ -341,12 +388,18 @@ def export_history_csv(target_path: str | Path) -> bool:
         entries = load_history()
         if not entries:
             return False
+        # C2: entries are not uniform - an audited record carries
+        # integrity_prev/integrity_sha256 that a plain flash record does
+        # not, and a wipe has no iso. DictWriter raises ValueError on any
+        # field outside fieldnames, so take the union (as the Markdown
+        # export already does) instead of only the first record's keys.
+        fieldnames = list(dict.fromkeys(key for e in entries for key in e))
         with open(target_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(entries[0].keys()))
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(entries)
         return True
-    except (OSError, csv.Error):
+    except (OSError, csv.Error, ValueError):
         return False
 
 

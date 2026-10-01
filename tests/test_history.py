@@ -236,3 +236,73 @@ def test_async_save_older_job_cannot_clear_newer_pending(
     assert [e["iso"] for e in h.load_history()] == ["second.iso"]
     on_disk = json.loads(h.HISTORY_PATH.read_text(encoding="utf-8"))
     assert [e["iso"] for e in on_disk["entries"]] == ["second.iso"]
+
+
+# ---------------------------------------------------------------------------
+# H1: a store that cannot be decoded is quarantined, never silently replaced
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_history_is_quarantined_not_overwritten(tmp_path, monkeypatch):
+    path = tmp_path / "h.json"
+    monkeypatch.setattr(h, "HISTORY_PATH", path)
+    path.write_text("{ truncated", encoding="utf-8")
+
+    assert h.load_history() == []
+
+    leftovers = list(tmp_path.glob("h.json.corrupt-*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_text(encoding="utf-8") == "{ truncated"
+    assert not path.exists()
+
+    h.append_history({"iso": "a.iso"})
+    assert [e["iso"] for e in h.load_history()] == ["a.iso"]
+
+
+def test_corrupt_history_that_cannot_be_quarantined_is_never_cached(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "h.json"
+    monkeypatch.setattr(h, "HISTORY_PATH", path)
+    path.write_text("{ truncated", encoding="utf-8")
+
+    def denied(self, target):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(Path, "replace", denied)
+    try:
+        assert h.load_history() == []
+        # A failed read must never be cached: the file key still matches,
+        # so caching "empty" here would hide the damage from every later
+        # call and let verify_history_integrity() pass vacuously.
+        assert h._history_cache is None
+
+        h.append_history({"iso": "a.iso"})
+
+        # Refused: the only copy of the damaged store is still on disk.
+        assert path.read_text(encoding="utf-8") == "{ truncated"
+    finally:
+        h._history_cache = None
+
+
+# ---------------------------------------------------------------------------
+# C2: CSV export must accept records with different keys
+# ---------------------------------------------------------------------------
+
+
+def test_export_history_csv_unions_mixed_entry_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "HISTORY_PATH", tmp_path / "h.json")
+    h.save_history(
+        [
+            {"timestamp": "t1", "iso": "a.iso"},
+            {"timestamp": "t2", "iso": "b.iso", "integrity_sha256": "ff"},
+            {"timestamp": "t3", "iso": None, "operation": "wipe"},
+        ]
+    )
+
+    out = tmp_path / "h.csv"
+    assert h.export_history_csv(out) is True
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4  # header + 3 rows
+    assert "integrity_sha256" in lines[0]

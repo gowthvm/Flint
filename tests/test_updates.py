@@ -214,3 +214,46 @@ def test_app_version_constant_is_well_formed():
     assert APP_VERSION.count(".") == 2
     parts = APP_VERSION.split(".")
     assert all(p.isdigit() for p in parts)
+
+
+# ---------------------------------------------------------------------------
+# T1: MainWindow._shutdown() calls .cancel() on every live worker
+# ---------------------------------------------------------------------------
+
+
+def test_every_update_worker_exposes_cancel():
+    for worker in (
+        updates.UpdateCheckWorker,
+        updates.UpdateDownloadWorker,
+        updates.DigestFetchWorker,
+    ):
+        assert callable(getattr(worker, "cancel", None)), worker.__name__
+
+
+def test_download_and_verify_cancel_removes_partial_file(tmp_path, monkeypatch):
+    import urllib.request
+
+    # Several 256 KiB chunks so the cancel flag is observed between reads.
+    payload = b"x" * (512 * 1024 + 10)
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        _fake_urlopen(payload, headers={"Content-Length": str(len(payload))}),
+    )
+    dest = tmp_path / "flint.exe"
+    cancelled = {"flag": False}
+
+    def on_progress(done: int, total: int) -> None:
+        cancelled["flag"] = True  # the user hits cancel mid-download
+
+    ok, message = updates.download_and_verify(
+        "https://example.test/flint.exe",
+        dest,
+        None,
+        progress=on_progress,
+        is_cancelled=lambda: cancelled["flag"],
+    )
+
+    assert not ok
+    assert message == "cancelled"
+    assert not dest.exists()  # never leave a half-written exe behind
