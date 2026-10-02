@@ -108,6 +108,7 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
         DWORD bytes_read = 0;
         DWORD to_write;
         DWORD written_total = 0;
+        DWORD io_err = 0;
 
         /* Stop exactly at the size we sized the source at. */
         if (total > 0 && done >= total)
@@ -115,19 +116,35 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
         if (total > 0 && (unsigned long long)want > total - done)
             want = (DWORD)(total - done);
 
+        /* The file I/O runs with the GIL released: a single WriteFile with
+         * FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH can take
+         * milliseconds, and pinning the interpreter for every chunk (plus the
+         * final FlushFileBuffers) stalls every Python slot in the GUI - the
+         * progress signals, the cancel flag, the repaints.  GetLastError()
+         * must be sampled while still inside the protected region, because
+         * re-acquiring the GIL clobbers it; no goto may cross the macro. */
         /* ReadFile may transfer fewer bytes than asked without being at the
          * end of the file - the very hazard this function already guards on
          * the write side - and a short *mid-file* read that was padded to the
          * next sector would shift every following byte out of place.  Fill
          * the buffer instead; only a read that returns 0 means end of file. */
+        Py_BEGIN_ALLOW_THREADS
         while (bytes_read < want) {
             DWORD got = 0;
             if (!ReadFile(in_handle, (char *)buffer + bytes_read,
-                          want - bytes_read, &got, NULL))
-                goto fail;
-            if (got == 0)
+                          want - bytes_read, &got, NULL)) {
+                io_err = GetLastError();
                 break;
+            }
+            if (got == 0)
+                break; /* true end of file */
             bytes_read += got;
+        }
+        Py_END_ALLOW_THREADS
+        if (io_err != 0) {
+            saved_err = io_err;
+            ok = 0;
+            goto cleanup;
         }
         if (bytes_read == 0)
             break;
@@ -144,16 +161,25 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
          * still advances by the count written.  `done` below counts the
          * whole chunk, so a short write must be completed here or the
          * target would silently hold less than the reported byte count. */
+        Py_BEGIN_ALLOW_THREADS
         while (written_total < to_write) {
             DWORD written = 0;
             if (!WriteFile(out_handle, (char *)buffer + written_total,
-                           to_write - written_total, &written, NULL))
-                goto fail;
+                           to_write - written_total, &written, NULL)) {
+                io_err = GetLastError();
+                break;
+            }
             if (written == 0) {
-                SetLastError(ERROR_WRITE_FAULT);
-                goto fail;
+                io_err = ERROR_WRITE_FAULT;
+                break;
             }
             written_total += written;
+        }
+        Py_END_ALLOW_THREADS
+        if (io_err != 0) {
+            saved_err = io_err;
+            ok = 0;
+            goto cleanup;
         }
         done += bytes_read;
 
@@ -179,8 +205,18 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
         goto cleanup;
     }
 
-    if (!FlushFileBuffers(out_handle))
-        goto fail;
+    {
+        DWORD flush_err = 0;
+        Py_BEGIN_ALLOW_THREADS
+        if (!FlushFileBuffers(out_handle))
+            flush_err = GetLastError();
+        Py_END_ALLOW_THREADS
+        if (flush_err != 0) {
+            saved_err = flush_err;
+            ok = 0;
+            goto cleanup;
+        }
+    }
 
     if (!is_device) {
         /* The padded final chunk may have extended a regular file past the

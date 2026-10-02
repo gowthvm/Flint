@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -538,6 +539,55 @@ def test_write_stream_native_full_stream_returns_count(monkeypatch, tmp_path):
         str(src), str(dst), 4096, use_native=True
     )
     assert written == len(payload)
+
+
+# ------------------------------------------------------- GIL release (B36) --
+
+
+@requires_native
+def test_native_write_releases_the_gil_while_it_copies(tmp_path):
+    """The copy must not pin the interpreter for its whole duration.
+
+    Every chunk is a synchronous ``FILE_FLAG_WRITE_THROUGH`` ``WriteFile``
+    plus the matching ``ReadFile``, and the final ``FlushFileBuffers`` can
+    take longer still.  Holding the GIL across them stalls every Python slot
+    in the GUI - the progress signals, the cancel flag, the repaints - so the
+    worker thread has to drop the GIL around the I/O and only take it back to
+    run the progress callback.
+    """
+    import core._native_writer as native
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(_blob(1024 * 1024, seed=9))
+    dst = tmp_path / "dst.bin"
+
+    counts = [0]
+    stop = threading.Event()
+    started = threading.Event()
+
+    def spin() -> None:
+        started.set()
+        n = 0
+        while not stop.is_set():
+            n += 1
+            counts[0] = n
+
+    t = threading.Thread(target=spin, daemon=True)
+    t.start()
+    started.wait(5)
+    time.sleep(0.05)  # let it run freely before the copy takes the GIL
+
+    before = counts[0]
+    native.native_write(str(src), str(dst), 64 * 1024, None)
+    after = counts[0]
+
+    stop.set()
+    t.join(timeout=5)
+
+    assert after - before > 1000, (
+        f"another Python thread advanced only {after - before} iterations "
+        "during the whole native copy - the GIL was never released"
+    )
 
 
 # ------------------------------------------------- audit fixes (M1/M3/L3) ----
