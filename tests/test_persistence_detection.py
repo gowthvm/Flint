@@ -6,6 +6,7 @@ writer's persistence dispatch. No real drives are touched.
 """
 
 import os
+import subprocess
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -148,8 +149,8 @@ def test_create_persistence_casper_with_mke2fs(tmp_path, monkeypatch):
         persistence, "_mke2fs_candidates", lambda: [["mke2fs.exe"]]
     )
 
-    def fake_run(args, capture_output=True, text=True, check=False):
-        calls.append(list(args))
+    def fake_run(args, capture_output=True, text=True, check=False, timeout=None):
+        calls.append({"args": list(args), "timeout": timeout})
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(persistence.subprocess, "run", fake_run)
@@ -159,8 +160,25 @@ def test_create_persistence_casper_with_mke2fs(tmp_path, monkeypatch):
     )
     assert ok is True
     assert "formatted" in msg
-    assert calls and calls[0][0].endswith("mke2fs.exe")
-    assert calls[0][1] == "-t" and calls[0][2] == "ext4"
+    assert calls and calls[0]["args"][0].endswith("mke2fs.exe")
+    assert calls[0]["args"][1] == "-t" and calls[0]["args"][2] == "ext4"
+    assert calls[0]["timeout"] == persistence._MKE2FS_TIMEOUT_SECONDS
+
+
+def test_format_ext4_image_times_out_on_hung_tool(monkeypatch, tmp_path):
+    """A stuck mke2fs must fail closed instead of blocking the UI forever."""
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(persistence.subprocess, "run", fake_run)
+
+    with pytest.raises(OSError, match="timed out"):
+        persistence._format_ext4_image(str(tmp_path / "casper-rw"), ["mke2fs.exe"])
+
+    assert calls and calls[0]["timeout"] == persistence._MKE2FS_TIMEOUT_SECONDS
 
 
 def test_create_persistence_falls_back_after_wsl_failure(tmp_path, monkeypatch):
@@ -171,7 +189,7 @@ def test_create_persistence_falls_back_after_wsl_failure(tmp_path, monkeypatch):
         lambda: [["wsl.exe", "mke2fs"], ["mke2fs.exe"]],
     )
 
-    def fake_run(args, capture_output=True, text=True, check=False):
+    def fake_run(args, capture_output=True, text=True, check=False, timeout=None):
         argv = list(args)
         calls.append(argv)
         if argv[0].endswith("wsl.exe"):
@@ -241,7 +259,7 @@ def test_casper_accepts_exactly_size_plus_slack(tmp_path, monkeypatch):
         persistence, "_mke2fs_candidates", lambda: [["mke2fs.exe"]]
     )
 
-    def fake_run(args, capture_output=True, text=True, check=False):
+    def fake_run(args, capture_output=True, text=True, check=False, timeout=None):
         calls.append(list(args))
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 

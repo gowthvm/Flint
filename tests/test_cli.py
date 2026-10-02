@@ -4,6 +4,7 @@
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -2217,6 +2218,22 @@ def test_elevation_rebuilds_from_passed_argv(monkeypatch, capsys):
     assert rc == cli.EXIT_USAGE
     assert len(recorded) == 1
     assert recorded[0][-2:] == ["wipe", "--yes"]
+
+
+def test_ensure_elevated_uses_timeout(monkeypatch):
+    """The UAC relaunch must fail closed instead of hanging forever."""
+    seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    result = cli._run_elevated_relaunch("echo ok", "out.txt", "err.txt")
+
+    assert result.returncode == 0
+    assert seen["kwargs"].get("timeout") == cli._ELEVATION_TIMEOUT_SECONDS
 
 
 def test_flash_resume_documents_job_manifest(capsys):

@@ -42,6 +42,10 @@ _KEYWORDS = {"casper": "persistent", "live": "persistence"}
 #: the writes the live session is about to make, so filling the stick to
 #: the last byte would fail later in a much less obvious way.
 _FREE_SPACE_SLACK_BYTES = 64 * 1024 * 1024
+#: ``mke2fs`` and the WSL-hosted equivalent can block on a bad disk or a
+#: wedged filesystem utility; cap them so the UI and CLI fail closed instead
+#: of hanging forever while the flash job is still queued.
+_MKE2FS_TIMEOUT_SECONDS = 300.0
 
 
 def _free_space_bytes(path: str) -> int | None:
@@ -166,7 +170,18 @@ def _format_ext4_image(image_path: str, tool: list[str]) -> None:
         command = tool + ["-t", "ext4", "-q", "-F", _wsl_path(image_path)]
     else:
         command = tool + ["-t", "ext4", "-q", "-F", image_path]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_MKE2FS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(
+            f"{command[0]} timed out after {_MKE2FS_TIMEOUT_SECONDS:g}s"
+        ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise OSError(detail or "mke2fs failed")

@@ -614,6 +614,24 @@ def _command_help(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_ELEVATION_TIMEOUT_SECONDS = 60.0
+
+
+def _run_elevated_relaunch(
+    ps: str,
+    out_file: str,
+    err_file: str,
+) -> subprocess.CompletedProcess[str]:
+    """Launch the PowerShell UAC relay with a hard timeout."""
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_ELEVATION_TIMEOUT_SECONDS,
+    )
+
+
 def ensure_elevated(argv: list[str]) -> int | None:
     """Return None when already elevated (or elevation is unavailable),
     otherwise relaunch elevated and return the child's exit code.
@@ -658,13 +676,8 @@ def ensure_elevated(argv: list[str]) -> int | None:
             "exit $p.ExitCode "
             "} catch { exit 255 }"
         )
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
+        proc = _run_elevated_relaunch(ps, out_file, err_file)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         _eprint(f"could not relaunch elevated: {exc}")
         return EXIT_NO_ADMIN
     stdout_text = ""
