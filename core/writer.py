@@ -76,7 +76,17 @@ def write_stream(
     if use_native:
         native_mod = _load_native_writer()
         if native_mod is not None:
-            return int(native_mod.native_write(src, device, chunk_size, progress))
+            expected = os.path.getsize(src)
+            written = int(
+                native_mod.native_write(src, device, chunk_size, progress)
+            )
+            # B35: never report a short stream as a successful write, even if
+            # an older build of the extension is what is on disk.
+            if written < expected:
+                raise OSError(
+                    f"native write stopped short: {written} of {expected} bytes"
+                )
+            return written
     return _python_write_stream(src, device, chunk_size, progress)
 
 
@@ -681,6 +691,12 @@ class UsbWriter(QThread):
             written = native_mod.native_write(
                 self.iso_path, self.drive_path, self.chunk_size, on_progress
             )
+            # B35: a short stream is a failed write, never a 100% one.  The
+            # extension checks this too, but a stale .pyd may not.
+            if written < total:
+                raise OSError(
+                    f"native write stopped short: {written} of {total} bytes"
+                )
         except _NativeCancel:
             self._finished = True
             self.done.emit(False, "cancelled")

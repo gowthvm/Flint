@@ -483,6 +483,63 @@ def test_writer_chunk_size_clamped_to_minimum():
     assert w.chunk_size == writer.DEFAULT_CHUNK_SIZE
 
 
+# ------------------------------------------------------- short stream (B35) --
+
+
+class _ShortNative:
+    """Extension that reports fewer bytes than it actually copied."""
+
+    def native_write(self, path, device_path, chunk_size, progress=None):
+        return 1
+
+
+def test_write_stream_native_short_stream_raises(monkeypatch, tmp_path):
+    """A short stream is an error, never a successful write."""
+    src = tmp_path / "iso.bin"
+    src.write_bytes(_blob(4096 * 3, seed=5))
+    monkeypatch.setitem(sys.modules, "core._native_writer", _ShortNative())
+
+    with pytest.raises(OSError, match="stopped short"):
+        writer.write_stream(
+            str(src), str(tmp_path / "dst.bin"), 4096, use_native=True
+        )
+
+
+def test_writer_inner_native_short_stream_reports_failure(
+    tmp_path, monkeypatch
+):
+    """_run_native must not report 100% for a truncated image."""
+    w, _ = _monkeypatched_writer(monkeypatch, tmp_path, use_native=True)
+    monkeypatch.setitem(sys.modules, "core._native_writer", _ShortNative())
+    results = []
+    w.done.connect(lambda ok, msg: results.append((ok, msg)))
+
+    w.run()
+
+    assert len(results) == 1
+    ok, msg = results[0]
+    assert ok is False
+    assert msg.startswith("native write stopped short")
+
+
+def test_write_stream_native_full_stream_returns_count(monkeypatch, tmp_path):
+    """The guard fires on short streams only - an exact copy still succeeds."""
+    src = tmp_path / "iso.bin"
+    payload = _blob(4096 * 3, seed=7)
+    src.write_bytes(payload)
+    dst = tmp_path / "dst.bin"
+
+    class _Exact:
+        def native_write(self, path, device_path, chunk_size, progress=None):
+            return os.path.getsize(path)
+
+    monkeypatch.setitem(sys.modules, "core._native_writer", _Exact())
+    written = writer.write_stream(
+        str(src), str(dst), 4096, use_native=True
+    )
+    assert written == len(payload)
+
+
 # ------------------------------------------------- audit fixes (M1/M3/L3) ----
 
 

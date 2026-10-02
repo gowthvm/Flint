@@ -104,12 +104,31 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
     }
 
     for (;;) {
+        DWORD want = (DWORD)chunk_size;
         DWORD bytes_read = 0;
         DWORD to_write;
         DWORD written_total = 0;
 
-        if (!ReadFile(in_handle, buffer, (DWORD)chunk_size, &bytes_read, NULL))
-            goto fail;
+        /* Stop exactly at the size we sized the source at. */
+        if (total > 0 && done >= total)
+            break;
+        if (total > 0 && (unsigned long long)want > total - done)
+            want = (DWORD)(total - done);
+
+        /* ReadFile may transfer fewer bytes than asked without being at the
+         * end of the file - the very hazard this function already guards on
+         * the write side - and a short *mid-file* read that was padded to the
+         * next sector would shift every following byte out of place.  Fill
+         * the buffer instead; only a read that returns 0 means end of file. */
+        while (bytes_read < want) {
+            DWORD got = 0;
+            if (!ReadFile(in_handle, (char *)buffer + bytes_read,
+                          want - bytes_read, &got, NULL))
+                goto fail;
+            if (got == 0)
+                break;
+            bytes_read += got;
+        }
         if (bytes_read == 0)
             break;
         to_write = bytes_read;
@@ -147,8 +166,17 @@ py_native_write(PyObject *self, PyObject *args, PyObject *kwargs)
             }
             Py_DECREF(result);
         }
-        if (bytes_read < (DWORD)chunk_size)
-            break;
+        if (bytes_read < want)
+            break; /* end of file before `want` bytes - caught below */
+    }
+
+    /* A short stream is a failed write, not a successful one.  Without this
+     * guard a truncated image was handed back as a normal byte count and the
+     * caller reported 100% complete. */
+    if (total > 0 && done < total) {
+        saved_err = ERROR_HANDLE_EOF;
+        ok = 0;
+        goto cleanup;
     }
 
     if (!FlushFileBuffers(out_handle))
