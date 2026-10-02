@@ -2410,3 +2410,17 @@ def test_flash_records_history_for_skip_flashed(tmp_path, monkeypatch, capsys):
     assert fleet.was_recently_flashed(serial_less, str(image)) is True
     other = {**serial_less, "physical_path": r"\\.\PHYSICALDRIVE9"}
     assert fleet.was_recently_flashed(other, str(image)) is False
+
+
+def test_copy_to_clipboard_caps_a_wedged_child(monkeypatch):
+    """The clipboard hop must never be able to hang `flint report`."""
+    seen: dict[str, object] = {}
+
+    def hang(*args, **kwargs):
+        seen.update(kwargs)
+        raise cli.subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(cli.subprocess, "run", hang)
+    cli._copy_to_clipboard("report text")
+
+    assert seen["timeout"] == 15

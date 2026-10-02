@@ -290,6 +290,30 @@ def test_prepare_partition_surfaces_diskpart_failure(monkeypatch):
         diskpart.prepare_partition(1, "gpt", "fat32")
 
 
+def test_run_caps_every_child_at_the_configured_timeout(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake(*args, **kwargs):
+        seen.update(kwargs)
+        return _FakeResult()
+
+    monkeypatch.setattr(diskpart.subprocess, "run", fake)
+    diskpart._run([diskpart._DISKPART, "/s", "script.txt"])
+
+    assert seen["timeout"] == diskpart._RUN_TIMEOUT_SECONDS
+
+
+def test_run_turns_a_hung_child_into_an_oserror(monkeypatch):
+    def hang(*args, **kwargs):
+        raise diskpart.subprocess.TimeoutExpired(
+            args[0], kwargs["timeout"]
+        )
+
+    monkeypatch.setattr(diskpart.subprocess, "run", hang)
+    with pytest.raises(OSError, match="timed out after 300s"):
+        diskpart._run([diskpart._DISKPART, "/s", "script.txt"])
+
+
 def test_non_windows_raises_not_implemented(monkeypatch):
     monkeypatch.setattr(os, "name", "posix")
     with pytest.raises(NotImplementedError, match="Windows"):

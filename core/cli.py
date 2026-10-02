@@ -1319,15 +1319,21 @@ def _cmd_list(opts: dict[str, object]) -> int:
 
 
 def _copy_to_clipboard(text: str) -> None:
-    """Copy text to the Windows clipboard via PowerShell."""
+    """Copy text to the Windows clipboard via PowerShell.
+
+    Capped at 15 s: PowerShell startup plus ``Set-Clipboard``. Without the
+    cap a wedged child hung `flint report` forever after the report itself
+    had already been printed.
+    """
     try:
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", f"Set-Clipboard -Value '{text.replace(chr(39), chr(39)*2)}'"],
             capture_output=True,
             check=False,
+            timeout=15,
         )
         _eprint("report copied to clipboard")
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
 

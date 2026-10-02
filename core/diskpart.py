@@ -36,6 +36,14 @@ _DISM = os.path.join(_SYSTEM32, "dism.exe")
 _BCD_BOOT = os.path.join(_SYSTEM32, "bcdboot.exe")
 _WINDOWS_IMAGE_NAMES = ("install.wim", "install.esd", "install.swm")
 
+#: Every command `_run` wraps is short and non-interactive (diskpart,
+#: format.com, bcdboot, PowerShell mount queries). None of them should ever
+#: take this long; without a cap a wedged child blocked the CLI and the GUI
+#: worker forever with no message. Deliberately *not* applied to robocopy
+#: or the file-copy tree walk, which legitimately run for the length of the
+#: transfer, nor to DISM/mke2fs.
+_RUN_TIMEOUT_SECONDS = 300.0
+
 
 def _require_windows() -> None:
     if os.name != "nt":
@@ -112,9 +120,25 @@ def _ps_quote(text: str) -> str:
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        args, capture_output=True, text=True, check=False
-    )
+    """Run a short system command, failing loudly instead of hanging.
+
+    ``TimeoutExpired`` is not an ``OSError``, so it is translated here —
+    callers already treat ``OSError`` as "this step failed" and surface the
+    message, and killing the child on expiry is what ``subprocess.run``
+    does anyway.
+    """
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_RUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(
+            " ".join(args) + f" timed out after {_RUN_TIMEOUT_SECONDS:g}s"
+        ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise OSError(
