@@ -2,7 +2,7 @@
 
 Write disk images to USB drives on Windows 10/11, then verify that every byte was written correctly.
 
-**Current release: 2.0.0** — durable deployment campaigns, safe resumable
+**Current release: 2.0.1** — durable deployment campaigns, safe resumable
 writes, bounded multi-drive deployment, audit reports, clone read-back
 verification, and structured boot-confidence diagnostics.
 
