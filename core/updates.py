@@ -23,6 +23,7 @@ from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.checksum import parse_sidecar
 from core.version import APP_VERSION
 
 _DEFAULT_URL = "https://api.github.com/repos/gowthvm/Flint/releases/latest"
@@ -267,7 +268,15 @@ def sidecar_digest_url(release: dict[str, Any]) -> str | None:
 
 
 def fetch_sidecar_digest(url: str | None, timeout: float = 8.0) -> str | None:
-    """Download and parse the bare-hex checksum asset; None on any failure."""
+    """Download the checksum asset and extract its SHA-256; None on failure.
+
+    The body is handed to :func:`core.checksum.parse_sidecar`, the same
+    parser the pre-flash sidecar check uses, so a bare digest, ``sha256sum``
+    output (``<digest>  <name>``) and ``certutil`` output are all accepted.
+    ``updates`` used to keep its own "concatenate every hex character" loop,
+    which rejected any sidecar that also carried a filename column - and a
+    rejected sidecar silently disabled the digest check on the download.
+    """
     if not url:
         return None
     request = urllib.request.Request(url, headers={"User-Agent": _UA})
@@ -276,10 +285,7 @@ def fetch_sidecar_digest(url: str | None, timeout: float = 8.0) -> str | None:
             text = response.read(4096).decode("ascii", errors="ignore")
     except Exception:
         return None
-    digest = "".join(ch for ch in text if ch in "0123456789abcdefABCDEF")
-    if len(digest) == 64:
-        return digest.lower()
-    return None
+    return parse_sidecar(text)
 
 
 def version_from_tag(tag: str) -> str:

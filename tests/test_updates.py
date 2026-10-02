@@ -273,6 +273,31 @@ def test_fetch_sidecar_digest_junk(monkeypatch):
     assert updates.fetch_sidecar_digest("https://example.test/x") is None
 
 
+def test_fetch_sidecar_digest_sha256sum_format(monkeypatch):
+    """A sidecar that also carries a filename column must still be usable.
+
+    The old "concatenate every hex character" parser returned 67 chars for
+    ``<digest>  flint.exe`` and fell back to ``None`` - which silently
+    disabled the digest check on the download even though the release had
+    published a checksum.
+    """
+    import urllib.request
+
+    digest = "cd" * 32
+    body = f"{digest}  flint.exe\r\n".encode("ascii")
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(body))
+    assert updates.fetch_sidecar_digest("https://example.test/x") == digest
+
+
+def test_fetch_sidecar_digest_certutil_format(monkeypatch):
+    import urllib.request
+
+    digest = "ef" * 32
+    body = f"SHA256(flint.exe)= {digest}\r\n".encode("ascii")
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(body))
+    assert updates.fetch_sidecar_digest("https://example.test/x") == digest
+
+
 def test_fetch_sidecar_digest_missing_url():
     assert updates.fetch_sidecar_digest(None) is None
 
