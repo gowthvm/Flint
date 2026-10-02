@@ -90,9 +90,11 @@ def drive_number_from_path(drive_path: str) -> int:
     return int(match.group(1))
 
 
-def build_diskpart_script(drive_number: int, partition_scheme: str) -> str:
+def build_diskpart_script(
+    drive_number: int, partition_scheme: str, target_system: str = "auto"
+) -> str:
     """diskpart script that wipes the disk and makes one primary partition."""
-    scheme = resolve_partition_scheme(partition_scheme, "auto")
+    scheme = resolve_partition_scheme(partition_scheme, target_system)
     lines = [
         f"select disk {int(drive_number)}",
         "clean",
@@ -213,13 +215,43 @@ def resolve_drive_letter(drive_number: int) -> str:
     return letter[0]
 
 
+def validate_write_options(
+    partition_scheme: str, filesystem: str, target_system: str = "auto"
+) -> None:
+    """Validate the file-copy options before anything destructive runs.
+
+    B12: the filesystem used to be checked only inside run_format(), which
+    fires *after* diskpart has already executed ``clean`` and wiped the
+    target's partition table; an unsupported scheme or target system was
+    never checked at all, it was just quietly coerced by ``resolve_``
+    helpers.  Call this first so a typo costs nothing.
+    """
+    scheme = (partition_scheme or "auto").lower()
+    if scheme not in SCHEMES:
+        raise ValueError(f"unsupported partition scheme: {partition_scheme}")
+    fs = (filesystem or "fat32").lower()
+    if fs not in FILESYSTEMS:
+        raise ValueError(f"unsupported filesystem: {filesystem}")
+    target = (target_system or "auto").lower()
+    if target not in TARGET_SYSTEMS:
+        raise ValueError(f"unsupported target system: {target_system}")
+
+
 def prepare_partition(
-    drive_number: int, partition_scheme: str, filesystem: str
+    drive_number: int,
+    partition_scheme: str,
+    filesystem: str,
+    target_system: str = "auto",
 ) -> str:
     """Partition + format a raw disk; returns the new partition's letter."""
     _require_windows()
-    scheme = resolve_partition_scheme(partition_scheme, "auto")
-    script = build_diskpart_script(drive_number, scheme)
+    # B12: reject bad options before diskpart touches the disk.
+    validate_write_options(partition_scheme, filesystem, target_system)
+    # B4: honour the caller's target system when resolving "auto" (legacy
+    # targets get MBR, everything else GPT); it used to be hardcoded to
+    # "auto", which made the target_system setting a no-op.
+    scheme = resolve_partition_scheme(partition_scheme, target_system)
+    script = build_diskpart_script(drive_number, scheme, target_system)
     fd, script_path = tempfile.mkstemp(prefix="flint-diskpart-", suffix=".txt")
     # The script file is intentionally left in %TEMP% for inspection; the OS
     # cleans it up eventually.

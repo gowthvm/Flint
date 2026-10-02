@@ -568,7 +568,7 @@ def test_filecopy_cancel_midway_reports_cancelled(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         writer.diskpart, "prepare_partition",
-        lambda number, scheme, filesystem: "X",
+        lambda number, scheme, filesystem, target="auto": "X",
     )
 
     def cancel_after_partition(iso_path, letter, **_kw):
@@ -1126,7 +1126,9 @@ def _filecopy_setup(monkeypatch, tmp_path, **kwargs):
         writer.diskpart, "resolve_write_mode", lambda mode, iso: "filecopy"
     )
     monkeypatch.setattr(
-        writer.diskpart, "prepare_partition", lambda n, s, f: "X"
+        writer.diskpart,
+        "prepare_partition",
+        lambda n, s, f, t="auto": "X",
     )
     monkeypatch.setattr(
         writer.diskpart, "copy_iso_files", lambda iso, letter, **_kw: None

@@ -587,6 +587,35 @@ def test_flash_all_timeout_validation(tmp_path):
     assert cli._cmd_flash_all({**base, "timeout": "0"}) == cli.EXIT_USAGE
 
 
+def test_flash_all_rejects_duplicate_images(tmp_path, capsys):
+    """B5: the same --image twice used to claim two slots per stick, exhaust
+    them on one drive and then sit on the full --timeout (3600s default)."""
+    image = tmp_path / "a.iso"
+    image.write_bytes(b"data")
+    same_path_other_spelling = os.path.join(str(tmp_path), ".", "a.iso")
+    rc = cli._cmd_flash_all(
+        {
+            "images": [str(image), same_path_other_spelling],
+            "confirm": "ARM",
+        }
+    )
+    assert rc == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "duplicate --image" in captured.out + captured.err
+
+
+def test_flash_all_distinct_images_are_accepted(tmp_path, capsys):
+    first = tmp_path / "a.iso"
+    second = tmp_path / "b.iso"
+    first.write_bytes(b"data")
+    second.write_bytes(b"data")
+    rc = cli._cmd_flash_all(
+        {"images": [str(first), str(second)], "confirm": "ARM", "dry-run": True}
+    )
+    assert rc == cli.EXIT_OK
+    assert "duplicate" not in capsys.readouterr().out
+
+
 def test_flash_all_flashes_every_image_to_every_drive(
     tmp_path, monkeypatch, capsys
 ):
@@ -1584,6 +1613,33 @@ def test_cross_command_flag_rejected(capsys):
     assert cli.main(["wipe", "--verify"]) == cli.EXIT_USAGE
     out = capsys.readouterr().out
     assert "--verify is not valid for command wipe" in out
+
+
+def test_write_options_validated_before_any_work(capsys):
+    """B12: --filesystem/--partition-scheme/--write-mode are usage errors.
+
+    --filesystem used to be checked only inside run_format(), i.e. after
+    diskpart had already wiped the target, and the other two were silently
+    coerced instead of rejected."""
+    cases = [
+        ("--filesystem", "ext4", "fat32, ntfs, exfat"),
+        ("--partition-scheme", "mbrx", "auto, gpt, mbr"),
+    ]
+    for flag, value, allowed in cases:
+        rc = cli.main(
+            ["flash", "--image", "x.iso", "--drive", "E", flag, value]
+        )
+        assert rc == cli.EXIT_USAGE, flag
+        captured = capsys.readouterr()
+        assert f"{flag} must be one of {allowed}" in captured.out + captured.err
+
+    assert cli._validate_write_opts("flash", {"write-mode": "dd2"}) == (
+        "--write-mode must be one of auto, dd, filecopy"
+    )
+    # D02 spellings advertised by the help text stay accepted.
+    assert cli._validate_write_opts("flash", {"write-mode": "file-copy"}) is None
+    # Commands without these options are unaffected.
+    assert cli._validate_write_opts("list", {"filesystem": "ext4"}) is None
 
 
 def test_conflicting_confirm_and_yes_flash(tmp_path, monkeypatch, capsys):

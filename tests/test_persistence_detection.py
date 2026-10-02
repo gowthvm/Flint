@@ -298,7 +298,9 @@ def test_writer_persistence_dispatches(qapp, monkeypatch, tmp_path):
     from core.writer import UsbWriter
 
     seen = {}
-    monkeypatch.setattr(diskpart, "prepare_partition", lambda n, s, f: "E")
+    monkeypatch.setattr(
+        diskpart, "prepare_partition", lambda n, s, f, t="auto": "E"
+    )
     monkeypatch.setattr(diskpart, "copy_iso_files", lambda a, b, **_kw: None)
     monkeypatch.setattr(
         persistence,

@@ -171,16 +171,11 @@ def decompress_image(path: str) -> Iterator[str]:
             return
         yield extracted
     finally:
-        # Clean up the decompressed temp file, then the temp directory.
-        if extracted is not None:
-            try:
-                os.unlink(extracted)
-            except OSError:
-                pass
-        try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
+        # Clean up whatever the extraction left behind - including on the
+        # error path, where `extracted` is still None but the helper may
+        # have written a partial multi-GiB file (truncated archive, disk
+        # full).  rmtree subsumes both the unlink and the rmdir.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _decompress_zip(zip_path: str, tmp_dir: str) -> str:

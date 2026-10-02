@@ -307,29 +307,39 @@ def write_bytes_retry(
     error_suffix: str = "",
     is_cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Write *data* with automatic retries for transient errors and short writes."""
+    """Write *data* with automatic retries for transient errors and short writes.
+
+    A short write leaves the file pointer advanced by however many bytes did
+    land, so every retry resumes at the first unwritten byte.  Resending the
+    whole buffer instead would duplicate the prefix that is already on the
+    drive and still never write the tail at the right offset.
+    """
     k32 = kernel32()
     last_err = 0
+    offset = 0
+    ok = False
     for attempt in range(max_retries + 1):
         if is_cancelled is not None and is_cancelled():
             raise _Cancelled()
-        buffer = ctypes.create_string_buffer(data)
+        remaining = data[offset:]
+        buffer = ctypes.create_string_buffer(remaining)
         written = ctypes.c_ulong()
         ok = k32.WriteFile(
             handle,
             buffer,
-            len(data),
+            len(remaining),
             ctypes.byref(written),
             None,
         )
-        if ok and written.value == len(data):
-            return
-        if ok and written.value < len(data):
+        if ok:
+            offset += written.value
+            if offset >= len(data):
+                return
             last_err = 0  # short write, no Win32 error
         else:
             last_err = k32.GetLastError()
         if attempt < max_retries and (
-            last_err in TRANSIENT_ERRORS or (ok and written.value < len(data))
+            last_err in TRANSIENT_ERRORS or (ok and offset < len(data))
         ):
             time.sleep(0.5 * (2 ** attempt))
             continue

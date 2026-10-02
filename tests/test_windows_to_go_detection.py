@@ -150,7 +150,7 @@ def test_writer_wtg_dispatches_to_dism(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(
         diskpart,
         "prepare_partition",
-        lambda n, s, f: prepared.append((n, s, f)) or "E",
+        lambda n, s, f, t="auto": prepared.append((n, s, f)) or "E",
     )
     monkeypatch.setattr(
         diskpart,

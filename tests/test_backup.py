@@ -149,7 +149,9 @@ def test_backup_reports_open_failure(tmp_path):
     assert events == [(False, r"could not open \\.\PHYSICALDRIVE8 for read")]
 
 
-def test_backup_flushes_and_closes_after_last_chunk(tmp_path, monkeypatch):
+def test_backup_never_flushes_readonly_drive_handle(tmp_path, monkeypatch):
+    """The drive handle is GENERIC_READ only, where FlushFileBuffers fails
+    with ERROR_ACCESS_DENIED; a real backup must not call it at all."""
     payload = b"\x01" * (64 * 1024 + 7)
     fake = _FakeReads(payload)
     out = tmp_path / "backup.img"
@@ -167,7 +169,8 @@ def test_backup_flushes_and_closes_after_last_chunk(tmp_path, monkeypatch):
     events = _run(worker)
 
     assert events["done"] == [(True, "")]
-    assert flushed == [1001]
+    assert flushed == []
+    assert out.read_bytes() == payload
 
 def test_backup_opens_letterless_drive_exclusively(tmp_path, monkeypatch):
     """B03: a drive with no mounted letters must be opened with

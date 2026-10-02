@@ -3515,16 +3515,19 @@ class MainWindow(QMainWindow):
         busy = self._busy()
         state = self._iso_state()
         # B04: a compressed selection has a path long before it has a
-        # flashable image — gate on the state, not on `path`f
+        # flashable image — gate on the state, not on `path`.
         has_iso = state == "ready"
         has_drive = self._current_drive is not None
         # Flash enabled when not busy and iso + drive selected
         try:
             self._flash_btn.setEnabled((not busy) and has_iso and has_drive)
-            if busy:
-                tip = _MSG_BUSY
-            elif state == "decompressing":
+            # C2: "decompressing" is busy too (the zone's own worker is
+            # running), so the decompression reason must be reported before
+            # the generic busy text or this constant is unreachable.
+            if state == "decompressing":
                 tip = _MSG_DECOMPRESSING
+            elif busy:
+                tip = _MSG_BUSY
             elif state == "failed":
                 tip = _MSG_ARCHIVE_FAILED
             elif not has_iso:
@@ -3650,19 +3653,22 @@ class MainWindow(QMainWindow):
         return current
 
     def _on_flash_clicked(self) -> None:
+        # C2: a still-decompressing selection is busy as well (its worker is
+        # running), but the generic busy refusal hides *why*; check the
+        # state first so the specific message survives.
+        if self._iso_state() == "decompressing":
+            self._progress.set_error(_MSG_DECOMPRESSING)
+            return
         if self._busy():
             self._refuse_busy()
             return
         if self._refuse_if_system_disk(self._current_drive):
             return
-        # B04: gate on the resolve state, not on `path`f A compressed
+        # B04: gate on the resolve state, not on `path`. A compressed
         # selection has a path (the archive itself) long before it has a
         # flashable image, and Ctrl+Return / "Flash again" reach this
         # method even while the Flash button is disabled.
         state = self._iso_state()
-        if state == "decompressing":
-            self._progress.set_error(_MSG_DECOMPRESSING)
-            return
         if state == "failed":
             self._progress.set_error(_MSG_ARCHIVE_FAILED)
             return
@@ -4175,8 +4181,18 @@ class MainWindow(QMainWindow):
         # is the honest "verify was requested but never ran" outcome,
         # which the legacy regression script drives directly (it finishes
         # a write without `_begin_write` ever arming the in-writer verify)
+        # C1: "verify after write" being off is not a verification the user
+        # cancelled — report it with the constant written for that case
+        # instead of the cancelled wording _finish_flash defaults to.
+        verify_requested = self._verify_toggle.isChecked()
         self._finish_flash(
-            True, "", None, skipped_verify=self._verify_toggle.isChecked()
+            True,
+            "",
+            None,
+            skipped_verify=True,
+            skipped_note=(
+                None if verify_requested else _MSG_VERIFY_NOT_REQUESTED
+            ),
         )
 
     def _on_verify_result(

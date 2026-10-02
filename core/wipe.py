@@ -77,9 +77,19 @@ class WipeWorker(QThread):
         # Validate eagerly so a typo never silently defaults to zero-fill.
         _wipe_patterns(method)
         self._canceled = False
+        # L04: exactly one "done" per run (see backup.clone/writer).
+        self._finished = False
 
     def cancel(self) -> None:
         self._canceled = True
+
+    def _emit_finished(self, ok: bool, message: str) -> None:
+        # L04: run()'s outer except used to re-emit after _run_inner had
+        # already reported (e.g. when _unlock_volumes raised afterwards).
+        if self._finished:
+            return
+        self._finished = True
+        self.done.emit(ok, message)
 
     def _open_drive(self) -> int:
         # R5/B03: a letterless stick has no volumes to FSCTL-lock, so the
@@ -145,7 +155,7 @@ class WipeWorker(QThread):
                 self._unlock_volumes(volumes)
         except Exception as exc:
             logger.exception("WipeWorker.run failed")
-            self.done.emit(False, str(exc))
+            self._emit_finished(False, str(exc))
         finally:
             kernel32().SetThreadExecutionState(ES_CONTINUOUS)
 
@@ -158,7 +168,7 @@ class WipeWorker(QThread):
                 raise OSError("unable to determine drive size")
             patterns = _wipe_patterns(self.method)
         except Exception as exc:
-            self.done.emit(False, str(exc))
+            self._emit_finished(False, str(exc))
             kernel32().CloseHandle(handle)
             return
 
@@ -217,20 +227,20 @@ class WipeWorker(QThread):
             # escapes to run() and reports an empty failure message instead
             # of the "cancelled" sentinel the CLI/UI expect.
             logger.info("WipeWorker._run_inner: wipe cancelled mid-retry")
-            self.done.emit(False, "cancelled")
+            self._emit_finished(False, "cancelled")
             return
         except OSError as exc:
-            self.done.emit(False, str(exc))
+            self._emit_finished(False, str(exc))
             return
         finally:
             kernel32().CloseHandle(handle)
 
         if self._canceled:
-            self.done.emit(False, "cancelled")
+            self._emit_finished(False, "cancelled")
             return
         if not self._verify_passed:
             return  # _verify_pass already emitted the failure
-        self.done.emit(True, "")
+        self._emit_finished(True, "")
 
     def _verify_pass(
         self,
@@ -262,7 +272,7 @@ class WipeWorker(QThread):
                     self.verified.emit(
                         False, f"data mismatch at offset {done}"
                     )
-                    self.done.emit(
+                    self._emit_finished(
                         False,
                         "verification failed: "
                         f"data mismatch at offset {done}",
@@ -275,7 +285,7 @@ class WipeWorker(QThread):
         except OSError as exc:
             self._verify_passed = False
             self.verified.emit(False, "read error: " + str(exc))
-            self.done.emit(False, str(exc))
+            self._emit_finished(False, str(exc))
             return
         self.verified.emit(
             True,

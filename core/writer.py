@@ -311,6 +311,7 @@ class UsbWriter(QThread):
                 diskpart.drive_number_from_path(self.drive_path),
                 self.partition_scheme,
                 self.filesystem,
+                self.target_system,
             )
             self.progress.emit(10.0)
             if self._cancel_requested():

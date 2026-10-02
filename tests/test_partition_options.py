@@ -252,6 +252,35 @@ def test_prepare_partition_rejects_bad_filesystem(fake_subprocess):
         diskpart.prepare_partition(1, "gpt", "ext4")
 
 
+def test_prepare_partition_validates_before_running_diskpart(fake_subprocess):
+    """B12: the bad filesystem used to surface from run_format(), after the
+    partition table had already been wiped; a bad scheme or target system
+    was never checked at all."""
+    with pytest.raises(ValueError, match="filesystem"):
+        diskpart.prepare_partition(1, "gpt", "ext4")
+    with pytest.raises(ValueError, match="partition scheme"):
+        diskpart.prepare_partition(1, "mbrx", "fat32")
+    with pytest.raises(ValueError, match="target system"):
+        diskpart.prepare_partition(1, "auto", "fat32", "amiga")
+    assert fake_subprocess == [], "diskpart must not run for a bad option"
+
+
+def test_prepare_partition_resolves_auto_with_target_system(fake_subprocess):
+    """B4: target_system must decide the scheme for partition_scheme=auto."""
+    letter = diskpart.prepare_partition(1, "auto", "fat32", "legacy")
+    assert letter == "E"
+    with open(fake_subprocess[0][2], encoding="utf-8") as f:
+        script = f.read()
+    assert "convert mbr" in script and "convert gpt" not in script
+
+
+def test_build_diskpart_script_honours_target_system():
+    script = diskpart.build_diskpart_script(4, "auto", "legacy")
+    assert "convert mbr" in script
+    script = diskpart.build_diskpart_script(4, "auto", "uefi")
+    assert "convert gpt" in script
+
+
 def test_prepare_partition_surfaces_diskpart_failure(monkeypatch):
     def fail(*args, **kwargs):
         return _FakeResult(stderr="denied", returncode=5)
@@ -394,7 +423,9 @@ def test_writer_filecopy_dispatches_to_diskpart(qapp, monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(
-        diskpart, "prepare_partition", lambda n, s, f: calls.append((n, s, f)) or "E"
+        diskpart,
+        "prepare_partition",
+        lambda n, s, f, t="auto": calls.append((n, s, f, t)) or "E",
     )
     monkeypatch.setattr(
         diskpart,
@@ -408,6 +439,7 @@ def test_writer_filecopy_dispatches_to_diskpart(qapp, monkeypatch, tmp_path):
         r"\\.\PHYSICALDRIVE3",
         write_mode="filecopy",
         partition_scheme="gpt",
+        target_system="legacy",
         filesystem="ntfs",
     )
     modes = []
@@ -422,7 +454,9 @@ def test_writer_filecopy_dispatches_to_diskpart(qapp, monkeypatch, tmp_path):
     assert modes == ["filecopy"]
     assert finished == [(True, "")]
     assert ("Preparing partition", "Copying files") == tuple(phases[:2])
-    assert calls[0] == (3, "gpt", "ntfs")
+    # B4: the writer's target_system must reach prepare_partition (it used
+    # to be dropped, so "auto" was always resolved against "auto").
+    assert calls[0] == (3, "gpt", "ntfs", "legacy")
     assert calls[1] == (plain, "E")
 
 

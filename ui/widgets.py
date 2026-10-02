@@ -853,10 +853,13 @@ class IsoDropZone(QFrame):
         self._archive_pending = False
         if not ok:
             self._archive_failed = True
-            size = DriveDetector.format_size(os.path.getsize(path))
-            self._set_meta(
-                False, f"{size} (compressed) \u00b7 could not decompress"
-            )
+            # C4: the archive can be gone by the time the worker finishes
+            # (cleared, unplugged, temp cleaned up). A raw getsize() here
+            # raised out of the slot, so neither the size nor the error
+            # text below ever reached the user.
+            label = self._size_text(path)
+            prefix = f"{label} (compressed) \u00b7 " if label else ""
+            self._set_meta(False, f"{prefix}could not decompress")
             self._drop_error.setText(
                 last_error or f"Failed to decompress {os.path.basename(path)}"
             )
@@ -864,8 +867,15 @@ class IsoDropZone(QFrame):
             self._drop_timer.start(5000)
             return
         self._decompressed_path = extracted
-        size = DriveDetector.format_size(os.path.getsize(path))
+        size = self._size_text(path)
         self._start_hash_and_analyze(extracted, size)
+
+    def _size_text(self, path: str) -> str:
+        """Human-readable size, or "" when the file is already gone."""
+        try:
+            return DriveDetector.format_size(os.path.getsize(path))
+        except OSError:
+            return ""
 
     def _start_hash_and_analyze(self, hash_path: str, size: str) -> None:
         worker = IsoWorker(hash_path)
@@ -1042,13 +1052,17 @@ class IsoDropZone(QFrame):
         self._hash_finished = True
         self._digest = digest if ok else None
         resolved = self.path or ""
-        size = DriveDetector.format_size(os.path.getsize(resolved))
+        # C3: same hazard as C4 - the file can be gone by the time the hash
+        # finishes, and an unguarded getsize() raised out of this slot, so
+        # hash_done was never emitted and every caller waiting on it hung.
+        label = self._size_text(resolved)
+        prefix = f"{label} \u00b7 " if label else ""
         if ok:
-            self._set_meta(True, f"{size} \u00b7 SHA256 verified")
+            self._set_meta(True, f"{prefix}SHA256 verified")
             self._iso_check.setText("\u2713\ufe0e")
             self._iso_check.setVisible(True)
         else:
-            self._set_meta(False, f"{size} \u00b7 SHA256 failed")
+            self._set_meta(False, f"{prefix}SHA256 failed")
             self._iso_check.setText("\u2715")
             self._iso_check.setVisible(True)
         self.hash_done.emit(path, ok, digest)

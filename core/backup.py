@@ -20,7 +20,6 @@ from core.deviceio import (
     ES_DISPLAY_REQUIRED,
     ES_SYSTEM_REQUIRED,
     drive_size,
-    flush,
     kernel32,
     lock_volumes,
     open_drive,
@@ -96,9 +95,6 @@ class BackupWorker(QThread):
         if result is None:
             raise OSError("read failed after retries")
         return result
-
-    def _flush(self, handle: Any) -> None:
-        flush(handle)
 
     def _free_space(self, directory: str) -> int:
         return shutil.disk_usage(directory).free
@@ -189,7 +185,11 @@ class BackupWorker(QThread):
                 self.eta_seconds.emit(int(remaining))
             if not self._canceled:
                 self.phase.emit("Flushing")
-                self._flush(handle)
+                # The drive handle is read-only (GENERIC_READ only), so
+                # FlushFileBuffers would fail with ERROR_ACCESS_DENIED and
+                # abort the backup; the source is never written to, so there
+                # is nothing to flush on that side.  Only the output file
+                # needs to reach the disk.
                 if out_file is not None:
                     try:
                         os.fsync(out_file.fileno())

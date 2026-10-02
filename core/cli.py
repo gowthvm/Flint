@@ -1571,17 +1571,19 @@ def _cmd_wipe(opts: dict[str, object]) -> int:
     )
     if issue:
         return _result("fail", issue, EXIT_USAGE)
-    if opts.get("dry-run"):
-        _eprint("DRY RUN — would wipe:")
-        _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
-        _eprint(f"  serial: {_serial_of(drive)}")
-        _eprint(f"  method: {opts.get('method', 'zero')!s}")
-        return _result("ok", "dry run — no changes made", EXIT_OK)
+    # Validation first, dry-run second: a dry run must not print (or accept)
+    # a method the real run would reject.
     method = str(opts.get("method", "zero")).lower()
     if method not in WIPE_METHODS:
         return _result(
             "fail", f"--method must be one of {', '.join(WIPE_METHODS)}", EXIT_USAGE
         )
+    if opts.get("dry-run"):
+        _eprint("DRY RUN — would wipe:")
+        _eprint(f"  drive: {drive.get('model') or drive.get('name')} ({drive['physical_path']})")
+        _eprint(f"  serial: {_serial_of(drive)}")
+        _eprint(f"  method: {method}")
+        return _result("ok", "dry run — no changes made", EXIT_OK)
     letters = drive.get("letters") or (
         [drive["letter"]] if drive.get("letter") else []
     )
@@ -1881,6 +1883,20 @@ def _cmd_flash_all(opts: dict[str, object]) -> int:
             "flash-all requires at least one --image <file>",
             EXIT_USAGE,
         )
+    # B5: the same file listed twice was treated as two distinct images, so
+    # the campaign assigned it two slots per stick, exhausted them on a
+    # single drive and then sat on the full --timeout (3600s by default)
+    # before reporting success.  Reject it while it is still a usage error.
+    seen: dict[str, str] = {}
+    for image in images:
+        key = os.path.normcase(os.path.abspath(image))
+        if key in seen:
+            return _result(
+                "fail",
+                f"duplicate --image: {image} (already given as {seen[key]})",
+                EXIT_USAGE,
+            )
+        seen[key] = image
     for image in images:
         if not os.path.isfile(image):
             return _result("fail", f"--image file not found: {image}", EXIT_USAGE)
@@ -2941,6 +2957,46 @@ def _validate_command_opts(command: str, opts: dict[str, object]) -> str | None:
     return None
 
 
+# Commands whose write options can still change what lands on the drive.
+_WRITE_OPTION_COMMANDS = frozenset({"flash", "queue", "flash-all", "deploy"})
+
+# Spellings resolve_write_mode() accepts alongside its canonical tokens.
+_WRITE_MODE_ALIASES = {
+    "raw": "dd",
+    "file-copy": "filecopy",
+    "file copy": "filecopy",
+}
+
+
+def _validate_write_opts(command: str, opts: dict[str, object]) -> str | None:
+    """Reject bad write options before elevation or any disk work.
+
+    B12: --filesystem was validated only inside run_format(), i.e. after
+    diskpart had already wiped the partition table, and --partition-scheme /
+    --write-mode were never validated at all: an unknown value was silently
+    coerced by resolve_partition_scheme()/resolve_write_mode() instead of
+    being reported as a usage error.
+    """
+    if command not in _WRITE_OPTION_COMMANDS:
+        return None
+    from core.diskpart import FILESYSTEMS, SCHEMES, WRITE_MODES
+
+    checks = (
+        ("partition-scheme", SCHEMES),
+        ("filesystem", FILESYSTEMS),
+        ("write-mode", WRITE_MODES),
+    )
+    for name, allowed in checks:
+        if name not in opts:
+            continue
+        value = str(opts[name] if opts[name] is not None else "").strip().lower()
+        if name == "write-mode":
+            value = _WRITE_MODE_ALIASES.get(value, value)
+        if value not in allowed:
+            return f"--{name} must be one of {', '.join(allowed)}"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_cli_stdio()
     global _JSON, _QUIET
@@ -3041,6 +3097,12 @@ def main(argv: list[str] | None = None) -> int:
     invalid = _validate_command_opts(command, opts)
     if invalid:
         _result("fail", invalid, EXIT_USAGE)
+        _eprint(_usage())
+        return EXIT_USAGE
+
+    bad_write_opt = _validate_write_opts(command, opts)
+    if bad_write_opt:
+        _result("fail", bad_write_opt, EXIT_USAGE)
         _eprint(_usage())
         return EXIT_USAGE
 
