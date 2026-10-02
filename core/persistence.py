@@ -19,6 +19,9 @@ import os
 import shutil
 import subprocess
 from collections.abc import Iterator
+from pathlib import Path
+
+from core.paths import atomic_write_text
 
 _GRUB_CONFIGS = (
     "grub/grub.cfg",
@@ -109,9 +112,12 @@ def _patch_boot_configs(root: str, keyword: str) -> int:
     patched = 0
     for path in _iter_configs(root):
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, "r", encoding="utf-8", errors="strict") as f:
                 text = f.read()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # B33: decoding with errors="replace" and writing back would
+            # silently turn every un-decodable byte in a boot config into
+            # U+FFFD. A config we cannot round-trip is left untouched.
             continue
         if path.endswith((".cfg", ".conf")):
             base = os.path.basename(path).lower()
@@ -123,8 +129,9 @@ def _patch_boot_configs(root: str, keyword: str) -> int:
             new_text = text
         if new_text != text:
             try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(new_text)
+                # B33: publish atomically so an interrupted patch cannot
+                # leave a truncated (unbootable) config behind.
+                atomic_write_text(Path(path), new_text)
                 patched += 1
             except OSError:
                 continue

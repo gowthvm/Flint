@@ -87,6 +87,39 @@ def test_patch_syslinux_adds_persistent_keyword():
     assert "quiet persistence" in patched
 
 
+def test_patch_boot_configs_leaves_an_undecodable_config_untouched(tmp_path):
+    grub = tmp_path / "grub.cfg"
+    original = (
+        b"# latin-1 comment: caf\xe9\n"
+        b"menuentry 'Try Ubuntu' {\n"
+        b"    linux /casper/vmlinuz quiet splash\n"
+        b"}\n"
+    )
+    grub.write_bytes(original)
+
+    patched = persistence._patch_boot_configs(str(tmp_path), "persistent")
+
+    assert patched == 0
+    assert grub.read_bytes() == original
+
+
+def test_patch_boot_configs_patches_and_leaves_no_temp_file(tmp_path):
+    grub = tmp_path / "grub.cfg"
+    grub.write_bytes(
+        b"menuentry 'Try Ubuntu' {\n"
+        b"    linux /casper/vmlinuz quiet splash\n"
+        b"}\n"
+    )
+
+    patched = persistence._patch_boot_configs(str(tmp_path), "persistent")
+
+    assert patched == 1
+    assert "persistent" in grub.read_text(encoding="utf-8")
+    assert not [
+        entry.name for entry in tmp_path.iterdir() if entry.name.endswith(".tmp")
+    ]
+
+
 def test_create_persistence_live_overlay(tmp_path):
     root = str(tmp_path) + "\\"
     ok, _ = persistence.create_persistence(
