@@ -77,3 +77,55 @@ def test_short_write_gives_up_with_oserror(monkeypatch):
         assert "short write" in str(exc)
     else:
         raise AssertionError("expected OSError after exhausting retries")
+
+
+class _SeekKernel:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+        self.sleep_calls = []
+
+    def SetFilePointerEx(self, handle, offset, position, method):
+        self.calls += 1
+        return self.results.pop(0)
+
+
+def test_seek_retry_succeeds_on_first_try(monkeypatch):
+    fake = _SeekKernel([True])
+    monkeypatch.setattr(deviceio, "kernel32", lambda: fake)
+    sleep_calls = []
+    monkeypatch.setattr(deviceio.time, "sleep", sleep_calls.append)
+
+    assert deviceio.seek_retry(ctypes.c_void_p(1), 4096, retries=3) is True
+    assert fake.calls == 1
+    assert sleep_calls == []
+
+
+def test_seek_retry_stops_sleeping_after_final_attempt(monkeypatch):
+    fake = _SeekKernel([False, False, False, False])
+    monkeypatch.setattr(deviceio, "kernel32", lambda: fake)
+    sleep_calls = []
+    monkeypatch.setattr(deviceio.time, "sleep", sleep_calls.append)
+
+    assert deviceio.seek_retry(ctypes.c_void_p(1), 4096, retries=3) is False
+    assert fake.calls == 4
+    assert sleep_calls == [0.05, 0.05, 0.05]
+
+
+def test_read_bytes_retry_sleeps_only_between_attempts(monkeypatch):
+    class FakeRead:
+        def __init__(self):
+            self.calls = 0
+
+        def ReadFile(self, handle, buffer, count, read_ptr, overlapped):
+            self.calls += 1
+            return 0
+
+    fake = FakeRead()
+    monkeypatch.setattr(deviceio, "kernel32", lambda: fake)
+    sleep_calls = []
+    monkeypatch.setattr(deviceio.time, "sleep", sleep_calls.append)
+
+    assert deviceio.read_bytes_retry(ctypes.c_void_p(1), 512, retries=2) is None
+    assert fake.calls == 3
+    assert sleep_calls == [0.05, 0.05]

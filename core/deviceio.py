@@ -32,7 +32,6 @@ ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
 TRANSIENT_ERRORS = frozenset({1117, 21, 31, 5, 1167})
-TRANSIENT_SEEK_ERRORS = frozenset({21, 31, 5, 1167})
 
 
 class _Cancelled(Exception):
@@ -194,15 +193,17 @@ def seek(handle: Any, offset: int) -> None:
 def seek_retry(handle: Any, offset: int, retries: int = 3) -> bool:
     """Seek to *offset*, retrying on transient errors.
 
-    Returns ``True`` on success, ``False`` if all attempts fail.
+    Returns ``True`` on success, ``False`` if all attempts fail. A retry delay
+    is only used between attempts; the final failed attempt does not sleep.
     """
-    for _ in range(retries + 1):
+    for attempt in range(retries + 1):
         position = ctypes.c_longlong()
         if kernel32().SetFilePointerEx(
             handle, ctypes.c_longlong(offset), ctypes.byref(position), 0
         ):
             return True
-        time.sleep(0.05)
+        if attempt < retries:
+            time.sleep(0.05)
     return False
 
 
@@ -287,17 +288,6 @@ def read_bytes_retry(
         if attempt < retries:
             time.sleep(0.05)
     return None
-
-
-def write_bytes(handle: Any, data: bytes) -> None:
-    """Write all of *data*; raise OSError on failure or short write."""
-    k32 = kernel32()
-    buffer = ctypes.create_string_buffer(data)
-    written = ctypes.c_ulong()
-    if not k32.WriteFile(handle, buffer, len(data), ctypes.byref(written), None):
-        raise OSError(f"write failed: {k32.GetLastError()}")
-    if written.value != len(data):
-        raise OSError("short write on drive")
 
 
 def write_bytes_retry(
