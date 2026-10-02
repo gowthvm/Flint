@@ -1,5 +1,7 @@
 from core.bootcheck import parse_boot_headers
 
+_ESP_GUID = bytes.fromhex("28732ac1f8f1d211ba4b00a0c93ec93b")
+
 
 def _mbr(signature=True, partition=False):
     data = bytearray(1024)
@@ -26,6 +28,14 @@ def _partition(
     data[base + 4] = ptype
     data[base + 8 : base + 12] = start_lba.to_bytes(4, "little")
     data[base + 12 : base + 16] = sectors.to_bytes(4, "little")
+    return data
+
+
+def _gpt_header(data, entry_count=1, entry_size=128, entries_lba=2):
+    data[512:520] = b"EFI PART"
+    data[512 + 72 : 512 + 80] = entries_lba.to_bytes(8, "little")
+    data[512 + 80 : 512 + 84] = entry_count.to_bytes(4, "little")
+    data[512 + 84 : 512 + 88] = entry_size.to_bytes(4, "little")
     return data
 
 
@@ -129,18 +139,43 @@ def test_garbage_headers_never_report_a_bootable_layout():
 
 
 def test_parse_reports_gpt_efi_system_partition():
-    data = _mbr()
-    data[512:520] = b"EFI PART"
-    data[512 + 80 : 512 + 84] = (1).to_bytes(4, "little")
-    data[512 + 84 : 512 + 88] = (128).to_bytes(4, "little")
-    data[512 + 92 : 512 + 108] = bytes.fromhex(
-        "28732ac1f8f1d211ba4b00a0c93ec93b"
-    )
+    data = bytearray(4096)
+    data[510:512] = b"\x55\xaa"
+    _gpt_header(data, entry_count=4)
+    data[1024 : 1024 + 16] = _ESP_GUID
 
     result = parse_boot_headers(bytes(data))
 
     assert result["gpt"] is True
     assert result["efi_partition"] is True
+
+
+def test_gpt_esp_is_read_from_the_lba_the_header_names():
+    data = bytearray(4096)
+    data[510:512] = b"\x55\xaa"
+    _gpt_header(data, entry_count=4, entries_lba=3)
+    data[1536 + 128 : 1536 + 144] = _ESP_GUID
+
+    result = parse_boot_headers(bytes(data))
+
+    assert result["gpt"] is True
+    assert result["efi_partition"] is True
+
+
+def test_gpt_esp_is_not_scanned_inside_the_header():
+    """B32: the entry array is wherever the header's "partition entries
+    starting LBA" field points (LBA 2 by convention), not 92 bytes into
+    the header itself. A GUID parked in the header's reserved field is
+    not an ESP."""
+    data = bytearray(4096)
+    data[510:512] = b"\x55\xaa"
+    _gpt_header(data, entry_count=4)
+    data[512 + 92 : 512 + 108] = _ESP_GUID
+
+    result = parse_boot_headers(bytes(data))
+
+    assert result["gpt"] is True
+    assert result["efi_partition"] is False
 
 
 def test_parse_reports_warning_for_unmarked_header():

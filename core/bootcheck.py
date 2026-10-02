@@ -31,8 +31,9 @@ def parse_boot_headers(data: bytes) -> dict[str, Any]:
     if report["gpt"] and len(data) >= 512 + 92:
         entry_count = int.from_bytes(data[512 + 80 : 512 + 84], "little")
         entry_size = int.from_bytes(data[512 + 84 : 512 + 88], "little")
-        entries_start = 512 + 92
-        if 128 <= entry_size <= 1024:
+        entries_lba = int.from_bytes(data[512 + 72 : 512 + 80], "little")
+        entries_start = entries_lba * 512
+        if 128 <= entry_size <= 1024 and entries_lba > 1:
             for index in range(min(entry_count, 128)):
                 start = entries_start + index * entry_size
                 end = start + entry_size
