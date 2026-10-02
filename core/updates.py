@@ -140,6 +140,17 @@ def download_and_verify(
         except OSError:
             pass
         return False, "cancelled"
+    if total > 0 and done != total:
+        # A connection that drops mid-transfer surfaces as a clean EOF from
+        # read(), not as an exception. Without this check the partial file
+        # would be reported as a successful download - which is exactly what
+        # happened whenever no expected digest was available to catch it
+        # (the sidecar fetch failed, or the release shipped no .sha256).
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, f"download incomplete ({done:,} of {total:,} bytes)"
     hexdigest = digest.hexdigest()
     if expected_sha256 and hexdigest != expected_sha256.lower():
         try:

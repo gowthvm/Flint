@@ -4831,7 +4831,8 @@ class MainWindow(QMainWindow):
         # T5: only claim verification when a digest actually exists - the
         # release may ship no flint.exe.sha256 asset, or the sidecar fetch
         # may have failed, and download_and_verify skips the comparison for
-        # expected_sha256=None while still returning ok=True.
+        # expected_sha256=None while still returning ok=True for a complete
+        # stream (a short stream is still rejected on its Content-Length).
         self._pending_update_verified = digest is not None
         worker.progress.connect(self._on_update_download_progress)
         worker.finished_download.connect(

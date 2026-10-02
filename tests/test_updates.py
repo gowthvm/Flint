@@ -175,6 +175,81 @@ def test_download_and_verify_network_failure_removes_file(
     assert not dest.exists()
 
 
+def test_download_and_verify_rejects_truncated_stream_without_digest(
+    tmp_path, monkeypatch
+):
+    """A dropped connection reads as EOF, not as an error.
+
+    With no expected digest (missing sidecar, or the sidecar fetch failed)
+    the short stream used to be reported as a successful download of a
+    partial executable.
+    """
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        _fake_urlopen(
+            b"half of it", headers={"Content-Length": str(10 * 1024 * 1024)}
+        ),
+    )
+    dest = tmp_path / "flint.exe"
+
+    ok, message = updates.download_and_verify(
+        "https://example.test/flint.exe", dest, None
+    )
+
+    assert not ok
+    assert "incomplete" in message
+    assert not dest.exists()
+
+
+def test_download_and_verify_rejects_truncated_stream_even_with_digest(
+    tmp_path, monkeypatch
+):
+    """The digest of the bytes that arrived is not proof they are all here."""
+    import urllib.request
+
+    payload = b"truncated"
+    digest = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        _fake_urlopen(payload, headers={"Content-Length": str(len(payload) + 1)}),
+    )
+    dest = tmp_path / "flint.exe"
+
+    ok, message = updates.download_and_verify(
+        "https://example.test/flint.exe", dest, digest
+    )
+
+    assert not ok
+    assert "incomplete" in message
+    assert not dest.exists()
+
+
+def test_download_and_verify_accepts_complete_stream_without_digest(
+    tmp_path, monkeypatch
+):
+    """No digest must not mean 'reject everything' - only short reads."""
+    import urllib.request
+
+    payload = b"flint-exe-bytes" * 64
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        _fake_urlopen(payload, headers={"Content-Length": str(len(payload))}),
+    )
+    dest = tmp_path / "flint.exe"
+
+    ok, _digest = updates.download_and_verify(
+        "https://example.test/flint.exe", dest, None
+    )
+
+    assert ok
+    assert dest.read_bytes() == payload
+
+
 def test_sidecar_digest_url():
     assert (
         updates.sidecar_digest_url(RELEASE)
