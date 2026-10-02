@@ -1,8 +1,10 @@
 """Tests for core.log — logging setup."""
 
 import logging
+import logging.handlers
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,10 +19,35 @@ def test_setup_logging_returns_logger(tmp_path, monkeypatch):
 
 
 def test_setup_logging_creates_log_file(tmp_path, monkeypatch):
+    """setup_logging must actually attach a rotating file handler that
+    receives records — the old version of this test asserted nothing and
+    passed no matter what."""
     monkeypatch.setattr(os, "environ", {**os.environ, "APPDATA": str(tmp_path)})
-    setup_logging("flint_test_file", "INFO")
-    # The function may or may not create the dir depending on existing state
-    # Just verify it doesn't crash
+    name = "flint_test_file"
+    logger = logging.getLogger(name)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    try:
+        setup_logging(name, "INFO")
+
+        files = [
+            h
+            for h in logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+        ]
+        assert files, "setup_logging must attach a rotating file handler"
+        assert files[0].baseFilename.endswith(f"{name}-startup.log")
+
+        logger.info("file handler marker")
+        for handler in logger.handlers:
+            handler.flush()
+        logged = Path(files[0].baseFilename).read_text(encoding="utf-8")
+        assert "file handler marker" in logged
+    finally:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
 
 
 def test_setup_logging_idempotent(tmp_path, monkeypatch):
