@@ -4913,12 +4913,25 @@ class MainWindow(QMainWindow):
         settings.set_many(last_update_check=time.time())
         worker = UpdateCheckWorker()
         self._update_checker = worker
-        worker.finished_check.connect(self._on_auto_update_check_done)
+        # L37: hand the worker to the handler so it can be retired, exactly
+        # like the manual check above - the signal is emitted as the last
+        # statement of run(), so the handler must not drop the reference.
+        worker.finished_check.connect(
+            lambda ok, msg, rel, w=worker: self._on_auto_update_check_done(
+                ok, msg, rel, w
+            )
+        )
         worker.start()
 
     def _on_auto_update_check_done(
-        self, ok: bool, message: str, release: object
+        self,
+        ok: bool,
+        message: str,
+        release: object,
+        worker: QThread | None = None,
     ) -> None:
+        if worker is not None:
+            self._retire(worker)
         self._update_checker = None
         if not ok:
             return
