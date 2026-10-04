@@ -13,6 +13,7 @@ hardware or volume is touched.
 import ctypes
 import logging
 import sys
+import threading
 import types
 
 import pytest
@@ -527,3 +528,36 @@ def test_wmi_detector_emits_exact_size_bytes(monkeypatch):
     assert result[0]["size_gb"] == 8
     assert result[0]["physical_path"] == r"\\.\PHYSICALDRIVE1"
     assert result[0]["serial"] == "SN-FAKE-1"
+
+
+def test_drive_poller_keeps_interruption_requested_before_start():
+    scans = []
+    poller = drives.DrivePoller(
+        types.SimpleNamespace(list_removable_drives=lambda: scans.append([])),
+        60_000,
+    )
+
+    poller.requestInterruption()
+    poller.start()
+
+    assert poller.wait(1000)
+    assert scans == []
+
+
+def test_drive_poller_interruption_wakes_waiting_thread():
+    scanned = threading.Event()
+
+    def scan():
+        scanned.set()
+        return []
+
+    poller = drives.DrivePoller(
+        types.SimpleNamespace(list_removable_drives=scan),
+        60_000,
+    )
+
+    poller.start()
+    assert scanned.wait(5)
+    poller.requestInterruption()
+
+    assert poller.wait(1000)

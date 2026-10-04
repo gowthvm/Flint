@@ -1,6 +1,7 @@
 """Shared test fixtures for the Flint test suite."""
 
 import sys
+import time
 
 import pytest
 
@@ -82,6 +83,43 @@ def _isolated_app_dir(tmp_path, monkeypatch):
     app_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(paths, "APP_DIR", app_dir)
     return app_dir
+
+
+@pytest.fixture(autouse=True)
+def _join_drive_pollers(monkeypatch):
+    """Stop and join every real drive poller started by a test.
+
+    Window helpers request interruption but do not wait for the QThread.
+    Without joining, COM-backed WMI polling can outlive its test and overlap
+    unrelated worker threads in later tests.
+    """
+    from core.drives import DrivePoller
+
+    started = []
+    original_start = DrivePoller.start
+
+    def track_start(poller, *args, **kwargs):
+        started.append(poller)
+        return original_start(poller, *args, **kwargs)
+
+    monkeypatch.setattr(DrivePoller, "start", track_start)
+    yield
+
+    unjoined = []
+    for poller in reversed(started):
+        deadline = time.monotonic() + 1.0
+        while (
+            not poller.isRunning()
+            and not poller.isFinished()
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.001)
+        if poller.isRunning():
+            poller.requestInterruption()
+        if not poller.wait(6000):
+            unjoined.append(poller)
+    if unjoined:
+        pytest.fail(f"{len(unjoined)} DrivePoller thread(s) did not stop")
 
 
 @pytest.fixture(autouse=True)

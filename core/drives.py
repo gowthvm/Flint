@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import threading
 import winreg
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -29,9 +30,12 @@ class DrivePoller(QThread):
         self._interval_ms = interval_ms
         self._scan_requested = False
         self._suspended = False
+        self._stop_requested = threading.Event()
+        self._wake_event = threading.Event()
 
     def request_scan(self) -> None:
         self._scan_requested = True
+        self._wake_event.set()
 
     def suspend(self) -> None:
         """Pause polling while a drive is being written/verified/wiped.
@@ -41,21 +45,38 @@ class DrivePoller(QThread):
         while busy anyway.
         """
         self._suspended = True
+        self._wake_event.set()
 
     def resume(self) -> None:
         self._suspended = False
+        self._wake_event.set()
+
+    def requestInterruption(self) -> None:
+        self._stop_requested.set()
+        self._wake_event.set()
+        super().requestInterruption()
+
+    def _wait_for_next_scan(self) -> None:
+        self._wake_event.wait(self._interval_ms / 1000)
+        self._wake_event.clear()
 
     def run(self) -> None:
+        if self._stop_requested.is_set():
+            return
         try:
             pythoncom.CoInitialize()
         except Exception:
             logger.exception("DrivePoller: CoInitialize failed")
             return
         try:
-            while not self.isInterruptionRequested():
+            while (
+                not self._stop_requested.is_set()
+                and not self.isInterruptionRequested()
+            ):
                 if self._suspended:
-                    self.msleep(self._interval_ms)
+                    self._wait_for_next_scan()
                     continue
+                self._scan_requested = False
                 try:
                     drives = self._detector.list_removable_drives()
                 except Exception:
@@ -65,7 +86,7 @@ class DrivePoller(QThread):
                 if self._scan_requested:
                     self._scan_requested = False
                     continue
-                self.msleep(self._interval_ms)
+                self._wait_for_next_scan()
         finally:
             pythoncom.CoUninitialize()
 
