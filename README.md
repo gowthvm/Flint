@@ -481,18 +481,6 @@ Flint/
 - Report issues and open pull requests on GitHub:
   https://github.com/gowthvm/Flint
 
-## Code Signing Policy
-
-Free code signing provided by SignPath.io, certificate by SignPath Foundation.
-
-Flint is an open-source project applying for the SignPath Foundation code-signing program. If accepted, official release binaries will be signed through SignPath Foundation infrastructure using Authenticode.
-
-Only official Flint release binaries are eligible for signing. Development builds and unofficial binaries are not represented as official signed releases.
-
-The source code used to build Flint is publicly available in this repository, and official releases are published through the project's GitHub Releases page.
-
-For more information about the SignPath Foundation program, see the [SignPath Foundation](https://signpath.org/) website.
-
 ## License
 
 [MIT License](LICENSE) — Copyright (c) 2026 Gowtham G.K
